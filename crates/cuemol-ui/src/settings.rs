@@ -558,7 +558,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut panel = SettingsPanel::default();
         let mut preferences = Preferences::default();
-        let mut frame = |panel: &mut SettingsPanel, preferences: &mut Preferences| {
+        let frame = |panel: &mut SettingsPanel, preferences: &mut Preferences| {
             let _ = ctx.run(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(

@@ -1901,7 +1901,7 @@ test('Tauri animation resets only declared defaults and keeps generic field type
   await name.fill('true');await name.press('Tab');
   expect(await name.evaluate(input=>input.type)).toBe('text');
   await expect(name).toHaveValue('true');
-  await expect(page.getByText('Reset all to default',{exact:true})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'Reset all to default',exact:true})).toBeDisabled();
   await expect(page.getByLabel('Animation reset startValue',{exact:true})).toHaveCount(0);
   const start=page.getByLabel('Animation property startValue',{exact:true});
   await expect(start).toHaveValue('-2');await start.fill('-5');await start.press('Tab');
@@ -1919,7 +1919,7 @@ test('Tauri animation resets only declared defaults and keeps generic field type
   await page.keyboard.press('Escape');await page.mouse.up();
   await expect(quadric).toHaveValue('0');await expect(reset).toBeDisabled();
   await quadric.fill('0.2');await quadric.press('Tab');await expect(reset).toBeEnabled();
-  await page.getByText('Reset all to default',{exact:true}).click();await expect(reset).toBeDisabled();
+  await page.getByRole('button',{name:'Reset all to default',exact:true}).click();await expect(reset).toBeDisabled();
   await expect(page.getByLabel('Animation property name',{exact:true})).toHaveValue('true');
   await expect(page.getByLabel('Animation property startValue',{exact:true})).toHaveValue('-5');
   await expect(page.getByLabel('Animation property rend',{exact:true})).toHaveValue('target');
@@ -2249,5 +2249,48 @@ test('Tauri settings categories search, cancel, persist tools, and check updates
   await open();await category('Rendering').click();
   await expect(dialog.getByLabel('ffmpeg Executable',{exact:true})).toHaveValue('tools/movie');
   await page.screenshot({path:testInfo.outputPath('settings-categories.png')});
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri catalog keeps property flags, mock resets, and sample edits local',async({page},testInfo)=>{
+  const errors=await openShell(page,{}, {plugins:{catalog:true}});
+  await page.locator('[data-activity="catalog"]').click();
+  const catalog=page.locator('[data-activity-panel="catalog"]');
+  await expect(catalog).toBeVisible();
+  for(const name of ['Catalog 1','Catalog 2','Catalog 3'])await expect(catalog.getByRole('button',{name,exact:true})).toBeVisible();
+  const before=await page.evaluate(()=>window.__shellCalls.length);
+  const label=catalog.getByRole('textbox',{name:'Property Label',exact:true});
+  await label.fill('chain A');
+  await expect(catalog.locator('[data-property="Property Label"]')).toHaveClass(/modified/);
+  await catalog.getByRole('button',{name:'Reset Property Label',exact:true}).click();
+  await expect(catalog.locator('[data-property="Property Label"]')).not.toHaveClass(/modified/);
+  await expect(label).toHaveValue('chain A');
+  await catalog.getByRole('checkbox',{name:'Property Visible',exact:true}).check();
+  await expect(catalog.locator('[data-property="Property Visible"]')).toHaveClass(/modified/);
+  await expect(catalog.getByRole('checkbox',{name:'Mock Visible',exact:true})).not.toBeChecked();
+  await catalog.getByRole('button',{name:'Reset all to default',exact:true}).click();
+  await expect(catalog.getByRole('checkbox',{name:'Mock Visible',exact:true})).toBeChecked();
+  await expect(catalog.getByRole('spinbutton',{name:'Mock Width',exact:true})).toHaveValue('1');
+  await expect(catalog.locator('[data-property="Property Visible"]')).toHaveClass(/modified/);
+  await expect(catalog.getByRole('button',{name:'Reset all to default',exact:true})).toBeDisabled();
+  await catalog.getByRole('checkbox',{name:'GatedControl (checkbox + control, one property)',exact:true}).uncheck();
+  await expect(catalog.getByRole('spinbutton',{name:'Gated value',exact:true})).toBeDisabled();
+  await catalog.getByRole('checkbox',{name:'GatedControl (checkbox + control, one property)',exact:true}).check();
+  const drag=catalog.getByRole('spinbutton',{name:'Gated value',exact:true});
+  await drag.scrollIntoViewIfNeeded();const rect=await drag.boundingBox();
+  await page.mouse.move(rect.x+rect.width/2,rect.y+rect.height/2);await page.mouse.down();await page.mouse.move(rect.x+rect.width/2+15,rect.y+rect.height/2,{steps:5});await page.mouse.up();
+  await expect(drag).not.toHaveValue('1');
+  await catalog.getByRole('option',{name:'Water',exact:true}).click();
+  await expect(catalog.getByRole('option',{name:'Water',exact:true})).toHaveAttribute('aria-selected','true');
+  const mutation=await page.evaluate(before=>window.__shellCalls.slice(before).filter(call=>call.command==='inspector_request'||call.command==='set_preferences'||call.command==='update_renderer'),before);
+  expect(mutation).toEqual([]);
+  await page.locator('[data-activity="explorer"]').click();await expect(catalog).toBeHidden();
+  await page.locator('[data-activity="catalog"]').click();await expect(label).toHaveValue('chain A');
+  for(const name of ['Catalog 1','Catalog 2','Catalog 3'])await expect(catalog.getByRole('button',{name,exact:true})).toBeInViewport();
+  await catalog.getByRole('button',{name:'Catalog 1',exact:true}).click();
+  await expect(catalog.getByRole('button',{name:'Catalog 1',exact:true})).toHaveAttribute('aria-expanded','false');
+  await catalog.getByRole('button',{name:'Catalog 1',exact:true}).click();
+  await page.screenshot({path:testInfo.outputPath('catalog.png')});
   expect(errors).toEqual([]);
 });

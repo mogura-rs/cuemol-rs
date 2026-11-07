@@ -829,7 +829,8 @@ impl App {
             .show(ctx, |ui| {
                 shell::header(ui, activity.title());
                 if activity == Activity::Catalog {
-                    cuemol_ui::catalog::show(ui);
+                    self.catalog.show(ui, &self.state, self.revision);
+                    self.ui_rects.extend(self.catalog.rects.clone());
                     return;
                 }
                 if activity == Activity::Agent {

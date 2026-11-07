@@ -1,0 +1,37 @@
+[data-activity-panel="catalog"] {display:flex;flex-direction:column;gap:5px;height:calc(100% - 34px);min-height:0;overflow:hidden;}
+.catalog-pane {display:flex;flex:1;flex-direction:column;min-height:0;overflow:clip;border-bottom:1px solid var(--border);}
+.catalog-pane.is-collapsed {flex:0 0 auto;}
+.catalog-pane-toggle {flex:none;text-align:left;padding:6px;font-weight:600;cursor:pointer;height:28px;}
+.catalog-pane-toggle::before {content:"▾ ";}
+.catalog-pane-toggle[aria-expanded="false"]::before {content:"▸ ";}
+.catalog-scroll {flex:1;min-height:0;overflow:auto;padding:6px;min-width:0;}
+.catalog-group {min-width:0;margin:4px 0 12px;padding:6px;border:1px solid var(--border);}
+.catalog-group legend {font-weight:600;max-width:100%;}
+.catalog-field {margin:6px 0;min-width:0;}
+.catalog-field > label {display:block;margin-bottom:3px;}
+.catalog-field input:not([type="range"]):not([type="color"]),.catalog-field select,.catalog-field textarea {width:100%;min-width:0;box-sizing:border-box;height:22px;}
+.catalog-field textarea {height:auto;min-height:22px;max-height:132px;resize:vertical;}
+.catalog-field input[aria-invalid="true"] {border-color:#d04b4b;}
+.catalog-number {display:flex;align-items:center;gap:3px;}
+.catalog-number input {height:20px;}
+.catalog-number span {flex:none;}
+.catalog-field input[type="range"] {width:100%;}
+.catalog-check {display:flex;align-items:center;gap:5px;margin:5px 0;}
+.catalog-aligned .catalog-field {display:grid;grid-template-columns:70px minmax(0,1fr);gap:6px;align-items:center;}
+.catalog-list {display:flex;flex-direction:column;}
+.catalog-list button {text-align:left;}
+.catalog-list [aria-selected="true"],.catalog-group [aria-pressed="true"] {background:var(--selection);}
+.catalog-property {border-left:2px solid transparent;padding-left:4px;margin:5px 0 10px;}
+.catalog-property.modified {border-left-color:var(--accent);}
+.catalog-property-heading {display:flex;justify-content:space-between;align-items:center;gap:4px;}
+.catalog-property-heading button {padding:0 5px;}
+.catalog-property > .catalog-field > label {display:none;}
+.catalog-property > .catalog-check {font-size:0;}
+.catalog-property .catalog-check input {font-size:initial;}
+.catalog-mode {display:flex;gap:4px;margin-bottom:5px;}
+.catalog-minimal {border-color:transparent;background:transparent;}
+.catalog-selection-controls {display:flex;justify-content:flex-end;}
+[data-activity-panel="catalog"].activity-inactive,.catalog-scroll[hidden] {display:none;}
+
+.catalog-time-axis {display:flex;flex-direction:column;min-width:0;gap:2px;}
+.catalog-time-axis span {font-size:10px;color:var(--text-muted);}

@@ -179,9 +179,12 @@ function attachCueMolNumericDrag(input, label, row, commit, owner = cueMolProper
       finally {
         if (cueMolNumericDrag === drag) cueMolNumericDrag = null;
         if (drag.moved) {
-          inspector.source = null;
-          renderShell();
-          void renderViewport();
+          if (owner.onFinish) owner.onFinish(mode);
+          else {
+            inspector.source = null;
+            renderShell();
+            void renderViewport();
+          }
         } else if (mode === 'commit' && event.target === input) { input.focus(); input.select(); }
       }
       })();

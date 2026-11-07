@@ -237,7 +237,7 @@ impl GuiApplication {
             .show(ctx, |ui| {
                 shell::header(ui, activity.title());
                 if activity == Activity::Catalog {
-                    cuemol_ui::catalog::show(ui);
+                    self.catalog.show(ui, &self.state, self.snapshot_revision);
                     return;
                 }
                 if activity == Activity::Agent {
@@ -681,7 +681,9 @@ mod tests {
             if accept {
                 harness.get_by_label("Component Catalog").click();
                 harness.run();
-                assert!(harness.query_by_label("Forms").is_some());
+                for name in ["Catalog 1", "Catalog 2", "Catalog 3"] {
+                    assert!(harness.query_by_label(name).is_some());
+                }
             }
             drop(harness);
             assert_eq!(app.state.plugin_enabled("mdtools"), accept);

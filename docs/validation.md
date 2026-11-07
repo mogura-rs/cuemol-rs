@@ -1,5 +1,29 @@
 # Validation evidence
 
+## Component Catalog examples
+
+The native and browser frontends share three collapsible Catalog panes. Tauri
+exposes the corresponding form, list and property examples. Controls include
+password/invalid/disabled fields, numeric drags, time/vector editing, selection
+builders, color, sliders, gated controls, tree/list rows, segments and radio
+groups. Sample values remain local to the gallery. Editing a property to its
+default value still marks it modified; only Reset clears that flag. The isolated
+property rows and the mock Inspector use independent sample state.
+
+Shared property/reset and scene-isolation checks pass. All 209 native GUI tests
+pass, and the Linux plugin scenario opens the real Catalog window without
+changing scene objects. Six WebGL/WebGPU plugin/category/Catalog cases pass.
+The full Tauri DOM run passed 61 cases and exposed two ambiguous accessible
+selectors after the gallery grew. Explicit pane names and visible reset-button
+selection fix those failures; the two affected cases pass. The Tauri gallery
+checks numeric dragging, gating, local property flags, separate mock resets,
+list selection, pane collapse and activity-switch persistence. Screenshots from
+the native window and Tauri DOM were inspected.
+
+The previous usage guide described only a generic forms/lists/properties sample;
+it now describes the three panes and sample-state/reset behavior. Remaining
+dialog comparisons are tracked in the implementation checklist.
+
 ## Shared settings categories and native Console access
 
 Native egui and the browser share the category tree and its settings controls;
@@ -52,8 +76,7 @@ it now updates the shared configuration, invalidates stale drafts and survives
 reload. A layout regression inherited a horizontal layout in both columns;
 explicit vertical layouts and a bounded-column test keep controls on screen.
 The reference blendpng path is intentionally replaced by the existing built-in
-composition; the native/browser help now states that behavior. Full component
-catalog and remaining dialog comparisons are still open.
+composition; the native/browser help now states that behavior. Remaining dialog comparisons are still open.
 
 
 ## Shared Agent runtime and Tauri conversation interface

@@ -650,7 +650,11 @@ PyMOL and ChimeraX choices remain stored while Console is disabled. Action
 Library remains available. Disabling MD Tools stops playback and hides its tab
 without deleting loaded trajectories. A hidden active tab returns to Output,
 and a hidden sidebar activity returns to Explorer. Scene Undo/Redo retains these
-preferences. The Component Catalog demonstrates form, list and property controls.
+preferences. The Component Catalog contains three independently scrolling, collapsible panes.
+Its form, list and property examples edit local sample values. Numeric drags,
+time/vector fields, selection builders, disabled controls and property reset
+flags can be inspected without changing a scene. The isolated property rows and
+the mock Inspector retain separate values; only Reset clears a modified flag.
 
 ### Image rendering
 

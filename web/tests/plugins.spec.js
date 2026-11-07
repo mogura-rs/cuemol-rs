@@ -96,3 +96,31 @@ for(const backend of ['webgl','webgpu'])test(`Settings categories ${backend} sha
   await page.screenshot({path:testInfo.outputPath('settings-search.png')});
   expect(errors).toEqual([]);
 });
+
+for(const backend of ['webgl','webgpu'])test(`Component Catalog ${backend} has three independent sample panes`,async({page},testInfo)=>{
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  await page.addInitScript(()=>localStorage.setItem('cuemol.config','plugins:catalog:enabled\ttrue\n'));
+  await page.goto(`./?renderer=${backend}`);
+  await expect.poll(async()=>(await status(page))?.scene.sceneId,{timeout:60000}).toBeGreaterThan(0);
+  const before=(await status(page)).scene;
+  await click(page,'Component Catalog');
+  for(const name of ['Catalog 1','Catalog 2','Catalog 3'])expect((await status(page)).ui.rects[name]).toHaveLength(4);
+  const revealSample=async(pane,key)=>{
+    for(let attempt=0;attempt<20;attempt++){
+      const rects=(await status(page)).ui.rects;
+      if(rects[key]?.[3]>12)return;
+      const [x,y,w,h]=rects[`Catalog ${pane} content`];
+      await page.mouse.move(x+w/2,y+h/2);await page.mouse.wheel(0,120);await present(page);
+    }
+    throw new Error(`Catalog field not visible: ${key}`);
+  };
+  await revealSample(3,'Catalog property Visible');await click(page,'Catalog property Visible');await click(page,'Catalog reset Visible');
+  await revealSample(1,'Catalog gate');await click(page,'Catalog gate');
+  await click(page,'Catalog gate');
+  await revealSample(2,'Catalog list Water');await click(page,'Catalog list Water');
+  await page.screenshot({path:testInfo.outputPath('catalog.png')});
+  expect((await status(page)).scene).toEqual(before);
+  await click(page,'Explorer');await click(page,'Component Catalog');
+  for(const name of ['Catalog 1','Catalog 2','Catalog 3'])expect((await status(page)).ui.rects[name]).toHaveLength(4);
+  expect(errors).toEqual([]);
+});

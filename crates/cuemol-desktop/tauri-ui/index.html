@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./actions.css">
     <link rel="stylesheet" href="./agent.css">
+    <link rel="stylesheet" href="./catalog.css">
     <script src="./shell.js" defer></script>
     <script src="./selection.js" defer></script>
     <script src="./actions.js" defer></script>
@@ -17,6 +18,7 @@
     <script src="./view.js" defer></script>
     <script src="./agent.js" defer></script>
     <script src="./app.js" defer></script>
+    <script src="./catalog.js" defer></script>
   </head>
   <body>
     <div class="app-shell">
@@ -428,11 +430,7 @@
             </div>
             <div id="agent-status" class="agent-status" role="status"></div>
           </section>
-          <section class="action-panel activity-inactive" data-activity-panel="catalog">
-            <details open><summary>Forms</summary><label>Text<input value="Example" /></label><label><input type="checkbox" checked />Enabled</label><label>Number<input type="number" min="0" max="100" value="12" /></label><label>Choice<select><option>First</option><option>Second</option></select></label><button disabled>Disabled</button></details>
-            <details open><summary>Lists</summary><details open><summary>Molecule</summary><div>Renderer</div></details></details>
-            <details open><summary>Properties</summary><label>Name<input value="Example" /></label><label>Color<input type="color" value="#aaddff" /></label><label>Opacity<input type="range" min="0" max="100" value="100" /></label><label>Read only<input value="Molecule" readonly /></label></details>
-          </section>
+          <section class="action-panel activity-inactive" data-activity-panel="catalog"></section>
           <section class="action-panel" data-activity-panel="actions">
             <div class="action-history-pane">
               <h2>History</h2>
