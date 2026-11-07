@@ -5,6 +5,7 @@ mod clipboard;
 mod console;
 mod input;
 mod loading;
+mod morph;
 mod navigation;
 use cuemol_command::navigation::{AtomHit, Navigation, Tool as ViewportTool};
 mod panels;
@@ -72,6 +73,7 @@ enum Event {
         Result<Option<cuemol_desktop_core::GuiFileOpenMetadata>, String>,
     ),
     CompanionFile(u64, web_sys::File),
+    MorphFiles(u64, Vec<web_sys::File>),
     CameraFile(u64, web_sys::File, String, Option<String>),
     SourceFinished(u64),
     SourceError(u64, String),
@@ -139,6 +141,16 @@ pub fn open_files_with_options(files: js_sys::Array) -> Result<(), JsValue> {
 #[wasm_bindgen]
 pub fn choose_companion_file(file: web_sys::File, generation: f64) {
     enqueue(Event::CompanionFile(generation as u64, file));
+}
+
+#[wasm_bindgen]
+pub fn add_morph_files(files: js_sys::Array, generation: f64) -> Result<(), JsValue> {
+    let files = files
+        .iter()
+        .map(|file| file.dyn_into::<web_sys::File>())
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    enqueue(Event::MorphFiles(generation as u64, files));
+    Ok(())
 }
 
 #[wasm_bindgen]
@@ -325,6 +337,7 @@ struct App {
     source_queue: VecDeque<loading::Source>,
     source_options: Option<loading::PendingOptions>,
     source_setup: Option<cuemol_desktop_core::GuiRendererSetup>,
+    source_morph: Option<Rc<RefCell<morph::Import>>>,
     source_target: Option<cuemol_desktop_core::GuiFileRendererTarget>,
     source_active: bool,
     source_generation: u64,
@@ -346,6 +359,8 @@ struct App {
     show_superposition: bool,
     superposition: cuemol_ui::superposition::SuperpositionDialog,
     show_secondary: bool,
+    show_morph: bool,
+    morph_editor: cuemol_ui::morph::MorphDialog,
     secondary: cuemol_ui::secondary::SecondaryDialog,
     interaction: cuemol_ui::interaction::InteractionDialog,
     show_help: bool,
@@ -545,6 +560,7 @@ impl App {
             source_queue: VecDeque::new(),
             source_options: None,
             source_setup: None,
+            source_morph: None,
             source_target: None,
             source_active: false,
             source_generation: 0,
@@ -566,6 +582,8 @@ impl App {
             show_superposition: false,
             superposition: cuemol_ui::superposition::SuperpositionDialog::default(),
             show_secondary: false,
+            show_morph: false,
+            morph_editor: cuemol_ui::morph::MorphDialog::default(),
             secondary: cuemol_ui::secondary::SecondaryDialog::default(),
             interaction: Default::default(),
             pending_close: None,
@@ -1018,6 +1036,7 @@ impl App {
                         self.source_pdb = None;
                         self.source_batch = None;
                         self.source_setup = None;
+                        self.source_morph = None;
                         self.source_target = None;
                         self.source_options = None;
                         self.busy = false;
@@ -1031,7 +1050,11 @@ impl App {
                         if self.source_pdb.is_some() {
                             self.source_queue.clear();
                         }
-                        self.message = error;
+                        if self.source_morph.is_some() {
+                            self.morph_import_error(error);
+                        } else {
+                            self.message = error;
+                        }
                     }
                 }
                 Event::CameraFile(generation, file, xml, replace) => {
@@ -1044,6 +1067,7 @@ impl App {
                         self.apply_prepared(name, file);
                     }
                 }
+                Event::MorphFiles(generation, files) => self.queue_morph_files(generation, files),
                 Event::Profile(generation, name, bytes) => {
                     if self.current_source(generation) {
                         self.apply_profile(&name, &bytes);
@@ -1605,6 +1629,7 @@ impl eframe::App for App {
         self.new_renderer_ui(ctx);
         self.surface_ui(ctx);
         self.secondary_ui(ctx);
+        self.morph_ui(ctx);
         self.molecule_edit_ui(ctx);
         self.timeline_ui(ctx);
         self.rebuild();

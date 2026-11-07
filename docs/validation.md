@@ -1,5 +1,55 @@
 # Validation evidence
 
+## Explicit Morph conversion and frame editing
+
+Native and browser windows now share a dedicated Morph animation tool; Tauri
+provides the corresponding controls. Opening the form selects the first eligible
+molecule without changing the scene. Conversion is explicit. The frame list
+protects `(this)`, inserts after the selected row or appends without a selection,
+and clears selection after deletion. Add mol excludes existing MorphMol objects
+and objects outside the active scene. PDB/ENT batch import accepts gzip files,
+records each successful addition separately and stops at the first error while
+retaining earlier additions. Errors stay in the form, and Close retains edits.
+Name-column resizing and its saved width remain available.
+
+The core audit also found that adding a frame to an uninitialized molecule omitted
+its base coordinates, while explicit conversion left its runtime class as
+MolCoord until scene serialization. Both paths now initialize the protected base
+and update the class immediately. Existing object and renderer IDs remain stable.
+The command catalog incorrectly promised a new object UID; that description now
+matches the Rust implementation. Preserving IDs is a deliberate difference from
+the reference service, which replaces the object during conversion. Unnamed
+object-source frames now inherit their source object's name instead of `frame`.
+Native workspace rows, camera visibility entries and the shared scene-state API
+also now report the actual molecule class; their fixed MolCoord labels hid the
+conversion in the native and browser object trees.
+
+Browser PDB parsing uses the existing worker and PreparedFile boundary without
+creating a temporary scene object. Import cursors retain ordered insertion across
+files. Dialog generation, scene, target and revision checks discard results after
+closure, replacement or another edit. Tauri supplies an expected scene to its
+model requests and rejects stale targets before mutation. Existing callers that
+omit that optional field retain their lower-level morph command behavior.
+
+Validation: nine prepared-file tests, seven command-option tests, 224 native model
+tests and 193 Tauri model tests pass. Five existing Tauri tests remain ignored.
+Three browser cases cover WebGL/WebGPU editing, compressed batches, failures,
+undo/redo, target changes, cancelled pickers and parsers, and a parse superseded
+by Undo. Two Tauri DOM cases cover explicit conversion, protected frames, filtered
+sources, ordered request payloads, saved column widths, partial failure and stale
+picker replies. The DOM cases use a mock IPC layer; model tests exercise the Rust
+handlers separately. Native and WASM builds pass. Early test assertions raced a
+batch status update or selected both Close buttons; explicit completion checks and
+the intended footer selector resolve those test failures.
+
+Linux OS input against the rebuilt native binary confirms that opening the form
+does not mutate the scene, conversion is explicit, the base cannot be deleted,
+adding a molecule frame preserves the camera, and conversion/addition/deletion
+undo and redo with the original object and renderer IDs. Screenshots were
+inspected. This check also exposed an unsupported dropdown glyph, now replaced
+with the shared icon font. Native multiple-file insertion is covered by the host
+batch regression; the OS case exercises the molecule-source path.
+
 ## Native and Tauri New Renderer controls
 
 Native egui now uses the browser's shared renderer form. Tauri mirrors its

@@ -3339,7 +3339,7 @@
   },
   {
     "name": "add_morph_frame",
-    "description": "Add a frame (another conformation of the same object) to a morphing animation, from a PDB file or from another MolCoord object in the scene. A plain MolCoord object is first turned into a morphing one, which gives it a new uid (returned). Play it with a Mol morphing element in the Animation panel.",
+    "description": "Add a frame (another conformation of the same object) to a morphing animation, from a PDB file or from another MolCoord object in the scene. A plain MolCoord object is first turned into a morphing one, preserving its uid, renderers and current coordinates as the base frame. Play it with a Mol morphing element in the Animation panel.",
     "inputSchema": {
       "type": "object",
       "properties": {

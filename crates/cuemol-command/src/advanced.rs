@@ -385,12 +385,7 @@ pub fn call_tool(
             let r = if let Some(path) = args["file"].as_str() {
                 state.insert_morph_frame_from_path(id, path, "", before)?
             } else {
-                state.insert_morph_frame_from_object(
-                    id,
-                    uid(args, "fromObjId")?,
-                    "frame",
-                    before,
-                )?
+                state.insert_morph_frame_from_object(id, uid(args, "fromObjId")?, "", before)?
             };
             Ok(json!({"objectId":id.get(),"frames":r.frame_count}))
         }

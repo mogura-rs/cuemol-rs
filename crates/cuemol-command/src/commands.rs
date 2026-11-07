@@ -198,7 +198,8 @@ pub(crate) fn scene_state(state: &DesktopAppState) -> Result<Value> {
         let renderers: Vec<_> = state.renderer_summaries(object.uid).into_iter().filter(|renderer|renderer.renderer_type != "*selection").map(|renderer| json!({
             "id":renderer.uid.get(),"name":renderer.name,"type":renderer.renderer_type,"visible":renderer.visible,"group":renderer.group
         })).collect();
-        json!({"id":object.uid.get(),"name":object.name,"className":"MolCoord","visible":object.visible,
+        let class = state.scene_manager().object(object.uid).map_or("MolCoord", |object|object.object_type());
+        json!({"id":object.uid.get(),"name":object.name,"className":class,"visible":object.visible,
             "atoms":object.atom_count,"residues":object.residue_count,"bonds":object.bond_count,"renderers":renderers})
     }).collect();
     objects.extend(crate::nodes::extra_scene_objects(state)?);

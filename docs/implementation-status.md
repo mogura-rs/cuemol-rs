@@ -77,6 +77,8 @@ reference feature, not an implemented interface to port.
 
 The old [parity audit](parity-audit.md) retains measurements against 2.4.1.547.
 Its historical open rows and publication notes do not supersede this checklist.
-All three frontends now have a dedicated New Renderer form. The remaining dialog
-audit covers morphing/APBS forms and rendering controls against the current reference. A registered command alone does not
+All three frontends now have dedicated New Renderer and Morph animation forms.
+Morph conversion is explicit, base frames are protected, and ordered multi-file
+insertion preserves completed edits on failure. The remaining dialog audit
+covers APBS forms and rendering controls against the current reference. A registered command alone does not
 close a dialog or appearance row.

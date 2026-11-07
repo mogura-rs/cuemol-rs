@@ -27,7 +27,7 @@ async function openShell(page, storage = {}, options = {}) {
       defaultColor: '#cccccc', specific: {},
     };
     const molecule = {
-      uid: 3, sceneUid: 1, name: 'Probe', source: '', sourceType: 'pdb', uiOrder: 0,
+      uid: 3, className:'MolCoord', sceneUid: 1, name: 'Probe', source: '', sourceType: 'pdb', uiOrder: 0,
       uiCollapsed: false, selection: options.selectionExpression || '*', visible: true, locked: false,
       atomCount: 3, residueCount: 1, bondCount: 2, coloringType: 'CPKColoring',
       coloringAttrs: {}, paintEntries: [], defaultColor: '#cccccc', renderers: [renderer],
@@ -43,6 +43,13 @@ async function openShell(page, storage = {}, options = {}) {
       canUndo: false, canRedo: false, undoDescriptions: [], redoDescriptions: [], openedPaths: [],
       materialNames: [], logLines: [], status: 'Ready',
     };
+    if(options.morphDialogs) {
+      snapshot.objects.push({...molecule,uid:5,name:'Source',renderers:[]});
+      snapshot.objects.push({...molecule,uid:7,name:'Existing morph',className:'MorphMol',renderers:[]});
+      snapshot.morphs.push({objectUid:7,frame:0,frames:[{index:0,name:'(this)',source:'',sourceType:'<this>'}]});
+      window.__morphSnapshot=()=>structuredClone(snapshot);
+      window.__morphSceneChanged=()=>{snapshot.activeSceneUid=9;};
+    }
     if(options.cameras) snapshot.cameras=['front','__current','back'].map(name=>({sceneUid:1,name,source:name==='front'?'front.cam':'',visibilityCount:name==='front'?2:0}));
     if (options.density) {
       scene.mapCount=1;
@@ -148,6 +155,29 @@ async function openShell(page, storage = {}, options = {}) {
       if (options.updates && command === 'update_request') {
         const checking=args.operation==='check';
         return {currentVersion:'0.1.0',message:checking?'Checking for updates…':'CueMol 0.2.0 is available.',checking,installing:false,release:checking?null:{version:'0.2.0',url:'https://github.com/example/cuemol/releases/tag/v0.2.0',newer:true}};
+      }
+      if(options.morphDialogs && ['initialize_morph_object','append_morph_frame','insert_morph_frame_from_file','remove_morph_frame'].includes(command)) {
+        if(args.sceneUid!==snapshot.activeSceneUid)throw new Error('The active scene changed');
+        const object=snapshot.objects.find(o=>o.uid===(args.objectUid??args.targetObjectUid));
+        if(!object)throw new Error('Missing target');
+        let morph=snapshot.morphs.find(m=>m.objectUid===object.uid);
+        if(command==='initialize_morph_object') {
+          object.className='MorphMol';
+          if(!morph)snapshot.morphs.push({objectUid:object.uid,frame:0,frames:[{index:0,name:'(this)',source:'',sourceType:'<this>'}]});
+        } else {
+          if(!morph)throw new Error('Convert first');
+          if(command==='remove_morph_frame') {
+            if(morph.frames[args.index]?.sourceType==='<this>')throw new Error('Cannot remove base frame');
+            morph.frames.splice(args.index,1);
+          } else {
+            if(args.path?.includes('bad'))throw new Error('Invalid PDB frame');
+            const source=snapshot.objects.find(o=>o.uid===args.sourceObjectUid);
+            const name=args.frameName||(source?source.name:args.path.split(/[\\/]/).pop());
+            morph.frames.splice(args.insertBefore??morph.frames.length,0,{index:0,name,source:args.path||`object:${source.uid}`,sourceType:args.path?'pdb':'molecule'});
+          }
+          morph.frames.forEach((frame,index)=>{frame.index=index;});
+        }
+        snapshot.canUndo=true;return snapshot;
       }
       if (options.agent && command === 'agent_request') {
         const {operation, args:input} = args;
@@ -606,7 +636,11 @@ async function openShell(page, storage = {}, options = {}) {
     if(options.files) window.__TAURI__.webviewWindow={getCurrentWebviewWindow:()=>({
       onDragDropEvent:async callback=>{window.__nativeFileDrop=callback;return ()=>{};}
     })};
-    window.__TAURI__.dialog={save:async options=>{
+    window.__TAURI__.dialog={open:async options=>{
+      window.__morphPickerOptions=options;
+      if(window.__delayMorphPicker)return new Promise(resolve=>{window.__releaseMorphPicker=resolve;});
+      return window.__morphPaths||null;
+    },save:async options=>{
       window.__saveDialogOptions=options;
       return options.defaultPath;
     }};
@@ -2876,5 +2910,79 @@ test('Tauri renderer preset names share file and object collision rules', async 
   await dialog.getByLabel('Renderer type:', {exact:true}).selectOption('Default1RendPreset');
   await expect(dialog.getByLabel('Renderer name:', {exact:true})).toHaveValue('default1_2');
   await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri morph dialog converts explicitly, protects the base and filters source molecules', async ({page}, testInfo) => {
+  const errors=await openShell(page, {}, {morphDialogs:true});
+  const dialog=page.locator('#reference-dialog');
+  const open=()=>page.evaluate(()=>showReferenceDialog('Mol morphing animation'));
+  await open();
+  await expect(dialog.getByLabel('Target molecule',{exact:true})).toHaveValue('3');
+  expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='initialize_morph_object').length)).toBe(0);
+  await dialog.getByRole('button',{name:'Close',exact:true}).last().click();
+  await open();
+  await dialog.getByRole('button',{name:'Convert to MorphMol',exact:true}).click();
+  await expect(dialog.locator('.morph-frame-row')).toHaveCount(1);
+  await dialog.locator('.morph-frame-row').click();
+  await expect(dialog.getByRole('button',{name:'Delete',exact:true})).toBeDisabled();
+  await dialog.getByLabel('Add morph frame',{exact:true}).click();
+  await dialog.getByRole('button',{name:'Add mol...',exact:true}).click();
+  await expect(dialog.getByLabel('Source molecule',{exact:true}).locator('option')).toHaveCount(1);
+  await expect(dialog.getByLabel('Source molecule',{exact:true})).toHaveValue('5');
+  await dialog.getByRole('button',{name:'Add',exact:true}).click();
+  await expect(dialog.locator('.morph-frame-row')).toHaveCount(2);
+  await dialog.locator('.morph-frame-row').first().click();
+  await page.evaluate(()=>{window.__morphPaths=['first.pdb','second.ent.gz'];});
+  await dialog.getByLabel('Add morph frame',{exact:true}).click();
+  await dialog.getByRole('button',{name:'Add PDB file...',exact:true}).click();
+  await expect(dialog.locator('.morph-frame-row')).toHaveCount(4);
+  expect(await page.evaluate(()=>window.__morphPickerOptions.multiple)).toBe(true);
+  expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='insert_morph_frame_from_file').map(c=>[c.args.sceneUid,c.args.targetObjectUid,c.args.insertBefore]))).toEqual([[1,3,1],[1,3,2]]);
+  await expect(dialog.locator('.morph-frame-row.active')).toContainText('second.ent.gz');
+  await dialog.getByRole('separator',{name:'Name column width'}).focus();
+  await page.keyboard.press('ArrowRight');
+  const resizedWidth=await dialog.getByRole('separator',{name:'Name column width'}).getAttribute('aria-valuenow');
+  expect(Number(resizedWidth)).toBeGreaterThan(180);
+  await page.screenshot({path:testInfo.outputPath('tauri-morph-frames.png')});
+  await dialog.getByRole('button',{name:'Delete',exact:true}).click();
+  await expect(dialog.locator('.morph-frame-row')).toHaveCount(3);
+  await expect(dialog.getByRole('button',{name:'Delete',exact:true})).toBeDisabled();
+  await dialog.getByLabel('Target molecule',{exact:true}).selectOption('5');
+  await expect(dialog.getByRole('button',{name:'Convert to MorphMol',exact:true})).toBeVisible();
+  await dialog.getByRole('button',{name:'Close',exact:true}).last().click();
+  await open();
+  await expect(dialog.getByLabel('Target molecule',{exact:true})).toHaveValue('3');
+  await expect(dialog.locator('.morph-frame-row')).toHaveCount(3);
+  await expect(dialog.getByRole('separator',{name:'Name column width'})).toHaveAttribute('aria-valuenow',resizedWidth);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri morph keeps successful files after an error and discards a late file picker', async ({page}) => {
+  const errors=await openShell(page, {}, {morphDialogs:true});
+  const dialog=page.locator('#reference-dialog');
+  const open=()=>page.evaluate(()=>showReferenceDialog('Mol morphing animation'));
+  await open();
+  await dialog.getByRole('button',{name:'Convert to MorphMol',exact:true}).click();
+  await page.evaluate(()=>{window.__morphPaths=['good.pdb','bad.pdb','skipped.pdb'];});
+  await dialog.getByLabel('Add morph frame',{exact:true}).click();
+  await dialog.getByRole('button',{name:'Add PDB file...',exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('Invalid PDB frame');
+  await expect(page.locator('#error-alert-dialog')).not.toBeVisible();
+  await expect(dialog.locator('.morph-frame-row')).toHaveCount(2);
+  await expect(dialog.locator('.morph-frame-row.active')).toHaveCount(0);
+  expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='insert_morph_frame_from_file').map(c=>c.args.path))).toEqual(['good.pdb','bad.pdb']);
+  await page.evaluate(()=>{window.__delayMorphPicker=true;});
+  await dialog.getByLabel('Add morph frame',{exact:true}).click();
+  await dialog.getByRole('button',{name:'Add PDB file...',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>typeof window.__releaseMorphPicker)).toBe('function');
+  await dialog.getByRole('button',{name:'Close',exact:true}).last().click(); await open();
+  await page.evaluate(()=>window.__releaseMorphPicker(['late.pdb']));
+  await expect(dialog.locator('.morph-frame-row')).toHaveCount(2);
+  expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='insert_morph_frame_from_file').length)).toBe(2);
+  await page.evaluate(async()=>{window.__morphSceneChanged();await mutate('get_snapshot');});
+  await dialog.getByLabel('Add morph frame',{exact:true}).click();
+  expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='insert_morph_frame_from_file').length)).toBe(2);
   expect(errors).toEqual([]);
 });

@@ -165,6 +165,24 @@ matching the reference.
 The separator above View resizes the Camera pane, and View scrolls when its
 controls exceed the available height.
 
+### Morph frame editing
+
+Tools → Mol morphing animation opens the frame editor in each frontend. Choose a
+molecule, then press Convert to MorphMol. Opening the editor does not change the
+scene. Conversion retains the object's identity and renderers, and stores its
+current coordinates as the protected `(this)` frame.
+
+Add PDB file accepts multiple `.pdb` or `.ent` files, including gzip-compressed
+files. Add mol selects an ordinary molecule from the active scene; existing
+MorphMol objects are excluded. New frames follow the selected row. Without a
+selected row, they append to the list. Delete removes an ordinary frame and
+clears the row selection. The column divider resizes the Name column.
+
+Each successful edit has its own Undo step. Close retains those edits. A failed
+file stops the remaining batch and keeps previously added frames. Browser parsing
+runs in the file worker; closing or replacing the editor discards pending results.
+Use a Mol morphing element in the Animation panel to play the frames.
+
 ### Animation references
 
 The native, Tauri and browser windows show animation elements as strips in the

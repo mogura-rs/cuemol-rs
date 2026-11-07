@@ -4,12 +4,20 @@
 <body><canvas id="viewport" aria-label="cuemol-rs molecular viewer"></canvas><div id="loading"><img src="./pkg/logo.png" width="128" height="128" alt=""><span>Loading cuemol-rs…</span></div><input id="files" type="file" multiple><input id="styles" type="file" accept=".xml,.xml.gz,.xml.bz2,.xml.xz" hidden>
 <input id="file-options" type="file" multiple hidden><input id="companion-file" type="file" hidden>
 <script type="module">
-import init, {start, open_file, open_files, open_files_with_options, choose_companion_file, command, status, agent_turn, agent_cancel, view_input} from './pkg/cuemol_web.js';
+import init, {start, open_file, open_files, open_files_with_options, choose_companion_file, add_morph_files, command, status, agent_turn, agent_cancel, view_input} from './pkg/cuemol_web.js';
 import {initKernels} from './kernels.js';
 import './oidn.js';
 import {installViewInput, installShellInput} from './input.js';
 import {initLoader} from './loader.js';
 const loading=document.getElementById('loading');
+globalThis.cuemolChooseMorphFiles=generation=>{
+  const input=document.createElement('input');
+  input.type='file';input.multiple=true;input.accept='.pdb,.ent,.pdb.gz,.ent.gz';input.hidden=true;
+  input.dataset.morphGeneration=String(generation);
+  input.onchange=()=>{add_morph_files([...input.files],generation);input.remove();};
+  input.oncancel=()=>input.remove();
+  document.body.append(input);input.click();
+};
 performance.mark('cuemol-startup');
 try {
   const [,,, uiFont] = await Promise.all([

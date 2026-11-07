@@ -638,6 +638,7 @@ struct ColoringUpdateInput {
 #[serde(rename_all = "camelCase")]
 struct ObjectDto {
     uid: u64,
+    class_name: String,
     scene_uid: u64,
     ui_order: i32,
     ui_collapsed: bool,
@@ -2132,6 +2133,7 @@ impl AppModel {
                     .collect();
                 objects.push(ObjectDto {
                     uid: object.uid.get(),
+                    class_name: object_state.object_type().to_string(),
                     scene_uid: scene.uid.get(),
                     ui_order: object.ui_order,
                     ui_collapsed: object.ui_collapsed,
@@ -8249,21 +8251,25 @@ enum ModelRequest {
     PollApbsCalculation,
     CancelApbsCalculation,
     InitializeMorphObject {
+        scene_uid: Option<u64>,
         object_uid: u64,
     },
     AppendMorphFrame {
+        scene_uid: Option<u64>,
         target_object_uid: u64,
         source_object_uid: u64,
         frame_name: String,
         insert_before: Option<usize>,
     },
     InsertMorphFrameFromFile {
+        scene_uid: Option<u64>,
         target_object_uid: u64,
         path: String,
         frame_name: String,
         insert_before: Option<usize>,
     },
     RemoveMorphFrame {
+        scene_uid: Option<u64>,
         object_uid: u64,
         index: usize,
     },
@@ -9757,6 +9763,33 @@ fn surface_renderer_setup_defaults(
             })
             .collect(),
     })
+}
+
+fn validate_morph_dialog_target(
+    state: &DesktopAppState,
+    object: u64,
+    expected_scene: Option<u64>,
+    require_morph: bool,
+) -> Result<(), String> {
+    let Some(scene) = expected_scene.map(Uid::new) else {
+        return Ok(());
+    };
+    if state.active_scene() != Some(scene)
+        || state.scene_manager().scene_uid_for_object(Uid::new(object)) != Some(scene)
+    {
+        return Err("The active scene or target changed. Reopen Morph animation tool.".to_string());
+    }
+    let object = state
+        .scene_manager()
+        .object(Uid::new(object))
+        .ok_or("Select a molecule.")?;
+    if !matches!(object.object_type(), "MolCoord" | "MorphMol") {
+        return Err("Select a MolCoord or MorphMol molecule.".to_string());
+    }
+    if require_morph && state.morph_frame_value(object.uid()).is_none() {
+        return Err("Convert the molecule to MorphMol first.".to_string());
+    }
+    Ok(())
 }
 
 fn handle_model_request(
@@ -12179,7 +12212,8 @@ fn handle_model_request(
                 "idle".to_string()
             }))
         }
-        ModelRequest::InitializeMorphObject { object_uid } => {
+        ModelRequest::InitializeMorphObject { object_uid, scene_uid } => {
+            validate_morph_dialog_target(&model.desktop, object_uid, scene_uid, false)?;
             let undo = model.capture_undo();
             let (summary, changed) = model
                 .desktop
@@ -12199,9 +12233,15 @@ fn handle_model_request(
             source_object_uid,
             frame_name,
             insert_before,
+            scene_uid,
         } => {
-            if frame_name.trim().is_empty() {
-                return Err("a morph frame name is required".to_string());
+            validate_morph_dialog_target(&model.desktop, target_object_uid, scene_uid, true)?;
+            if scene_uid.is_some() && (
+                model.desktop.scene_manager().scene_uid_for_object(Uid::new(source_object_uid)) != model.desktop.active_scene()
+                || model.desktop.morph_frame_value(Uid::new(source_object_uid)).is_some()
+                || model.desktop.scene_manager().object(Uid::new(source_object_uid)).is_none_or(|o|o.object_type() != "MolCoord")
+            ) {
+                return Err("Select an ordinary MolCoord molecule in the active scene.".to_string());
             }
             let undo = model.capture_undo();
             let summary = model
@@ -12222,7 +12262,9 @@ fn handle_model_request(
             path,
             frame_name,
             insert_before,
+            scene_uid,
         } => {
+            validate_morph_dialog_target(&model.desktop, target_object_uid, scene_uid, true)?;
             let undo = model.capture_undo();
             let summary = model
                 .desktop
@@ -12237,7 +12279,8 @@ fn handle_model_request(
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::RemoveMorphFrame { object_uid, index } => {
+        ModelRequest::RemoveMorphFrame { object_uid, index, scene_uid } => {
+            validate_morph_dialog_target(&model.desktop, object_uid, scene_uid, true)?;
             let undo = model.capture_undo();
             let summary = model
                 .desktop
@@ -15931,11 +15974,15 @@ fn cancel_apbs_calculation(state: State<'_, ManagedState>) -> Result<String, Str
 #[tauri::command]
 fn initialize_morph_object(
     object_uid: u64,
+    scene_uid: Option<u64>,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
         &state,
-        ModelRequest::InitializeMorphObject { object_uid },
+        ModelRequest::InitializeMorphObject {
+            object_uid,
+            scene_uid,
+        },
     )?)
 }
 
@@ -15945,6 +15992,7 @@ fn append_morph_frame(
     source_object_uid: u64,
     frame_name: String,
     insert_before: Option<usize>,
+    scene_uid: Option<u64>,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
@@ -15954,6 +16002,7 @@ fn append_morph_frame(
             source_object_uid,
             frame_name,
             insert_before,
+            scene_uid,
         },
     )?)
 }
@@ -15964,6 +16013,7 @@ fn insert_morph_frame_from_file(
     path: String,
     frame_name: String,
     insert_before: Option<usize>,
+    scene_uid: Option<u64>,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
@@ -15973,6 +16023,7 @@ fn insert_morph_frame_from_file(
             path,
             frame_name,
             insert_before,
+            scene_uid,
         },
     )?)
 }
@@ -15981,11 +16032,16 @@ fn insert_morph_frame_from_file(
 fn remove_morph_frame(
     object_uid: u64,
     index: usize,
+    scene_uid: Option<u64>,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
         &state,
-        ModelRequest::RemoveMorphFrame { object_uid, index },
+        ModelRequest::RemoveMorphFrame {
+            object_uid,
+            index,
+            scene_uid,
+        },
     )?)
 }
 
@@ -26569,7 +26625,10 @@ mod tests {
 
         let response = handle_model_request(
             &mut model,
-            ModelRequest::InitializeMorphObject { object_uid: first },
+            ModelRequest::InitializeMorphObject {
+                object_uid: first,
+                scene_uid: None,
+            },
         )
         .unwrap();
         let ModelResponse::Snapshot(snapshot) = response else {
@@ -26581,6 +26640,7 @@ mod tests {
             handle_model_request(
                 &mut model,
                 ModelRequest::AppendMorphFrame {
+                    scene_uid: None,
                     target_object_uid: first,
                     source_object_uid: source,
                     frame_name: name.to_string(),
@@ -26592,6 +26652,7 @@ mod tests {
         let response = handle_model_request(
             &mut model,
             ModelRequest::InsertMorphFrameFromFile {
+                scene_uid: None,
                 target_object_uid: first,
                 path: pdb.to_string_lossy().to_string(),
                 frame_name: "file-frame".to_string(),
@@ -26616,6 +26677,7 @@ mod tests {
         let response = handle_model_request(
             &mut model,
             ModelRequest::RemoveMorphFrame {
+                scene_uid: None,
                 object_uid: first,
                 index: 2,
             },
@@ -26631,6 +26693,103 @@ mod tests {
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir(output_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn morph_dialog_requests_validate_targets_and_preserve_failed_edits() {
+        let mut model = model_without_gpu();
+        let pdb = b"ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n";
+        model.desktop.open_bytes("target.pdb", pdb).unwrap();
+        model.desktop.open_bytes("source.pdb", pdb).unwrap();
+        let objects = model.desktop.active_object_summaries();
+        let (target, source) = (objects[0].uid.get(), objects[1].uid.get());
+        let scene = model.desktop.active_scene().unwrap().get();
+        let before = model.desktop.clone();
+        for request in [
+            ModelRequest::InitializeMorphObject {
+                object_uid: target,
+                scene_uid: Some(u64::MAX),
+            },
+            ModelRequest::AppendMorphFrame {
+                target_object_uid: target,
+                source_object_uid: source,
+                frame_name: String::new(),
+                insert_before: None,
+                scene_uid: Some(scene),
+            },
+        ] {
+            assert!(handle_model_request(&mut model, request).is_err());
+            assert!(before.same_undo_state(&model.desktop));
+            assert!(model.undo_stack.is_empty());
+        }
+        handle_model_request(
+            &mut model,
+            ModelRequest::InitializeMorphObject {
+                object_uid: target,
+                scene_uid: Some(scene),
+            },
+        )
+        .unwrap();
+        assert_eq!(model.undo_stack.len(), 1);
+        assert_eq!(model.snapshot().objects[0].class_name, "MorphMol");
+        let converted = model.desktop.clone();
+        for request in [
+            ModelRequest::RemoveMorphFrame {
+                object_uid: target,
+                index: 0,
+                scene_uid: Some(scene),
+            },
+            ModelRequest::AppendMorphFrame {
+                target_object_uid: target,
+                source_object_uid: target,
+                frame_name: String::new(),
+                insert_before: None,
+                scene_uid: Some(scene),
+            },
+            ModelRequest::InsertMorphFrameFromFile {
+                target_object_uid: target,
+                path: "missing.pdb".into(),
+                frame_name: String::new(),
+                insert_before: None,
+                scene_uid: Some(scene),
+            },
+        ] {
+            assert!(handle_model_request(&mut model, request).is_err());
+            assert!(converted.same_undo_state(&model.desktop));
+            assert_eq!(model.undo_stack.len(), 1);
+        }
+        handle_model_request(
+            &mut model,
+            ModelRequest::AppendMorphFrame {
+                target_object_uid: target,
+                source_object_uid: source,
+                frame_name: String::new(),
+                insert_before: Some(1),
+                scene_uid: Some(scene),
+            },
+        )
+        .unwrap();
+        assert_eq!(model.snapshot().morphs[0].frames.len(), 2);
+        assert_eq!(model.snapshot().morphs[0].frames[1].name, "source.pdb");
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().morphs[0].frames.len(), 1);
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model.snapshot().morphs.is_empty());
+        assert_eq!(model.snapshot().objects[0].class_name, "MolCoord");
+        handle_model_request(&mut model, ModelRequest::Redo(1)).unwrap();
+        assert_eq!(model.snapshot().morphs[0].frames.len(), 2);
+        model.desktop.new_scene("other", true);
+        let before = model.desktop.clone();
+        assert!(handle_model_request(
+            &mut model,
+            ModelRequest::InitializeMorphObject {
+                object_uid: target,
+                scene_uid: Some(scene)
+            }
+        )
+        .is_err());
+        assert!(before.same_undo_state(&model.desktop));
     }
 
     #[cfg(unix)]

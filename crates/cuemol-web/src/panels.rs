@@ -269,6 +269,10 @@ impl App {
             self.show_superposition = true;
             return;
         }
+        if name == "convert_to_morph" {
+            self.open_morph();
+            return;
+        }
         if name == "set_secondary_structure" {
             self.secondary.opened(&self.state, self.selected);
             self.show_secondary = true;

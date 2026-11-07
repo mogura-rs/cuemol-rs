@@ -462,6 +462,34 @@ impl PreparedFile {
 }
 
 impl DesktopAppState {
+    pub fn insert_morph_frame_from_prepared(
+        &mut self,
+        target: Uid,
+        file: PreparedFile,
+        insert_before: Option<usize>,
+    ) -> Result<GuiMorphSummary> {
+        let PreparedFile { name, contents } = file;
+        if guess_path_format(Path::new(&name), &self.stream_manager)? != "pdb" {
+            return Err(CueMolError::invalid_argument(
+                "A morph frame requires a PDB file.",
+            ));
+        }
+        let PreparedContents::Molecule(data) = contents else {
+            return Err(CueMolError::invalid_argument(
+                "A morph frame requires a molecule.",
+            ));
+        };
+        let molecule = data.into_molecule()?;
+        self.insert_morph_frame(
+            target,
+            molecule,
+            name.clone(),
+            name,
+            "pdb".to_string(),
+            insert_before,
+        )
+    }
+
     pub fn open_prepared(&mut self, file: PreparedFile) -> Result<GuiLoadedPath> {
         let reusable =
             matches!(file.contents, PreparedContents::Pymol(_)).then(|| self.ensure_active_scene());
@@ -623,6 +651,114 @@ mod tests {
     use super::*;
 
     const PDB: &[u8] = b"ATOM     17  CA  GLY A   1       1.000   2.000   3.000  0.75 12.00           C  \nATOM     93  C   GLY A   1       2.400   2.000   3.000  1.00 10.00           C  \nEND\n";
+
+    #[test]
+    fn prepared_morph_preserves_base_ids_and_renderers_without_loading_objects() {
+        let mut app = DesktopAppState::new();
+        app.open_bytes("target.pdb", PDB).unwrap();
+        let target = app.active_object_summaries()[0].uid;
+        let object = app.scene_manager().object(target).unwrap();
+        let renderers = object
+            .renderers()
+            .iter()
+            .map(|r| r.uid())
+            .collect::<Vec<_>>();
+        let atoms = object
+            .mol()
+            .atoms()
+            .iter()
+            .map(|a| (a.serial, a.position))
+            .collect::<Vec<_>>();
+        let base = app.clone();
+        let moved = std::str::from_utf8(PDB)
+            .unwrap()
+            .replace("1.000", "9.000")
+            .replace("2.400", "8.400");
+        let prepared = PreparedFile::parse("other.pdb", moved.as_bytes()).unwrap();
+        let prepared = PreparedFile::decode(&prepared.encode().unwrap()).unwrap();
+        let result = app
+            .insert_morph_frame_from_prepared(target, prepared, None)
+            .unwrap();
+        assert_eq!(result.frame_count, 2);
+        assert_eq!(app.active_object_summaries().len(), 1);
+        assert_eq!(
+            app.scene_manager().object(target).unwrap().object_type(),
+            "MorphMol"
+        );
+        assert_eq!(
+            app.scene_manager()
+                .object(target)
+                .unwrap()
+                .renderers()
+                .iter()
+                .map(|r| r.uid())
+                .collect::<Vec<_>>(),
+            renderers
+        );
+        assert_eq!(
+            app.scene_manager()
+                .object(target)
+                .unwrap()
+                .mol()
+                .atoms()
+                .iter()
+                .map(|a| (a.serial, a.position))
+                .collect::<Vec<_>>(),
+            atoms
+        );
+        let frames = app.morph_frame_summaries(target);
+        assert_eq!(frames[0].name, "(this)");
+        assert_eq!(frames[0].source_type, "<this>");
+        assert_eq!(frames[1].source, "other.pdb");
+        assert!(!app.initialize_morph_object(target).unwrap().1);
+        assert!(app.remove_morph_frame(target, 0).is_err());
+        app.apply_morph_frame(target, 1.).unwrap();
+        assert_ne!(
+            app.scene_manager().object(target).unwrap().mol().atoms()[0].position,
+            atoms[0].1
+        );
+        app.apply_morph_frame(target, 0.).unwrap();
+        assert_eq!(
+            app.scene_manager()
+                .object(target)
+                .unwrap()
+                .mol()
+                .atoms()
+                .iter()
+                .map(|a| (a.serial, a.position))
+                .collect::<Vec<_>>(),
+            atoms
+        );
+        app.restore_snapshot(base.clone());
+        assert!(base.same_undo_state(&app));
+        assert!(app.morph_frame_value(target).is_none());
+        assert_eq!(
+            app.scene_manager().object(target).unwrap().object_type(),
+            "MolCoord"
+        );
+
+        let invalid = PreparedFile {
+            name: "other.cif".into(),
+            contents: PreparedContents::Molecule(
+                read_pdb_str(std::str::from_utf8(PDB).unwrap())
+                    .unwrap()
+                    .transfer_data(),
+            ),
+        };
+        assert!(app
+            .insert_morph_frame_from_prepared(target, invalid, None)
+            .is_err());
+        assert!(base.same_undo_state(&app));
+        app.open_bytes("source.pdb", moved.as_bytes()).unwrap();
+        let source = app.active_object_summaries()[1].uid;
+        app.insert_morph_frame_from_object(target, source, "", None)
+            .unwrap();
+        assert_eq!(
+            app.morph_frame_summaries(target)[1].name,
+            app.scene_manager().object(source).unwrap().name()
+        );
+        assert_eq!(app.morph_frame_summaries(target)[0].name, "(this)");
+    }
 
     #[test]
     fn transfer_keeps_applied_custom_topology_pivots_and_links() {

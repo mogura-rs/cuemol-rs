@@ -14,6 +14,68 @@ fn fixture() -> (DesktopAppState, Camera, Uid) {
 }
 
 #[test]
+fn adding_a_morph_frame_initializes_the_base_and_preserves_public_identity() {
+    let (mut state, mut camera, target) = fixture();
+    state.open_bytes("source.pdb", PDB).unwrap();
+    let source = state.active_object_summaries()[1].uid;
+    let renderers = state.renderer_summaries(target);
+    let result = call_tool(
+        &mut state,
+        &mut camera,
+        "add_morph_frame",
+        &json!({
+            "objId":target.get(), "fromObjId":source.get(),
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["objectId"], target.get());
+    assert_eq!(result["frames"], 2);
+    let scene = call_tool(&mut state, &mut camera, "get_scene_state", &json!({})).unwrap();
+    assert_eq!(scene["objects"][0]["className"], "MorphMol");
+    assert_eq!(
+        state.scene_manager().object(target).unwrap().object_type(),
+        "MorphMol"
+    );
+    assert_eq!(state.renderer_summaries(target), renderers);
+    let listed = call_tool(
+        &mut state,
+        &mut camera,
+        "list_morph_frames",
+        &json!({"objId":target.get()}),
+    )
+    .unwrap();
+    assert_eq!(listed["frames"][0]["name"], "(this)");
+    assert_eq!(listed["frames"][1]["name"], "source.pdb");
+    let before = state.clone();
+    assert!(call_tool(
+        &mut state,
+        &mut camera,
+        "remove_morph_frame",
+        &json!({"objId":target.get(),"frame":1})
+    )
+    .is_err());
+    assert!(before.same_undo_state(&state));
+    assert_eq!(
+        call_tool(
+            &mut state,
+            &mut camera,
+            "convert_to_morph",
+            &json!({"objId":target.get()})
+        )
+        .unwrap()["created"],
+        false
+    );
+    call_tool(
+        &mut state,
+        &mut camera,
+        "add_morph_frame",
+        &json!({"objId":target.get(),"fromObjId":source.get(),"before":2}),
+    )
+    .unwrap();
+    assert_eq!(state.morph_frame_summaries(target).len(), 3);
+}
+
+#[test]
 fn renderer_creation_validates_group_and_selection_before_mutating() {
     let (mut state, mut camera, object) = fixture();
     call_tool(

@@ -82,7 +82,6 @@ const ATOM_INTR_COLUMN_MIN_WIDTH: f32 = 72.0;
 const ATOM_INTR_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
 const MORPH_NAME_COLUMN_DEFAULT_WIDTH: f32 = 180.0;
 const MORPH_COLUMN_MIN_WIDTH: f32 = 100.0;
-const MORPH_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
 const RENDER_PRESETS: &[(&str, u32, u32)] = &[
     ("HD 720", 1280, 720),
     ("Full HD", 1920, 1080),
@@ -1571,12 +1570,8 @@ struct GuiApplication {
     apbs_executable: String,
     pdb2pqr_executable: String,
     apbs_job: Option<NativeApbsJob>,
-    morph_target: Option<cuemol_core::Uid>,
-    morph_source: Option<cuemol_core::Uid>,
-    morph_selected_frame: Option<usize>,
+    morph_editor: cuemol_ui::morph::MorphDialog,
     morph_name_column_width: f32,
-    morph_name_column_drag_start_width: Option<f32>,
-    morph_frame_name: String,
     config_path: String,
     config_key: String,
     config_value: String,
@@ -4855,12 +4850,8 @@ impl GuiApplication {
             apbs_executable: "apbs".to_string(),
             pdb2pqr_executable: "pdb2pqr".to_string(),
             apbs_job: None,
-            morph_target: None,
-            morph_source: None,
-            morph_selected_frame: None,
+            morph_editor: cuemol_ui::morph::MorphDialog::default(),
             morph_name_column_width,
-            morph_name_column_drag_start_width: None,
-            morph_frame_name: "frame".to_string(),
             config_path: crate::renderer_preferences_path("config.tsv")
                 .to_string_lossy()
                 .into_owned(),
@@ -5768,12 +5759,7 @@ impl GuiApplication {
                                 "Mol surface generation..." => self.open_surface_generation_tool(),
                                 "Mol surface cutter..." => self.open_surface_cutter_tool(),
                                 "APBS elepot calculation..." => self.open_apbs_tool(),
-                                "Mol morphing animation..." => {
-                                    self.morph_target = self.selected_object;
-                                    self.morph_selected_frame = None;
-                                    self.tool_dialog =
-                                        Some(label.trim_end_matches("...").to_string());
-                                }
+                                "Mol morphing animation..." => self.open_morph_tool(),
                                 "Performance measure" => {
                                     self.perf_measure = !self.perf_measure;
                                     self.set_status(format!(
@@ -6759,7 +6745,12 @@ impl GuiApplication {
                                     ui.horizontal(|ui| {
                                         let mut expanded = !object.ui_collapsed;
                                         let mut locked = object.locked;
-                                        let label = format!("{} (MolCoord)", object.name);
+                                        let class = self
+                                            .state
+                                            .scene_manager()
+                                            .object(object.uid)
+                                            .map_or("MolCoord", |object| object.object_type());
+                                        let label = format!("{} ({class})", object.name);
                                         let response = workspace_node_row(
                                             ui,
                                             &label,
@@ -18016,144 +18007,102 @@ impl GuiApplication {
         }
     }
 
-    fn append_morph_frame(&mut self) {
-        let Some(target) = self.morph_target else {
-            self.set_status("No morph target selected");
-            return;
-        };
-        let Some(source) = self.morph_source else {
-            self.set_status("No morph source selected");
-            return;
-        };
-        let frame_count = self.state.morph_frame_summaries(target).len();
-        let insert_before = self.morph_selected_frame.map(|index| index + 1);
-        let inserted_index = insert_before
-            .filter(|index| *index < frame_count)
-            .unwrap_or(frame_count);
-        let scene_uid = self.state.scene_manager().scene_uid_for_object(target);
+    fn open_morph_tool(&mut self) {
+        self.morph_editor.name_width = self.morph_name_column_width;
+        self.morph_editor.opened(&self.state);
+        self.tool_dialog = Some("Morph animation tool".to_string());
+    }
+
+    fn apply_morph_edit(&mut self, action: cuemol_ui::morph::Action) -> bool {
         let undo = self.capture_undo();
-        match self.state.insert_morph_frame_from_object(
+        match self.morph_editor.apply(&mut self.state, action) {
+            Ok(changed) => {
+                if changed {
+                    self.state.mark_scene_changes_since(&undo.state);
+                    self.push_undo_snapshot(undo);
+                    self.rebuild_snapshot();
+                }
+                true
+            }
+            Err(error) => {
+                self.state.restore_snapshot(undo.state);
+                self.morph_editor.error = error.to_string();
+                false
+            }
+        }
+    }
+
+    fn insert_morph_frame_from_pdb_path(&mut self, path: &Path) -> bool {
+        let target = match self.morph_editor.target(&self.state) {
+            Ok(target) if self.state.morph_frame_value(target).is_some() => target,
+            Ok(_) => {
+                self.morph_editor.error = "Convert the molecule to MorphMol first.".to_string();
+                return false;
+            }
+            Err(error) => {
+                self.morph_editor.error = error.to_string();
+                return false;
+            }
+        };
+        let undo = self.capture_undo();
+        match self.state.insert_morph_frame_from_path(
             target,
-            source,
-            self.morph_frame_name.trim(),
-            insert_before,
+            path,
+            "",
+            self.morph_editor.insert_before(),
         ) {
             Ok(summary) => {
+                self.state.mark_scene_changes_since(&undo.state);
                 self.push_undo_snapshot(undo);
-                if let Some(scene_uid) = scene_uid {
-                    self.state.mark_scene_modified(scene_uid);
-                }
-                self.morph_selected_frame = Some(inserted_index);
+                self.morph_editor.added_frame(summary.frame_count);
                 self.rebuild_snapshot();
-                self.set_status(format!(
-                    "Morph frame appended: {} frames / {} atoms",
-                    summary.frame_count, summary.atom_count
-                ));
+                true
             }
             Err(error) => {
                 self.state.restore_snapshot(undo.state);
-                self.set_error(error);
+                self.morph_editor.error = error.to_string();
+                false
             }
         }
     }
 
-    fn initialize_morph_target(&mut self, target: cuemol_core::Uid) {
-        if self.state.morph_frame_value(target).is_some() {
+    fn morph_dialog(&mut self, ctx: &egui::Context) {
+        if self.morph_editor.scene != self.state.active_scene() {
+            self.tool_dialog = None;
             return;
         }
-        let scene_uid = self.state.scene_manager().scene_uid_for_object(target);
-        let undo = self.capture_undo();
-        match self.state.initialize_morph_object(target) {
-            Ok((summary, changed)) => {
-                if changed {
-                    self.push_undo_snapshot(undo);
-                    if let Some(scene_uid) = scene_uid {
-                        self.state.mark_scene_modified(scene_uid);
-                    }
-                    self.rebuild_snapshot();
-                    self.set_status(format!(
-                        "Converted molecule to MorphMol: {} frame / {} atoms",
-                        summary.frame_count, summary.atom_count
-                    ));
-                }
-            }
-            Err(error) => {
-                self.state.restore_snapshot(undo.state);
-                self.set_error(error);
-            }
+        let mut open = true;
+        let mut action = None;
+        egui::Window::new("Morph animation tool")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(480.)
+            .show(ctx, |ui| {
+                action = self.morph_editor.show(ui, &self.state, false);
+            });
+        if self.morph_name_column_width != self.morph_editor.name_width {
+            self.morph_name_column_width = self.morph_editor.name_width;
+            self.state.put_config_value(
+                "morph_editor:name_width",
+                self.morph_name_column_width.to_string(),
+            );
         }
-    }
-
-    fn insert_morph_frame_from_pdb_path(&mut self, path: &Path) {
-        let Some(target) = self.morph_target else {
-            self.set_status("No morph target selected");
-            return;
-        };
-        let frame_count = self.state.morph_frame_summaries(target).len();
-        let insert_before = self.morph_selected_frame.map(|index| index + 1);
-        let inserted_index = insert_before
-            .filter(|index| *index < frame_count)
-            .unwrap_or(frame_count);
-        let frame_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "frame".to_string());
-        let scene_uid = self.state.scene_manager().scene_uid_for_object(target);
-        let undo = self.capture_undo();
-        match self
-            .state
-            .insert_morph_frame_from_path(target, path, frame_name, insert_before)
-        {
-            Ok(summary) => {
-                self.push_undo_snapshot(undo);
-                if let Some(scene_uid) = scene_uid {
-                    self.state.mark_scene_modified(scene_uid);
-                }
-                self.morph_selected_frame = Some(inserted_index);
-                self.rebuild_snapshot();
-                self.set_status(format!(
-                    "Morph PDB frame added: {} frames / {} atoms",
-                    summary.frame_count, summary.atom_count
-                ));
+        use cuemol_ui::morph::Action;
+        if !open || action == Some(Action::Close) {
+            self.tool_dialog = None;
+        } else if action == Some(Action::AddPdb) {
+            if let Some(paths) = native_multi_file_dialog(NativeFileDialog::OpenMorphPdb, "") {
+                self.insert_morph_frames_from_paths(&paths);
             }
-            Err(error) => {
-                self.state.restore_snapshot(undo.state);
-                self.set_error(error);
-            }
+        } else if let Some(action) = action {
+            self.apply_morph_edit(action);
         }
     }
 
-    fn remove_selected_morph_frame(&mut self) {
-        let Some(target) = self.morph_target else {
-            self.set_status("No morph target selected");
-            return;
-        };
-        let Some(index) = self.morph_selected_frame else {
-            self.set_status("No morph frame selected");
-            return;
-        };
-        let scene_uid = self.state.scene_manager().scene_uid_for_object(target);
-        let undo = self.capture_undo();
-        match self.state.remove_morph_frame(target, index) {
-            Ok(summary) => {
-                self.push_undo_snapshot(undo);
-                if let Some(scene_uid) = scene_uid {
-                    self.state.mark_scene_modified(scene_uid);
-                }
-                self.morph_selected_frame = if summary.frame_count == 0 {
-                    None
-                } else {
-                    Some(index.min(summary.frame_count - 1))
-                };
-                self.rebuild_snapshot();
-                self.set_status(format!(
-                    "Morph frame removed: {} frames / {} atoms",
-                    summary.frame_count, summary.atom_count
-                ));
-            }
-            Err(error) => {
-                self.state.restore_snapshot(undo.state);
-                self.set_error(error);
+    fn insert_morph_frames_from_paths(&mut self, paths: &[PathBuf]) {
+        for path in paths {
+            if !self.insert_morph_frame_from_pdb_path(path) {
+                break;
             }
         }
     }
@@ -19250,7 +19199,7 @@ impl GuiApplication {
             .parse::<f32>()
             .unwrap_or(MORPH_NAME_COLUMN_DEFAULT_WIDTH)
             .clamp(MORPH_COLUMN_MIN_WIDTH, 600.0);
-        self.morph_name_column_drag_start_width = None;
+        self.morph_editor.name_width = self.morph_name_column_width;
         for (style_key, config_key) in [
             ("DefaultLabel.font_name", "style:DefaultLabel.font_name"),
             ("DefaultLabel.font_size", "style:DefaultLabel.font_size"),
@@ -24058,6 +24007,10 @@ impl GuiApplication {
             self.interaction_dialog(ctx);
             return;
         }
+        if title == "Morph animation tool" {
+            self.morph_dialog(ctx);
+            return;
+        }
         if title == "Reassign secondary str" {
             self.secondary_structure_dialog(ctx);
             return;
@@ -24070,7 +24023,6 @@ impl GuiApplication {
             .show(ctx, |ui| {
                 match title.as_str() {
                     "Mol bond editor" => self.bond_editor_tool_ui(ui),
-                    "Mol morphing animation" => self.morph_tool_ui(ui),
                     "MolClient tools" => self.mol_client_tool_ui(ui),
                     "APBS elepot calculation" => self.apbs_tool_ui(ui),
                     "About plugins" => self.plugin_tool_ui(ui),
@@ -24607,203 +24559,6 @@ impl GuiApplication {
         {
             self.start_apbs_calculation();
         }
-    }
-
-    fn morph_tool_ui(&mut self, ui: &mut egui::Ui) {
-        let objects = self.state.active_object_summaries();
-        if objects.is_empty() {
-            ui.label("No molecule object loaded.");
-            return;
-        }
-        ui.set_min_width(460.0);
-        if self
-            .morph_target
-            .is_none_or(|uid| !objects.iter().any(|object| object.uid == uid))
-        {
-            self.morph_target = self.selected_object.or(Some(objects[0].uid));
-        }
-        if self
-            .morph_source
-            .is_none_or(|uid| !objects.iter().any(|object| object.uid == uid))
-        {
-            self.morph_source = Some(objects[0].uid);
-        }
-        if let Some(target) = self.morph_target {
-            self.initialize_morph_target(target);
-        }
-        let frames = self
-            .morph_target
-            .map(|uid| self.state.morph_frame_summaries(uid))
-            .unwrap_or_default();
-        if self
-            .morph_selected_frame
-            .is_some_and(|index| index >= frames.len())
-        {
-            self.morph_selected_frame = None;
-        }
-        egui::Frame::new()
-            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-            .show(ui, |ui| {
-                let minimum_width = 2.0 * MORPH_COLUMN_MIN_WIDTH + MORPH_COLUMN_SPLITTER_WIDTH;
-                let available_width = ui.available_width().max(minimum_width);
-                let name_width = self.morph_name_column_width.clamp(
-                    MORPH_COLUMN_MIN_WIDTH,
-                    (available_width - MORPH_COLUMN_MIN_WIDTH - MORPH_COLUMN_SPLITTER_WIDTH)
-                        .max(MORPH_COLUMN_MIN_WIDTH),
-                );
-                let source_width = (available_width - name_width - MORPH_COLUMN_SPLITTER_WIDTH)
-                    .max(MORPH_COLUMN_MIN_WIDTH);
-                let header_height = ui.spacing().interact_size.y;
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    ui.add_sized(
-                        [name_width, header_height],
-                        egui::Label::new(egui::RichText::new("Name").strong()),
-                    );
-                    let (splitter_rect, splitter) = ui.allocate_exact_size(
-                        egui::vec2(MORPH_COLUMN_SPLITTER_WIDTH, header_height),
-                        egui::Sense::drag(),
-                    );
-                    let splitter = splitter
-                        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
-                        .on_hover_text("Resize Name column; double-click to reset");
-                    ui.painter().line_segment(
-                        [splitter_rect.center_top(), splitter_rect.center_bottom()],
-                        egui::Stroke::new(
-                            1.0,
-                            if splitter.hovered() || splitter.dragged() {
-                                ui.visuals().text_color()
-                            } else {
-                                ui.visuals().widgets.noninteractive.bg_stroke.color
-                            },
-                        ),
-                    );
-                    if splitter.double_clicked() {
-                        self.morph_name_column_width = MORPH_NAME_COLUMN_DEFAULT_WIDTH;
-                        self.morph_name_column_drag_start_width = None;
-                        self.state.put_config_value(
-                            "morph_editor:name_width",
-                            MORPH_NAME_COLUMN_DEFAULT_WIDTH.to_string(),
-                        );
-                    } else {
-                        if splitter.drag_started() {
-                            self.morph_name_column_drag_start_width = Some(name_width);
-                        }
-                        if splitter.dragged() {
-                            if let Some(initial_width) = self.morph_name_column_drag_start_width {
-                                let maximum = (available_width
-                                    - MORPH_COLUMN_MIN_WIDTH
-                                    - MORPH_COLUMN_SPLITTER_WIDTH)
-                                    .max(MORPH_COLUMN_MIN_WIDTH);
-                                self.morph_name_column_width = (initial_width
-                                    + splitter.drag_delta().x)
-                                    .clamp(MORPH_COLUMN_MIN_WIDTH, maximum);
-                                ui.ctx().request_repaint();
-                            }
-                        }
-                        if splitter.drag_stopped() {
-                            self.morph_name_column_drag_start_width = None;
-                            self.state.put_config_value(
-                                "morph_editor:name_width",
-                                self.morph_name_column_width.to_string(),
-                            );
-                        }
-                    }
-                    ui.add_sized(
-                        [source_width, header_height],
-                        egui::Label::new(egui::RichText::new("Source").strong()),
-                    );
-                });
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .id_salt("native_morph_frame_list")
-                    .min_scrolled_height(120.0)
-                    .max_height(220.0)
-                    .show(ui, |ui| {
-                        if frames.is_empty() {
-                            ui.weak("No morph frames.");
-                        }
-                        for frame in &frames {
-                            let selected = self.morph_selected_frame == Some(frame.index);
-                            let row_height = ui.spacing().interact_size.y;
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 0.0;
-                                let name = ui
-                                    .add_sized(
-                                        [name_width, row_height],
-                                        egui::Button::selectable(selected, frame.name.as_str()),
-                                    )
-                                    .on_hover_text(frame.name.as_str());
-                                let (separator, _) = ui.allocate_exact_size(
-                                    egui::vec2(MORPH_COLUMN_SPLITTER_WIDTH, row_height),
-                                    egui::Sense::hover(),
-                                );
-                                ui.painter().line_segment(
-                                    [separator.center_top(), separator.center_bottom()],
-                                    ui.visuals().widgets.noninteractive.bg_stroke,
-                                );
-                                let source = if frame.source.is_empty() {
-                                    frame.source_type.as_str()
-                                } else {
-                                    frame.source.as_str()
-                                };
-                                let source_response = ui
-                                    .add_sized(
-                                        [source_width, row_height],
-                                        egui::Button::selectable(selected, source),
-                                    )
-                                    .on_hover_text(source);
-                                if name.clicked() || source_response.clicked() {
-                                    self.morph_selected_frame = Some(frame.index);
-                                }
-                            });
-                        }
-                    });
-            });
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    self.morph_selected_frame.is_some(),
-                    egui::Button::new("Delete"),
-                )
-                .clicked()
-            {
-                self.remove_selected_morph_frame();
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button("Add ▾", |ui| {
-                    if ui.button("Add PDB file...").clicked() {
-                        if let Some(path) = native_file_dialog(NativeFileDialog::OpenMorphPdb, "") {
-                            self.insert_morph_frame_from_pdb_path(&path);
-                        }
-                        ui.close();
-                    }
-                    ui.menu_button("Add MolCoord...", |ui| {
-                        let target = self.morph_target;
-                        let mut found = false;
-                        for object in objects.iter().filter(|object| Some(object.uid) != target) {
-                            found = true;
-                            if ui
-                                .button(format!(
-                                    "{} (MolCoord, id={})",
-                                    object.name,
-                                    object.uid.get()
-                                ))
-                                .clicked()
-                            {
-                                self.morph_source = Some(object.uid);
-                                self.morph_frame_name.clone_from(&object.name);
-                                self.append_morph_frame();
-                                ui.close();
-                            }
-                        }
-                        if !found {
-                            ui.add_enabled(false, egui::Button::new("No MolCoord object"));
-                        }
-                    });
-                });
-            });
-        });
     }
 
     fn config_tool_ui(&mut self, ui: &mut egui::Ui) {
@@ -37961,6 +37716,118 @@ mod tests {
             .error
             .contains("group was removed"));
         assert!(app.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn native_morph_requires_explicit_conversion_and_undo_restores_molecule_class() {
+        use cuemol_ui::morph::Action;
+        let mut app = GuiApplication::new();
+        let directory = tempfile::tempdir().unwrap();
+        app.config_path = directory
+            .path()
+            .join("config.xml")
+            .to_string_lossy()
+            .into_owned();
+        let pdb = b"ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n";
+        app.state.open_bytes("first.pdb", pdb).unwrap();
+        app.state.open_bytes("second.pdb", pdb).unwrap();
+        let objects = app.state.active_object_summaries();
+        let (first, second) = (objects[0].uid, objects[1].uid);
+        app.selected_object = Some(second);
+        let before = app.state.clone();
+        app.open_morph_tool();
+        assert_eq!(app.morph_editor.object, Some(first));
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| app.morph_dialog(ctx));
+        }
+        assert!(app
+            .morph_editor
+            .rects
+            .contains_key("Morph Convert to MorphMol"));
+        assert!(before.same_undo_state(&app.state));
+        assert!(app.undo_stack.is_empty());
+        assert!(!app.apply_morph_edit(Action::AddSource(second)));
+        assert!(before.same_undo_state(&app.state));
+        assert!(app.apply_morph_edit(Action::Convert));
+        assert_eq!(app.undo_stack.len(), 1);
+        assert_eq!(app.state.morph_frame_summaries(first).len(), 1);
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(first)
+                .unwrap()
+                .object_type(),
+            "MorphMol"
+        );
+        assert!(!app.apply_morph_edit(Action::Remove(0)));
+        assert_eq!(app.undo_stack.len(), 1);
+        assert!(app.apply_morph_edit(Action::AddSource(second)));
+        assert_eq!(app.morph_editor.selected, None);
+        app.morph_editor.selected = Some(0);
+        assert!(app.apply_morph_edit(Action::AddSource(second)));
+        assert_eq!(app.morph_editor.selected, Some(1));
+        assert_eq!(app.state.morph_frame_summaries(first).len(), 3);
+        assert!(app.apply_morph_edit(Action::Remove(1)));
+        assert_eq!(app.morph_editor.selected, None);
+        let mut camera = CameraController::default();
+        for _ in 0..4 {
+            app.undo(&mut camera);
+        }
+        assert!(app.state.morph_frame_value(first).is_none());
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(first)
+                .unwrap()
+                .object_type(),
+            "MolCoord"
+        );
+        for _ in 0..4 {
+            app.redo(&mut camera);
+        }
+        assert_eq!(app.state.morph_frame_summaries(first).len(), 2);
+        app.open_morph_tool();
+        assert_eq!(app.morph_editor.selected, None);
+        assert!(app.morph_editor.error.is_empty());
+        app.state.new_scene("other", true);
+        let before = app.state.clone();
+        assert!(!app.apply_morph_edit(Action::Convert));
+        assert!(before.same_undo_state(&app.state));
+        assert!(app.morph_editor.error.contains("active scene changed"));
+    }
+
+    #[test]
+    fn native_morph_pdb_batch_stops_at_error_and_preserves_prior_frame_undo() {
+        use cuemol_ui::morph::Action;
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = GuiApplication::new();
+        app.config_path = directory
+            .path()
+            .join("config.xml")
+            .to_string_lossy()
+            .into_owned();
+        let pdb = b"ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n";
+        let paths =
+            ["first.pdb", "missing.pdb", "last.pdb"].map(|name| directory.path().join(name));
+        fs::write(&paths[0], pdb).unwrap();
+        fs::write(&paths[2], pdb).unwrap();
+        app.state.open_bytes("target.pdb", pdb).unwrap();
+        let target = app.state.active_object_summaries()[0].uid;
+        app.open_morph_tool();
+        assert!(app.apply_morph_edit(Action::Convert));
+        app.morph_editor.selected = Some(0);
+        app.insert_morph_frames_from_paths(&paths);
+        assert_eq!(app.state.morph_frame_summaries(target).len(), 2);
+        assert_eq!(app.morph_editor.selected, Some(1));
+        assert!(!app.morph_editor.error.is_empty());
+        assert_eq!(app.undo_stack.len(), 2);
+        assert_eq!(app.state.active_object_summaries().len(), 1);
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert_eq!(app.state.morph_frame_summaries(target).len(), 1);
+        app.redo(&mut camera);
+        assert_eq!(app.state.morph_frame_summaries(target)[1].name, "first.pdb");
     }
 
     #[test]

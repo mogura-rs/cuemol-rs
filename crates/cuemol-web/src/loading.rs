@@ -11,6 +11,7 @@ pub(super) enum Source {
         Option<Rc<RefCell<cuemol_desktop_core::FileOpenBatch>>>,
     ),
     Camera(web_sys::File, String),
+    Morph(web_sys::File, Rc<RefCell<morph::Import>>),
     Pdb(cuemol_command::pdb::DownloadFile),
 }
 
@@ -23,16 +24,20 @@ pub(super) struct PendingOptions {
 impl Source {
     fn name(&self) -> String {
         match self {
-            Self::File(file, _) | Self::Options(file, _) | Self::Camera(file, _) => file.name(),
+            Self::File(file, _)
+            | Self::Options(file, _)
+            | Self::Camera(file, _)
+            | Self::Morph(file, _) => file.name(),
             Self::Pdb(file) => file.filename.clone(),
         }
     }
 
     async fn open(self, signal: Option<web_sys::AbortSignal>) -> Result<web_sys::File, JsValue> {
         let download = match self {
-            Self::File(file, _) | Self::Options(file, _) | Self::Camera(file, _) => {
-                return Ok(file)
-            }
+            Self::File(file, _)
+            | Self::Options(file, _)
+            | Self::Camera(file, _)
+            | Self::Morph(file, _) => return Ok(file),
             Self::Pdb(download) => download,
         };
         let options = web_sys::RequestInit::new();
@@ -99,6 +104,7 @@ impl App {
         self.source_pdb = None;
         self.source_batch = None;
         self.source_setup = None;
+        self.source_morph = None;
         self.source_target = None;
         self.source_options = None;
         if self.source_active {
@@ -193,6 +199,25 @@ impl App {
                 return;
             }
             Source::Camera(file, name) => (file, Some(name)),
+            Source::Morph(file, batch) => {
+                if !self.current_morph_import(&batch.borrow()) {
+                    enqueue(Event::SourceFinished(generation));
+                    return;
+                }
+                self.source_morph = Some(batch.clone());
+                self.start_prepared_source_options(
+                    Source::Morph(file, batch),
+                    name,
+                    generation,
+                    Some((
+                        cuemol_desktop_core::GuiFileReaderOptions::Molecule(
+                            cuemol_desktop_core::molecule_reader_options_for_format("pdb").unwrap(),
+                        ),
+                        None,
+                    )),
+                );
+                return;
+            }
             remote => {
                 self.start_prepared_source(remote, name, generation);
                 return;
@@ -482,6 +507,10 @@ impl App {
 
     pub(super) fn apply_prepared(&mut self, name: String, file: PreparedFile) {
         if !self.validate_source_scene() {
+            return;
+        }
+        if self.source_morph.is_some() {
+            self.apply_morph_prepared(file);
             return;
         }
         let source = file

@@ -95,6 +95,9 @@ pub mod secondary;
 pub mod molecule_edit;
 
 #[cfg(feature = "egui")]
+pub mod morph;
+
+#[cfg(feature = "egui")]
 pub mod superposition;
 #[cfg(feature = "egui")]
 pub mod surface;

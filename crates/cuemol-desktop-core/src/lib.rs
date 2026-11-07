@@ -4154,7 +4154,7 @@ impl DesktopAppState {
                     object_uid,
                     None,
                     object.name().to_string(),
-                    "MolCoord".to_string(),
+                    object.object_type().to_string(),
                     true,
                 )];
                 entries.extend(object.renderers().iter().map(|renderer| {
@@ -17416,9 +17416,12 @@ impl DesktopAppState {
             .mol()
             .clone();
         let atom_count = molecule.atom_count();
-        let already_initialized = self.morphs.contains_key(&object_uid);
+        let object = self.scene_manager_mut().object_mut(object_uid).unwrap();
+        let type_changed = object.object_type() != "MorphMol";
+        object.set_object_type("MorphMol");
         let morph = self.morphs.entry(object_uid).or_default();
-        if !already_initialized {
+        let initialized = morph.frame_size() == 0;
+        if initialized {
             *morph.molecule_mut() = molecule;
             morph.append_this_frame();
         }
@@ -17428,7 +17431,7 @@ impl DesktopAppState {
                 frame_count: morph.frame_size(),
                 atom_count,
             },
-            !already_initialized,
+            initialized || type_changed,
         ))
     }
 
@@ -17439,16 +17442,20 @@ impl DesktopAppState {
         frame_name: impl Into<String>,
         insert_before: Option<usize>,
     ) -> Result<GuiMorphSummary> {
-        let source_molecule = self
-            .scene_manager()
-            .object(source_object)
-            .ok_or_else(|| CueMolError::NotFound(format!("source object {}", source_object.get())))?
-            .mol()
-            .clone();
+        let source_object_data = self.scene_manager().object(source_object).ok_or_else(|| {
+            CueMolError::NotFound(format!("source object {}", source_object.get()))
+        })?;
+        let source_molecule = source_object_data.mol().clone();
+        let frame_name = frame_name.into();
+        let frame_name = if frame_name.trim().is_empty() {
+            source_object_data.name().to_string()
+        } else {
+            frame_name
+        };
         self.insert_morph_frame(
             target_object,
             source_molecule,
-            frame_name.into(),
+            frame_name,
             format!("object:{}", source_object.get()),
             "molecule".to_string(),
             insert_before,
@@ -17507,7 +17514,8 @@ impl DesktopAppState {
             .mol()
             .clone();
         let target_atom_count = target_molecule.atom_count();
-        let morph = self.morphs.entry(target_object).or_default();
+        self.initialize_morph_object(target_object)?;
+        let morph = self.morphs.get_mut(&target_object).unwrap();
         *morph.molecule_mut() = target_molecule;
         let frame = MorphFrame::new(
             frame_name,
