@@ -1,6 +1,9 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["pyautogui==0.9.54", "pillow>=11,<14"]
+# dependencies = [
+#   "pyautogui==0.9.54", "pillow>=11,<14",
+#   "pyobjc-framework-ApplicationServices>=11; sys_platform == 'darwin'",
+# ]
 # ///
 """Check an actual native window using OS mouse events and captured pixels."""
 import argparse
@@ -19,6 +22,33 @@ from PIL import Image, ImageChops, ImageGrab, ImageStat
 
 class ApplicationExited(Exception):
     pass
+
+
+def application_menu_action(pid, group, title):
+    import ApplicationServices as AX
+
+    def attribute(element, name):
+        error, value = AX.AXUIElementCopyAttributeValue(element, name, None)
+        if error != AX.kAXErrorSuccess:
+            raise RuntimeError(f'Cannot read application menu {name}: {error}')
+        return value
+
+    def item(parent, name):
+        for child in attribute(parent, AX.kAXChildrenAttribute):
+            label = attribute(child, AX.kAXTitleAttribute) or ''
+            if label.replace('…', '...') == name.replace('…', '...'):
+                return child
+        raise RuntimeError(f'Application menu item is missing: {name}')
+
+    application = AX.AXUIElementCreateApplication(pid)
+    bar = attribute(application, AX.kAXMenuBarAttribute)
+    heading = item(bar, group)
+    if AX.AXUIElementPerformAction(heading, AX.kAXPressAction) != AX.kAXErrorSuccess:
+        raise RuntimeError(f'Cannot open application menu: {group}')
+    menu = attribute(heading, AX.kAXChildrenAttribute)[0]
+    command = item(menu, title)
+    if AX.AXUIElementPerformAction(command, AX.kAXPressAction) != AX.kAXErrorSuccess:
+        raise RuntimeError(f'Cannot activate application menu item: {title}')
 
 
 def desktop_work_area():
@@ -256,6 +286,7 @@ def main():
         return result['result']
 
     report = {'system': platform.system(), 'machine': platform.machine()}
+    menu_inset = 26 if sys.platform == 'darwin' else 0
     with (work / 'gui.log').open('w') as log:
         process = subprocess.Popen([str(binary), str(fixture)], cwd=work, env=env,
                                    stdout=log, stderr=subprocess.STDOUT)
@@ -273,7 +304,7 @@ def main():
                 time.sleep(0.3)
                 if args.file_options_only or args.renderer_history_only:
                     ImageGrab.grab(bbox=(initial_x, initial_y, initial_x + initial_width, initial_y + initial_height)).save(work / 'file-options-startup.png')
-                pyautogui.moveTo(initial_x + 387, initial_y + 339)
+                pyautogui.moveTo(initial_x + 387, initial_y + 339 - menu_inset)
                 time.sleep(0.12)
                 pyautogui.click()
             state = wait_for(loaded, timeout=90)
@@ -287,11 +318,18 @@ def main():
             x, y, width, height = client
             if [width, height] != [window_width, window_height]:
                 raise RuntimeError(f'The client area {client} differs from the requested size')
-            report.update(window=bounds, client=client)
+            report.update(window=bounds, client=client, coordinate_top_inset=menu_inset)
+            # Keep shared control coordinates when macOS moves the menu outside the window.
+            y -= menu_inset
+            height += menu_inset
             time.sleep(0.5)
 
             def capture(name=None):
-                image = ImageGrab.grab(bbox=(x, y, x + width, y + height)).convert('RGB')
+                image = ImageGrab.grab(bbox=(client[0], client[1], client[0] + client[2], client[1] + client[3])).convert('RGB')
+                if menu_inset:
+                    padded = Image.new('RGB', (width, height))
+                    padded.paste(image, (0, menu_inset))
+                    image = padded
                 if name:
                     image.save(work / name)
                 return image
@@ -1358,12 +1396,15 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             capture('inspector-scene.png')
 
             previous_inspector = inspector_heading()
-            view_menu_box = (172, 25, 330, 245)
-            before_view_menu = capture().crop(view_menu_box)
-            click_at(x + 180, y + 13)
-            wait_for(lambda: ImageChops.difference(before_view_menu, capture().crop(view_menu_box)).getbbox())
-            capture('inspector-view-menu.png')
-            click_at(x + 240, y + 228)
+            if sys.platform == 'darwin':
+                application_menu_action(process.pid, 'View', 'View property...')
+            else:
+                view_menu_box = (172, 25, 330, 195)
+                before_view_menu = capture().crop(view_menu_box)
+                click_at(x + 180, y + 13)
+                wait_for(lambda: ImageChops.difference(before_view_menu, capture().crop(view_menu_box)).getbbox())
+                capture('inspector-view-menu.png')
+                click_at(x + 240, y + 176)
             wait_for_inspector_target(previous_inspector)
             inspector_filter('zoom')
             before_inspector_zoom = call('get_view')['zoom']
@@ -1416,11 +1457,11 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             call('clear_undo')
             double_click_at(x + width - 100, y + 225, interval=0.1)
             pyautogui.hotkey(primary, 'a')
-            pyautogui.write('2')
+            pyautogui.write('1.25')
             pyautogui.press('enter')
             def axis(key):
                 return call('get_prop', {'path': f'#{axes_id}.section.{key}'})['value']
-            wait_for(lambda: axis('width') == '2' and axis('tuber') == '0.25')
+            wait_for(lambda: axis('width') == '1.25' and axis('tuber') == '0.4')
             inspector_filter('section.tuber')
             double_click_at(x + width - 100, y + 225, interval=0.1)
             pyautogui.hotkey(primary, 'a')
@@ -1435,7 +1476,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.hotkey(primary, 'z')
             wait_for(lambda: axis('width') == '1' and axis('tuber') == '0.5')
             pyautogui.hotkey(primary, 'shift', 'z')
-            wait_for(lambda: axis('width') == '2' and axis('tuber') == '0.25')
+            wait_for(lambda: axis('width') == '1.25' and axis('tuber') == '0.4')
             capture('inspector-axes.png')
             script(f'var obj=cuemol.getObject(JSON.parse(scene.getObjectTreeJSON())[0].ID);'
                    f'obj.destroyRenderer({axes_id});'

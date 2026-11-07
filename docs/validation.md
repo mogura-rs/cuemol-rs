@@ -1,5 +1,85 @@
 # Validation evidence
 
+## Current application and distribution verification
+
+The current application revision is `f7f5829`. Native Linux x86-64, native
+Apple-silicon macOS and embedded browser builds all report that clean commit.
+The following test/documentation update does not change application sources.
+The read-only reference remains `794fe4ac` (3.0.0.554).
+
+| Check | Result and scope |
+| --- | --- |
+| Shared workspace with scripting | 1,848 passed, zero failed and five optional tests ignored across 152 test executables/doc-test groups. The command's four external-tool/live-metadata cases and the movie GPU case subsequently passed explicitly. |
+| Native egui and shared UI | 244 native GUI/library cases, 76 shared UI cases and 68 shell contracts passed. |
+| Tauri | 214 model/library cases and 68 shell contracts passed, with six optional cases ignored. Five GPU/encoder cases subsequently passed explicitly; the remaining case is an opt-in interactive profiling benchmark. |
+| Browser | All 395 Chromium cases passed in one 45.7-minute run, including WebGL/WebGPU and 95 Tauri DOM cases. This is the current clean browser build; it is not a Firefox/WebKit or physical Tauri WebView run. |
+| Current command inventory | 129 reference registrations, 127 MCP operations, 444 parameters and 159 console names/aliases matched, with no catalog differences. This verifies the inventory; behavior evidence remains listed by feature below. |
+| Distribution helpers | All 12 tests passed, including complete-matrix and source/checksum rejection fixtures. |
+
+The optimized native builds completed in 5 min 55 s on Apple silicon and
+18 min 21 s on Linux x86-64; the Linux target cache required a substantial
+rebuild. Repeating the unchanged Linux build took 1.35 s. These are observations
+from separate hosts and cache states, not a cross-platform performance comparison.
+The optimized browser build completed in 45.32 s using its existing cache.
+
+Both packaged native applications passed Python/helper, Umbreon, APBS, POV-Ray,
+OIDN, PDB2PQR and FFmpeg checks using their bundled tools. Installer and
+self-upgrade fixtures passed checksum rejection and failed-replacement rollback.
+Each packaged executable also served all 45 embedded assets from an empty working
+directory. All 90 identity/gzip transfers per platform matched the browser
+manifest. Neither source-tree paths nor tool-directory overrides were needed.
+The Apple-silicon tool bundle was reused from the earlier verified distribution;
+its tool-build inputs are unchanged, and this is not evidence of a new tool build.
+
+The packaged Linux window passed the full default OS mouse/keyboard check:
+rotation, zoom, slab, selection, console/Python, clipboard, Inspector fields,
+font controls and Undo/Redo. Two obsolete harness assumptions were corrected
+before that successful run: the current View property item moved within its
+menu, and the tube Width1 input is limited to 1.5. The test now enters 1.25 and
+still verifies that Width2 stays 0.5 through editing, Undo and Redo. The earlier
+failed runs remain diagnostic evidence, not successful checks.
+
+The same harness now uses macOS application-menu accessibility actions and
+accounts for the removed 26-pixel in-window menu bar. A headless egui layout
+measurement confirms that top controls move by 26 pixels while bottom controls
+retain their positions. Python syntax and the required accessibility API names
+were checked, but the macOS OS-input path remains unexecuted because its screen
+and accessibility permissions are not granted.
+
+Additional real macOS native and Tauri runs started an external rendering worker,
+hid the Rendering window and invoked the application's actual Quit menu. Both
+processes exited normally, stopped the child, removed staging output and preserved
+the previous image. The optimized packaged macOS app also exited normally with
+its Rendering window hidden. These in-process AppKit menu probes do not establish
+physical keyboard/mouse or foreground focus behavior.
+
+Four local validation archives are staged under `.cache/distribution-f7f5829`:
+Linux x86-64 CLI, Apple-silicon CLI, Apple-silicon app and browser. Their
+`SHA256SUMS` and `validation-manifest.json` record archive checksums, native and
+browser revisions, binary hashes and the incomplete platform matrix. The macOS
+app and CLI contain the same native binary. All native archives retain tool
+provenance. They are untagged version 0.1.0 validation artifacts, not a published
+release. Current Windows, ARM Linux and Intel macOS artifacts have not been built;
+the earlier five-platform evidence belongs to its recorded baseline.
+The production complete-matrix release check remains strict and was not bypassed.
+
+Evidence is in `.cache/current-audit/*f7f5829*` and
+`.cache/release-gui-f7f5829-harness/`. The workspace, native and Tauri totals are
+separate runs and include overlapping contracts; they must not be added into a
+single unique-test count. Earlier entries below retain their historical counts.
+
+## Hardware stereo scope in the current reference
+
+The current reference's `GUIView.cpp` and `ogl_core/OcView.cpp` comment out the
+`CSM_HW_QBUF` draw branches. `View::hasHWStereo()` returns false by default, and
+the current Tritium menu does not expose a hardware-stereo action. The legacy
+Windows view still requests stereo-capable pixel formats and reports that
+capability; capability selection alone does not execute the disabled draw path.
+This differs from assuming that every legacy declaration is an active CueMol3
+feature. The Rust hardware-presentation backend remains unimplemented, and the
+authorized Apple-silicon host cannot validate it. The software-stereo checks
+below remain valid within their stated scope.
+
 ## Application shutdown and external workers
 
 An exit regression reproduced an FFmpeg process surviving the process that
