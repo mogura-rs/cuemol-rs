@@ -530,6 +530,8 @@ function setupTritiumShell() {
   document.querySelector('[data-shell-action="theme"]').addEventListener("click", () => {
     document.documentElement.dataset.theme = document.documentElement.dataset.theme === "light" ? "dark" : "light";
     saveCueMolShell();
+    if (preferences) preferences.darkMode = document.documentElement.dataset.theme !== "light";
+    void invoke("set_config_value", {key: "layout:theme", value: document.documentElement.dataset.theme}).catch(showError);
   });
   document.querySelector('[data-shell-action="close-inspector"]').addEventListener("click", () => {
     void cancelCueMolNumericDrag();

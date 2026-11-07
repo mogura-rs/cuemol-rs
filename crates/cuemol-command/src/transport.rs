@@ -71,22 +71,35 @@ pub fn info_path() -> PathBuf {
 }
 
 pub fn read_info(path: &Path) -> Result<ConnectionInfo> {
+    read_info_for(path, ApiEndpoint::Mcp)
+}
+
+pub fn read_info_for(path: &Path, endpoint: ApiEndpoint) -> Result<ConnectionInfo> {
     let data = std::fs::read(path)?;
     let info: ConnectionInfo =
         serde_json::from_slice(&data).map_err(|e| CueMolError::parse(e.to_string()))?;
     if info.port == 0
         || info.token.is_empty()
-        || !info.endpoints.iter().any(|endpoint| endpoint == "mcp")
+        || !info.endpoints.iter().any(|name| name == endpoint.name())
     {
-        return Err(CueMolError::invalid_argument(
-            "MCP is not enabled in this connection file",
-        ));
+        return Err(CueMolError::invalid_argument(format!(
+            "{} is not enabled in this connection file",
+            endpoint.name()
+        )));
     }
     Ok(info)
 }
 
 pub fn post(info: &ConnectionInfo, request: &Value) -> Result<Option<Value>> {
-    let url = format!("http://127.0.0.1:{}/mcp", info.port);
+    post_to(info, ApiEndpoint::Mcp, request)
+}
+
+pub fn post_to(
+    info: &ConnectionInfo,
+    endpoint: ApiEndpoint,
+    request: &Value,
+) -> Result<Option<Value>> {
+    let url = format!("http://127.0.0.1:{}/{}", info.port, endpoint.name());
     let mut response = ureq::post(&url)
         .header("Authorization", format!("Bearer {}", info.token))
         .header("Accept", "application/json, text/event-stream")
@@ -128,8 +141,29 @@ pub fn connect_stdio(path: &Path) -> Result<()> {
     stdio(|request| post(&info, &request))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiEndpoint {
+    Mcp,
+    Console,
+}
+impl ApiEndpoint {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Mcp => "mcp",
+            Self::Console => "console",
+        }
+    }
+    fn bit(self) -> u8 {
+        match self {
+            Self::Mcp => 1,
+            Self::Console => 2,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ApiRequest {
+    pub endpoint: ApiEndpoint,
     pub message: Value,
     pub reply: mpsc::SyncSender<Option<Value>>,
 }
@@ -139,12 +173,13 @@ pub struct ApiServer {
     stop: Arc<AtomicBool>,
     info: ConnectionInfo,
     path: PathBuf,
+    endpoints: Arc<std::sync::atomic::AtomicU8>,
 }
 
 #[derive(Default)]
 pub struct GuiApiServer {
     server: Option<ApiServer>,
-    requested_port: Option<u16>,
+    requested_port: Option<(u16, bool, bool)>,
 }
 
 impl GuiApiServer {
@@ -158,18 +193,35 @@ impl GuiApiServer {
         state: &DesktopAppState,
         wake: impl Fn() + Send + 'static,
     ) -> Result<bool> {
-        if !state.mcp_server_enabled() || std::env::var_os("CUEMOL_DISABLE_MCP").is_some() {
+        let mcp = state.mcp_server_enabled();
+        let console = state.console_remote_enabled();
+        if (!mcp && !console) || std::env::var_os("CUEMOL_DISABLE_MCP").is_some() {
             self.requested_port = None;
             return Ok(self.server.take().is_some());
         }
         let port = state.mcp_server_port()?;
-        if self.requested_port == Some(port) {
+        if self.requested_port == Some((port, mcp, console)) {
             return Ok(false);
         }
+        let endpoints = [(ApiEndpoint::Mcp, mcp), (ApiEndpoint::Console, console)]
+            .into_iter()
+            .filter_map(|(endpoint, enabled)| enabled.then_some(endpoint))
+            .collect::<Vec<_>>();
+        if self
+            .requested_port
+            .is_some_and(|previous| previous.0 == port)
+        {
+            if let Some(server) = &mut self.server {
+                server.set_endpoints(&endpoints)?;
+                let mcp_changed = self.requested_port.is_none_or(|previous| previous.1 != mcp);
+                self.requested_port = Some((port, mcp, console));
+                return Ok(mcp_changed);
+            }
+        }
         self.server = None;
-        self.requested_port = Some(port);
-        self.server = Some(ApiServer::start(([127, 0, 0, 1], port).into(), wake).map_err(|error| {
-            CueMolError::Io(format!("MCP listener failed: {error}. Change the port or disable and enable MCP to retry."))
+        self.requested_port = Some((port, mcp, console));
+        self.server = Some(ApiServer::start_with_endpoints(([127, 0, 0, 1], port).into(), wake, endpoints).map_err(|error| {
+            CueMolError::Io(format!("Local API listener failed: {error}. Change the port or disable and enable connection access to retry."))
         })?);
         Ok(true)
     }
@@ -184,6 +236,13 @@ impl GuiApiServer {
 
 impl ApiServer {
     pub fn start(address: SocketAddr, wake: impl Fn() + Send + 'static) -> Result<Self> {
+        Self::start_with_endpoints(address, wake, vec![ApiEndpoint::Mcp])
+    }
+    pub fn start_with_endpoints(
+        address: SocketAddr,
+        wake: impl Fn() + Send + 'static,
+        endpoints: Vec<ApiEndpoint>,
+    ) -> Result<Self> {
         if !address.ip().is_loopback() {
             return Err(CueMolError::invalid_argument(
                 "MCP must listen on a loopback address",
@@ -205,7 +264,10 @@ impl ApiServer {
             port: address.port(),
             token: token.clone(),
             pid: std::process::id(),
-            endpoints: vec!["mcp".into()],
+            endpoints: endpoints
+                .iter()
+                .map(|endpoint| endpoint.name().into())
+                .collect(),
         };
         let directory = config::directory();
         std::fs::create_dir_all(&directory)?;
@@ -223,6 +285,12 @@ impl ApiServer {
         staged
             .persist(&path)
             .map_err(|e| CueMolError::Io(e.to_string()))?;
+        let enabled = Arc::new(std::sync::atomic::AtomicU8::new(
+            endpoints
+                .iter()
+                .fold(0, |mask, endpoint| mask | endpoint.bit()),
+        ));
+        let endpoint_flags = enabled.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let quitting = stop.clone();
         let (send, requests) = mpsc::sync_channel(16);
@@ -255,10 +323,17 @@ impl ApiServer {
                     let _ = request.respond(tiny_http::Response::empty(401));
                     continue;
                 }
-                if request.url() != "/mcp" {
+                let Some(endpoint) =
+                    [ApiEndpoint::Mcp, ApiEndpoint::Console]
+                        .into_iter()
+                        .find(|endpoint| {
+                            endpoint_flags.load(Ordering::Relaxed) & endpoint.bit() != 0
+                                && request.url() == format!("/{}", endpoint.name())
+                        })
+                else {
                     let _ = request.respond(tiny_http::Response::empty(404));
                     continue;
-                }
+                };
                 if request.method() != &tiny_http::Method::Post {
                     let _ = request.respond(tiny_http::Response::empty(405));
                     continue;
@@ -289,14 +364,23 @@ impl ApiServer {
                     }
                 };
                 let (reply, answer) = mpsc::sync_channel(1);
-                if send.try_send(ApiRequest { message, reply }).is_err() {
+                if send
+                    .try_send(ApiRequest {
+                        endpoint,
+                        message,
+                        reply,
+                    })
+                    .is_err()
+                {
                     let _ = request.respond(tiny_http::Response::empty(503));
                     continue;
                 }
                 wake();
                 let deadline = std::time::Instant::now() + Duration::from_secs(1250);
                 let response = loop {
-                    if quitting.load(Ordering::Relaxed) {
+                    if quitting.load(Ordering::Relaxed)
+                        || endpoint_flags.load(Ordering::Relaxed) & endpoint.bit() == 0
+                    {
                         break Err(503);
                     }
                     let timeout = deadline
@@ -334,7 +418,46 @@ impl ApiServer {
             stop,
             info,
             path,
+            endpoints: enabled,
         })
+    }
+
+    fn set_endpoints(&mut self, endpoints: &[ApiEndpoint]) -> Result<()> {
+        let info = ConnectionInfo {
+            endpoints: endpoints
+                .iter()
+                .map(|endpoint| endpoint.name().into())
+                .collect(),
+            ..self.info.clone()
+        };
+        if connection_file_token(&self.path).is_none_or(|token| token == self.info.token) {
+            let directory = self
+                .path
+                .parent()
+                .ok_or_else(|| CueMolError::Io("Missing connection file directory".into()))?;
+            let mut staged = tempfile::NamedTempFile::new_in(directory)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                staged
+                    .as_file()
+                    .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            serde_json::to_writer(&mut staged, &info)
+                .map_err(|error| CueMolError::Io(error.to_string()))?;
+            staged.flush()?;
+            staged
+                .persist(&self.path)
+                .map_err(|error| CueMolError::Io(error.to_string()))?;
+        }
+        self.info = info;
+        self.endpoints.store(
+            endpoints
+                .iter()
+                .fold(0, |mask, endpoint| mask | endpoint.bit()),
+            Ordering::Relaxed,
+        );
+        Ok(())
     }
 
     pub fn port(&self) -> u16 {
@@ -345,7 +468,7 @@ impl ApiServer {
 impl Drop for ApiServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if read_info(&self.path).is_ok_and(|info| info.token == self.info.token) {
+        if connection_file_token(&self.path).is_some_and(|token| token == self.info.token) {
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -485,4 +608,70 @@ pub(crate) fn fetch_emdb(
         .and_then(|bytes| crate::load_fetched(state, camera, &plan, &bytes));
     let _ = std::fs::remove_file(path);
     result
+}
+
+#[derive(Debug)]
+pub struct ConsoleReply {
+    request: ApiRequest,
+    previous: Vec<String>,
+    output: Vec<String>,
+    output_bytes: usize,
+}
+impl ConsoleReply {
+    pub fn new(request: ApiRequest, log: &[String]) -> Self {
+        Self {
+            request,
+            previous: log.to_vec(),
+            output: Vec::new(),
+            output_bytes: 0,
+        }
+    }
+    pub fn collect(&mut self, log: &[String]) {
+        let retained = (0..=self.previous.len().min(log.len()))
+            .rev()
+            .find(|count| self.previous[self.previous.len() - count..] == log[..*count])
+            .unwrap_or(0);
+        for line in &log[retained..] {
+            if self.output_bytes + line.len() + 1 > 4 * 1024 * 1024 {
+                break;
+            }
+            self.output_bytes += line.len() + 1;
+            self.output.push(line.clone());
+        }
+        self.previous = log.to_vec();
+    }
+    pub fn finish(mut self, log: &[String], ok: bool, status: &str) {
+        self.collect(log);
+        let _ = self.request.reply.send(Some(
+            serde_json::json!({"ok":ok,"status":status,"output":self.output.join("\n")}),
+        ));
+    }
+}
+
+pub fn console_dialect(message: &Value) -> std::result::Result<crate::console::Dialect, String> {
+    use crate::console::Dialect;
+    match message["dialect"]
+        .as_str()
+        .unwrap_or("cuemol")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "cuemol" => Ok(Dialect::CueMol),
+        "pymol" => Ok(Dialect::PyMol),
+        "chimerax" | "chx" => Ok(Dialect::ChimeraX),
+        "javascript" | "js" => Ok(Dialect::JavaScript),
+        other => Err(format!("Unknown console dialect: {other}")),
+    }
+}
+pub fn reject_console(request: ApiRequest, error: impl Into<String>) {
+    let _ = request.reply.send(Some(
+        serde_json::json!({"ok":false,"status":error.into(),"output":""}),
+    ));
+}
+
+fn connection_file_token(path: &Path) -> Option<String> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ConnectionInfo>(&bytes).ok())
+        .map(|info| info.token)
 }

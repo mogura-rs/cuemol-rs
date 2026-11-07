@@ -386,6 +386,14 @@ impl Session {
         }
     }
 
+    pub fn set_working_directory(&mut self, path: &Path) -> Result<(), String> {
+        if !path.is_dir() {
+            return Err(format!("Not a directory: {}", path.display()));
+        }
+        self.cwd = path.canonicalize().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     pub fn cwd(&self) -> &Path {
         &self.cwd
     }

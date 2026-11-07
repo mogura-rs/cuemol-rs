@@ -478,7 +478,12 @@ impl App {
                             }
                         }
                         ui.separator();
-                        if ui.checkbox(&mut self.dark, "Dark theme").changed() {
+                        let theme = ui.checkbox(&mut self.dark, "Dark theme");
+                        self.record_ui_rect("Dark theme", &theme);
+                        if theme.changed() {
+                            self.state.put_config_value("layout:theme", if self.dark { "dark" } else { "light" });
+                            self.settings_text = self.state.config_text();
+                            self.settings_draft = None;
                             if let Some(storage) =
                                 web_sys::window().and_then(|w| w.local_storage().ok().flatten())
                             {
@@ -486,6 +491,7 @@ impl App {
                                     "cuemol.theme",
                                     if self.dark { "dark" } else { "light" },
                                 );
+                                let _ = storage.set_item("cuemol.config", &self.settings_text);
                             }
                         }
                         ui.menu_button("Stereo", |ui| {

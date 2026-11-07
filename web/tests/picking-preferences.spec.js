@@ -9,7 +9,7 @@ async function click(page,key){
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
 }
 async function settings(page){
-  await click(page,'Tools menu');await click(page,'Settings');
+  await click(page,'Tools menu');await click(page,'Settings');await click(page,'Settings Mouse & Navigation');
   const [x,y,w,h]=(await status(page)).ui.rects['Settings window'];
   await page.mouse.move(x+w-30,y+h/2);await page.mouse.wheel(0,-1600);
   await expect.poll(async()=>(await status(page)).ui.rects['GPU picking'][1]).toBeGreaterThan(y+25);
@@ -41,6 +41,7 @@ for(const backend of ['webgl','webgpu'])test(`Picking preferences ${backend} con
   await page.screenshot({path:testInfo.outputPath('picking-settings.png')});
   const window=(await status(page)).ui.rects['Settings window'];
   expect(window[1]+window[3]).toBeLessThanOrEqual(page.viewportSize().height);
+  await click(page,'Settings Configuration & Startup');
   await page.mouse.move(window[0]+window[2]-30,window[1]+window[3]-40);
   await page.mouse.wheel(0,1200);
   await expect.poll(async()=>{const [x,y,w,h]=(await status(page)).ui.rects['Settings Save'];return y+h;}).toBeLessThan(window[1]+window[3]);

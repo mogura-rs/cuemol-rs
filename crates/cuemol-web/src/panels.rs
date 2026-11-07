@@ -263,106 +263,107 @@ impl App {
         self.inspector.visible = true;
     }
     pub(super) fn settings_ui(&mut self, ctx: &egui::Context) {
-        let mut open = self.show_settings;
-        let window = egui::Window::new("Settings").open(&mut open).default_width(620.)
-            .max_height((ctx.content_rect().height()-60.).max(120.)).vscroll(true).show(ctx,|ui|{
-            if let Some(scene) = self.state.active_scene() {
-                let mut proof = self.state.scene_manager().scene(scene).and_then(|s| s.scene_attribute("use_colproof")).is_some_and(|v| v == "true");
-                if ui.checkbox(&mut proof, "Use color proofing").changed() {
-                    self.call("set_node_prop", json!({"nodeType":"scene", "prop":"use_colproof", "value":proof.to_string()}));
-                }
-                ui.label(format!("ICC profile: {}", self.state.config_value("color:icc_profile")));
-                if ui.button("Import ICC profile…").clicked() { choose_file(); }
-            }
-            let mut input_changed = false;
-            let mut target = cuemol_desktop_core::FileOpenTarget::from_config(&self.state.config_value("files:drop-target"));
-            let old_target = target;
-            let combo = egui::ComboBox::from_label("Drag and drop opens into")
-                .selected_text(if target == cuemol_desktop_core::FileOpenTarget::New {"New scene"} else {"Current scene"})
-                .show_ui(ui, |ui| {
-                    for (value, label) in [(cuemol_desktop_core::FileOpenTarget::Active, "Current scene"), (cuemol_desktop_core::FileOpenTarget::New, "New scene")] {
-                        let response = ui.selectable_value(&mut target, value, label);
-                        self.record_ui_rect(&format!("Drop target {label}"), &response);
-                    }
-                });
-            self.record_ui_rect("Drag and drop opens into", &combo.response);
-            if target != old_target { self.state.put_config_value("files:drop-target", target.as_str()); input_changed = true; }
-            for (key, label, options) in [
-                ("view_input:device", "Input device", &["auto", "mouse", "trackpad"][..]),
-                ("cuemol2.ui.viewinconf", "View operation preset", &["DefaultViewInConf", "CootViewInConf", "PymolViewInConf", "IphoneViewInConf", "TrackpadViewInConf"][..]),
-            ] {
-                let old = self.state.config_value(key);
-                let mut value = if old.is_empty() { options[0].to_string() } else { old.clone() };
-                let combo = egui::ComboBox::from_label(label).selected_text(&value).show_ui(ui, |ui| {
-                    for option in options {
-                        let response = ui.selectable_value(&mut value, option.to_string(), *option);
-                        self.record_ui_rect(&format!("input:{key}:{option}"), &response);
-                    }
-                });
-                self.record_ui_rect(label, &combo.response);
-                if value != old { self.state.put_config_value(key, value); input_changed = true; }
-            }
-            let mut momentum = self.state.config_value("cuemol2.ui.mouse-momentum-scroll") == "true";
-            if ui.checkbox(&mut momentum, "Momentum scroll").changed() { self.state.put_config_value("cuemol2.ui.mouse-momentum-scroll", momentum.to_string()); input_changed = true; }
-            let mut gpu_picking = self.state.resolved_view_input(false).gpu_pick();
-            let response = ui.checkbox(&mut gpu_picking, "GPU picking")
-                .on_hover_text("Pick rendered geometry. Turn off to pick atom centers on the CPU.");
-            self.record_ui_rect("GPU picking", &response);
-            if response.changed() { self.state.put_config_value("view_input:gpu-pick", gpu_picking.to_string()); input_changed = true; }
-            for (key,label,default) in [("view_input:hover-info","Hover info",true),("view_input:hover-highlight","Hover highlight",true),("cuemol2.ui.mouse-emulate-rbutton","Emulate mouse R button",false)] {
-                let raw=self.state.config_value(key); let mut value=if raw.is_empty(){default}else{raw=="true"};
-                let response=ui.checkbox(&mut value,label); self.record_ui_rect(label,&response);
-                if response.changed(){self.state.put_config_value(key,value.to_string());input_changed=true;}
-            }
-            let plugins = ui.collapsing("Plugins", |ui| {
-                ui.strong("Installed plugins");
-                for plugin in cuemol_desktop_core::plugins::BUILTIN_PLUGINS.iter().filter(|plugin| !plugin.always_enabled && plugin.id != "mcp") {
-                    let mut enabled = self.state.plugin_enabled(plugin.id);
-                    let response = ui.checkbox(&mut enabled, plugin.name);
-                    self.record_ui_rect(&format!("Plugin {}", plugin.id), &response);
-                    if response.changed() {
-                        let _ = self.state.set_plugin_enabled(plugin.id, enabled);
-                        if plugin.id == "agent" {
-                            self.agent.settings.enabled = enabled;
-                            if !enabled { self.agent.cancel("AI Agent plugin disabled."); }
-                        }
-                        input_changed = true;
-                    }
-                }
-            });
-            self.record_ui_rect("Plugins", &plugins.header_response);
-            if input_changed {
-                self.state.view_input_config_mut().set_style("");
-                self.settings_text = self.state.config_text();
-                if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) { let _ = storage.set_item("cuemol.config", &self.settings_text); }
-            }
-            ui.label("Settings are saved in this browser. Use the same tab-separated configuration format as the native application.");
-            ui.add(egui::TextEdit::multiline(&mut self.settings_text).code_editor().desired_rows(8).desired_width(f32::INFINITY));
-            ui.separator();ui.label("Startup JavaScript");
-            ui.label("Runs when the viewer opens. Saved scenes and the cuemol scripting API are available.");
-            ui.add(egui::TextEdit::multiline(&mut self.startup_text).code_editor().desired_rows(10).desired_width(f32::INFINITY));
-            ui.horizontal(|ui|{
-                let save = ui.button("Save");
-                self.record_ui_rect("Settings Save", &save);
-                if save.clicked(){
-                    let previous=self.state.clone();
-                    match self.state.load_config_text(&self.settings_text){
-                        Ok(_)=>{
-                            self.agent.settings.enabled = self.state.plugin_enabled("agent");
-                            if !self.agent.settings.enabled { self.agent.cancel("AI Agent plugin disabled."); }
-                            self.state.view_input_config_mut().set_style("");if let Some(storage)=web_sys::window().and_then(|w|w.local_storage().ok().flatten()){
-                            let result=storage.set_item("cuemol.config",&self.settings_text).and_then(|_|storage.set_item("cuemol.startup",&self.startup_text));
-                            self.message=result.map(|_|"Settings saved.".to_string()).unwrap_or_else(js_error);
-                        }else{self.message="Browser storage is unavailable.".into();}}
-                        Err(e)=>{self.state=previous;self.message=e.to_string();}
-                    }
-                }
-                if ui.button("Run startup now").clicked(){self.call("execute_script",json!({"source":self.startup_text}));}
-            });
+        if !self.show_settings {
+            self.settings_draft = None;
+            return;
+        }
+        let mut open = true;
+        let mut draft = self.settings_draft.take().unwrap_or_else(|| {
+            cuemol_desktop_core::preferences::Preferences::from_state(&self.state)
         });
+        let previous = draft.clone();
+        let mut panel = std::mem::take(&mut self.settings_panel);
+        let mut actions = Vec::new();
+        let mut reloaded = false;
+        let window=egui::Window::new("Settings").open(&mut open)
+            .default_size([800.,580.])
+            .max_width((ctx.content_rect().width()-40.).max(320.)).min_size([600.,320.])
+            .max_height((ctx.content_rect().height()-50.).max(180.))
+            .show(ctx,|ui| {
+                actions=panel.show(ui,&mut draft,true,|category,ui|match category {
+                    cuemol_ui::settings::Category::Agent=>self.agent.settings_ui(ui),
+                    cuemol_ui::settings::Category::Rendering=> {
+                        if let Some(scene)=self.state.active_scene() {
+                            let mut proof=self.state.scene_manager().scene(scene).and_then(|s|s.scene_attribute("use_colproof")).is_some_and(|v|v=="true");
+                            if ui.checkbox(&mut proof,"Use color proofing").changed() {self.call("set_node_prop",json!({"nodeType":"scene","prop":"use_colproof","value":proof.to_string()}));}
+                            ui.label(format!("ICC profile: {}",self.state.config_value("color:icc_profile")));
+                            if ui.button("Import ICC profile…").clicked() {choose_file();}
+                        }
+                    }
+                    cuemol_ui::settings::Category::Advanced=> {
+                        ui.label("Settings are saved in this browser. The configuration format is shared with the native application.");
+                        ui.add(egui::TextEdit::multiline(&mut self.settings_text).code_editor().desired_rows(8).desired_width(f32::INFINITY));
+                        ui.separator();ui.label("Startup JavaScript");
+                        ui.label("Runs when the viewer opens. Saved scenes and the cuemol scripting API are available.");
+                        ui.add(egui::TextEdit::multiline(&mut self.startup_text).code_editor().desired_rows(8).desired_width(f32::INFINITY));
+                        ui.horizontal(|ui| {
+                            let save=ui.button("Save");self.record_ui_rect("Settings Save",&save);
+                            if save.clicked() {
+                                let previous=self.state.clone();
+                                match self.state.load_config_text(&self.settings_text) {
+                                    Ok(_)=> {
+                                        reloaded=true;
+                                        self.agent.settings.enabled=self.state.plugin_enabled("agent");
+                                        if !self.agent.settings.enabled {self.agent.cancel("AI Agent plugin disabled.");}
+                                        self.dark=self.state.config_value("layout:theme")!="light";
+                                        self.dirty=true;
+                                        if let Some(storage)=web_sys::window().and_then(|w|w.local_storage().ok().flatten()) {
+                                            self.message=storage.set_item("cuemol.config",&self.settings_text).and_then(|_|storage.set_item("cuemol.startup",&self.startup_text)).map(|_|"Settings saved.".into()).unwrap_or_else(js_error);
+                                        } else {self.message="Browser storage is unavailable.".into();}
+                                    }
+                                    Err(error)=>{self.state=previous;self.message=error.to_string();}
+                                }
+                            }
+                            if ui.button("Run startup now").clicked() {self.call("execute_script",json!({"source":self.startup_text}));}
+                        });
+                    }
+                    _=>{}
+                });
+            });
+        for (label, rect) in &panel.rects {
+            self.ui_rects.insert(label.clone(), *rect);
+        }
+        self.settings_panel = panel;
+        if draft != previous {
+            match draft.apply(&mut self.state) {
+                Ok(()) => {
+                    self.dark = draft.dark_mode;
+                    self.agent.settings.enabled = self.state.plugin_enabled("agent");
+                    if !self.agent.settings.enabled {
+                        self.agent.cancel("AI Agent plugin disabled.");
+                    }
+                    self.settings_text = self.state.config_text();
+                    self.dirty = true;
+                    if let Some(storage) =
+                        web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+                    {
+                        if let Err(error) = storage
+                            .set_item("cuemol.config", &self.settings_text)
+                            .and_then(|_| {
+                                storage.set_item(
+                                    "cuemol.theme",
+                                    if self.dark { "dark" } else { "light" },
+                                )
+                            })
+                        {
+                            self.message = js_error(error);
+                        }
+                    }
+                }
+                Err(error) => self.message = error,
+            }
+        }
         if let Some(window) = window {
             self.record_ui_rect("Settings window", &window.response);
         }
+        for action in actions {
+            if action == cuemol_ui::settings::Action::CheckUpdates {
+                if let Some(window) = web_sys::window() {
+                    let _ = window.location().reload();
+                }
+            }
+        }
+        self.settings_draft = if open && !reloaded { Some(draft) } else { None };
         self.show_settings = open;
     }
     pub(super) fn tools_ui(&mut self, ctx: &egui::Context) {

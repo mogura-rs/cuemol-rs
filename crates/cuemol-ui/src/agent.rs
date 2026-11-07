@@ -133,8 +133,7 @@ impl AgentPanel {
         self.visible = open;
         prompt
     }
-    pub fn show_docked(&mut self, ui: &mut egui::Ui) -> Option<String> {
-        self.rects.clear();
+    pub fn settings_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.session.poll_models();
         let before = self.settings_json();
@@ -143,70 +142,84 @@ impl AgentPanel {
             .model_spec()
             .ok()
             .map(|(provider, _)| provider);
-        ui.collapsing("Agent settings", |ui| {
-            ui.label(
-                "Messages and scene data are sent to the selected provider when you press Send.",
+        ui.label("Messages and scene data are sent to the selected provider when you press Send.");
+        ui.add_enabled_ui(!self.running(), |ui| {
+            ui.label("Model (provider:model)");
+            ui.text_edit_singleline(&mut self.settings.model);
+            if ui
+                .add_enabled(
+                    self.model_job.is_none(),
+                    egui::Button::new("Refresh available models"),
+                )
+                .clicked()
+            {
+                if let Err(error) = self.session.refresh_models(wake(&ctx)) {
+                    self.session.status = error;
+                }
+            }
+            if !self.models.is_empty() {
+                egui::ComboBox::from_label("Available models")
+                    .selected_text(&self.settings.model)
+                    .show_ui(ui, |ui| {
+                        for model in &self.session.models {
+                            ui.selectable_value(
+                                &mut self.session.settings.model,
+                                model.clone(),
+                                model,
+                            );
+                        }
+                    });
+            }
+            egui::ComboBox::from_label("Reasoning")
+                .selected_text(&self.settings.reasoning)
+                .show_ui(ui, |ui| {
+                    for value in ["default", "low", "medium", "high"] {
+                        ui.selectable_value(&mut self.settings.reasoning, value.into(), value);
+                    }
+                });
+            ui.checkbox(
+                &mut self.settings.enter_sends,
+                "Enter sends; Shift+Enter adds a line",
             );
-            ui.add_enabled_ui(!self.running(), |ui| {
-                ui.label("Model (provider:model)");
-                ui.text_edit_singleline(&mut self.settings.model);
-                if ui
-                    .add_enabled(
-                        self.model_job.is_none(),
-                        egui::Button::new("Refresh available models"),
-                    )
-                    .clicked()
-                {
-                    if let Err(error) = self.session.refresh_models(wake(&ctx)) {
+            ui.label("API key");
+            ui.add(egui::TextEdit::singleline(&mut *self.key).password(true));
+            #[cfg(not(target_arch = "wasm32"))]
+            ui.horizontal(|ui| {
+                if ui.button("Save in OS keychain").clicked() {
+                    if let Err(error) = self.session.save_key() {
                         self.session.status = error;
                     }
                 }
-                if !self.models.is_empty() {
-                    egui::ComboBox::from_label("Available models")
-                        .selected_text(&self.settings.model)
-                        .show_ui(ui, |ui| {
-                            for model in &self.session.models {
-                                ui.selectable_value(
-                                    &mut self.session.settings.model,
-                                    model.clone(),
-                                    model,
-                                );
-                            }
-                        });
+                if ui.button("Delete stored key").clicked() {
+                    if let Err(error) = self.session.delete_key() {
+                        self.session.status = error;
+                    }
                 }
-                egui::ComboBox::from_label("Reasoning")
-                    .selected_text(&self.settings.reasoning)
-                    .show_ui(ui, |ui| {
-                        for value in ["default", "low", "medium", "high"] {
-                            ui.selectable_value(&mut self.settings.reasoning, value.into(), value);
-                        }
-                    });
-                ui.checkbox(
-                    &mut self.settings.enter_sends,
-                    "Enter sends; Shift+Enter adds a line",
-                );
-                ui.label("API key");
-                ui.add(egui::TextEdit::singleline(&mut *self.key).password(true));
-                #[cfg(not(target_arch = "wasm32"))]
-                ui.horizontal(|ui| {
-                    if ui.button("Save in OS keychain").clicked() {
-                        if let Err(error) = self.session.save_key() {
-                            self.session.status = error;
-                        }
-                    }
-                    if ui.button("Delete stored key").clicked() {
-                        if let Err(error) = self.session.delete_key() {
-                            self.session.status = error;
-                        }
-                    }
-                });
-                #[cfg(target_arch = "wasm32")]
-                ui.label("The key is kept only in this tab's memory.");
-                ui.collapsing("Custom API endpoint", |ui| {
-                    ui.text_edit_singleline(&mut self.settings.endpoint);
-                });
+            });
+            #[cfg(target_arch = "wasm32")]
+            ui.label("The key is kept only in this tab's memory.");
+            ui.collapsing("Custom API endpoint", |ui| {
+                ui.text_edit_singleline(&mut self.settings.endpoint);
             });
         });
+        if previous_provider
+            != self
+                .settings
+                .model_spec()
+                .ok()
+                .map(|(provider, _)| provider)
+        {
+            self.key.zeroize();
+            self.models.clear();
+            self.model_job = None;
+        }
+        self.settings_dirty |= before != self.settings_json();
+    }
+
+    pub fn show_docked(&mut self, ui: &mut egui::Ui) -> Option<String> {
+        self.rects.clear();
+        let ctx = ui.ctx().clone();
+        ui.collapsing("Agent settings", |ui| self.settings_ui(ui));
         ui.separator();
         let footer_height = 5. * ui.text_style_height(&egui::TextStyle::Body)
             + 2. * ui.spacing().interact_size.y
@@ -385,18 +398,6 @@ impl AgentPanel {
             }
         });
         ui.label(&self.status);
-        if previous_provider
-            != self
-                .settings
-                .model_spec()
-                .ok()
-                .map(|(provider, _)| provider)
-        {
-            self.key.zeroize();
-            self.models.clear();
-            self.model_job = None;
-        }
-        self.settings_dirty |= before != self.settings_json();
         if !self.settings.enabled && self.running() {
             self.cancel("AI Agent disabled.");
         }

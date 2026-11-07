@@ -208,6 +208,7 @@ fn ready_apbs_output_is_discarded_after_cancel_or_mcp_disable() {
             agent_reply: None,
             agent_turn_cancel: None,
             command: remote.then_some(cuemol_command::transport::ApiRequest {
+                endpoint: cuemol_command::transport::ApiEndpoint::Mcp,
                 message: json!({"id":1}),
                 reply,
             }),

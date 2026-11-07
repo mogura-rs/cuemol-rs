@@ -4276,51 +4276,24 @@ body.resizing-bottom-panel {
 
 .options-editor {
   display: grid;
-  grid-template-rows: 43px minmax(0, 1fr);
+  grid-template-columns: 185px minmax(0, 1fr);
+  grid-template-rows: 38px minmax(0, 1fr);
+  gap: 8px;
   min-height: 0;
   overflow: hidden;
 }
-
-.options-tabs {
-  display: flex;
-  align-items: end;
-  gap: 2px;
-  padding-left: 7px;
-}
-
-.options-tabs button {
-  min-width: 84px;
-  min-height: 36px;
-  border-radius: 4px 4px 0 0;
-  background: var(--bg-elevated);
-  box-shadow: none;
-}
-
-.options-tabs button.active {
-  position: relative;
-  z-index: 1;
-  border-bottom-color: var(--border);
-  background: var(--bg-surface);
-  font-weight: 600;
-}
-
-.options-pane-host {
-  min-height: 0;
-  overflow: auto;
-  border: 1px solid var(--border);
-  background: var(--bg-surface);
-  box-shadow: none;
-}
-
-.options-pane {
-  min-height: 100%;
-  padding: 12px;
-}
-
-.options-pane[hidden] {
-  display: none;
-}
-
+.settings-search { grid-column: 1 / -1; }
+.options-tabs { overflow: auto; padding: 4px; border-right: 1px solid var(--border); }
+.options-tabs details { margin-bottom: 8px; }
+.options-tabs summary { padding: 5px 2px; cursor: pointer; font-weight: 600; }
+.options-tabs button { display: block; width: calc(100% - 12px); margin-left: 12px; text-align: left; border: 0; box-shadow: none; background: transparent; }
+.options-tabs button.active { background: var(--bg-elevated); font-weight: 600; }
+.options-tabs [hidden] { display: none; }
+.options-pane-host { min-height: 0; overflow: auto; background: var(--bg-surface); }
+.options-pane { padding: 8px 12px; }
+.options-pane h2 { margin: 0 0 16px; font-size: 16px; }
+.options-pane[hidden] { display: none; }
+.options-pane > button { margin: 4px 0 12px; }
 .options-group {
   margin: 0 0 12px;
   padding: 10px 12px 12px;
@@ -4757,3 +4730,8 @@ svg { flex: none; }
 .animation-dock .animation-tools { grid-column: 1 / -1; grid-row: 4; }
 
 .animation-inspector #inspector-fields ~ * { display: none; }
+
+.update-dialog { width: min(480px, calc(100vw - 48px)); border: 1px solid var(--border); border-radius: 6px; background: var(--bg-surface); color: var(--text); padding: 20px; }
+.update-dialog h2 { margin-top: 0; font-size: 18px; }
+.update-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.update-dialog [hidden] { display: none; }

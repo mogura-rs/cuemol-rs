@@ -148,7 +148,7 @@ impl AppModel {
                     continue;
                 }
                 let (sender, receiver) = mpsc::sync_channel(1);
-                self.start_mcp_apbs(cuemol_command::transport::ApiRequest { message: json!({"jsonrpc":"2.0","id":0,"method":"tools/call","params":{"name":name,"arguments":arguments}}), reply:sender });
+                self.start_mcp_apbs(cuemol_command::transport::ApiRequest { endpoint: cuemol_command::transport::ApiEndpoint::Mcp, message: json!({"jsonrpc":"2.0","id":0,"method":"tools/call","params":{"name":name,"arguments":arguments}}), reply:sender });
                 if let Some(job) = &mut self.apbs_job {
                     job.command = None;
                     job.agent_reply = Some(reply);

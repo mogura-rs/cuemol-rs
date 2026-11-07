@@ -444,7 +444,7 @@ provides the same skill alongside release installation and headless examples.
 
 All installed entry points use `cuemol`; no separate JavaScript MCP launcher is
 needed. Enable **MCP Server** and **MCP: Accept connections** under
-**Options > Plugins** in either native frontend. The GUI then exposes an
+**Options > Plugins > Installed** in either native frontend. The GUI then exposes an
 authenticated loopback endpoint; disabling either switch stops it. The default
 port is 27182; choose 0 to allocate an available port automatically. Before
 launching the GUI, the same plugin preference can be set with
@@ -592,9 +592,48 @@ scene.setName('My session');
 print('Startup commands loaded');
 ```
 
+### Settings categories
+
+Options in the native frontends and Settings in the browser use the same
+Display, Input, General, Tools and Plugins groups. Search shows matching
+categories across groups. Display includes the theme and default atom-label
+font, size, color, bold and italic values. Input retains the mouse presets,
+pointing-device override, picking controls and keyboard bindings. The native
+Options dialogs apply with OK and discard drafts with Cancel; browser controls
+save immediately. Scene Undo/Redo leaves host preferences unchanged.
+
+Native Rendering and APBS/PDB2PQR settings select external executables, the
+POV-Ray include directory and the pdb2pqr force field. Empty executable paths use
+the bundled tool or PATH. Layer composition is built in, so it does not require
+a blendpng executable. Browser rendering uses its own Render panel; native
+executables cannot run in a browser.
+
+General > Updates controls the delayed startup check in native applications.
+It is enabled by default and only announces a newer release. Check for Updates
+runs a manual check; installing a release requires the explicit Install update
+action. The browser offers Reload viewer. Native and browser configuration and
+startup script editors remain under Configuration & Startup; Tauri retains its
+configuration command interfaces.
+
+The enabled Console plugin contributes **Plugins > Console > Command line
+access** in native applications. It is off by default. Enable it to send a
+submission to the running window:
+
+```sh
+cuemol console --connect -c 'pwd'
+cuemol console --connect --dialect chimerax -c 'color bychain; view'
+```
+
+The authenticated loopback server exposes Console and MCP independently. A
+Console-only connection cannot call MCP. The client sets its working directory
+for relative paths. Submissions use the GUI console and its history; one
+submission creates one scene-undo entry. The native editor keeps its unfinished
+input. Disabling access stops pending commands while retaining completed edits.
+The command also accepts a script path or lines from standard input.
+
 ### Built-in plugins
 
-Open **Options > Plugins** in a native frontend or **Settings > Plugins** in the
+Open **Options > Plugins > Installed** in a native frontend or **Settings > Plugins > Installed** in the
 browser. Native dialogs apply the complete draft with OK and discard it with
 Cancel. Browser checkboxes save immediately in that browser. These switches
 control the plugins compiled into the application; they do not install packages.
@@ -648,8 +687,8 @@ include files, native runtime libraries, licenses and pinned source archive.
 
 ## AI Agent
 
-Enable **AI Agent** under **Options > Plugins** in either native frontend or
-**Settings > Plugins** in the browser. Then open **Tools > AI Agent** or the
+Enable **AI Agent** under **Options > Plugins > Installed** in either native frontend or
+**Settings > Plugins > Installed** in the browser. Then open **Tools > AI Agent** or the
 **AI Agent** sidebar, choose `openai:model`, `anthropic:model`, or `google:model`,
 and enter that provider's API key. The model field accepts arbitrary model IDs;
 **Refresh available models** queries the provider's catalog. Settings are saved

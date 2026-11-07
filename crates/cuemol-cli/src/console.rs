@@ -30,19 +30,26 @@ pub(crate) fn script(args: &[String]) -> Result<Option<(Dialect, usize)>> {
         _ => None,
     })
 }
-pub fn run(args: Vec<String>) -> Result<()> {
+pub fn run(mut args: Vec<String>) -> Result<()> {
     if args
         .first()
         .is_some_and(|a| matches!(a.as_str(), "-h" | "--help"))
     {
-        println!("cuemol console [--dialect cuemol|pymol|chimerax|javascript] [-c COMMANDS | SCRIPT]\nWithout a command or script, read submissions from standard input.");
+        println!("cuemol console [--connect] [--dialect cuemol|pymol|chimerax|javascript] [-c COMMANDS | SCRIPT]\nWithout a command or script, read submissions from standard input.");
         return Ok(());
+    }
+    let connected = args.first().is_some_and(|arg| arg == "--connect");
+    if connected {
+        args.remove(0);
     }
     let (kind, at) = if args.first().is_some_and(|a| a == "--dialect") {
         (dialect(args.get(1).ok_or("--dialect requires a name")?)?, 2)
     } else {
         (Dialect::CueMol, 0)
     };
+    if connected {
+        return run_connected(&args[at..], kind);
+    }
     match &args[at..] {
         [flag, source] if flag == "-c" || flag == "--eval" => execute(source, kind),
         [path] => execute(
@@ -74,6 +81,61 @@ pub fn run(args: Vec<String>) -> Result<()> {
         _ => Err("Usage: cuemol console [--dialect NAME] [-c COMMANDS | SCRIPT]".into()),
     }
 }
+fn run_connected(args: &[String], kind: Dialect) -> Result<()> {
+    use cuemol_command::transport::{self, ApiEndpoint};
+    let info=transport::read_info_for(&transport::info_path(),ApiEndpoint::Console).map_err(|error|format!("{error}. Enable Settings > Plugins > Console > Command line access in the running application."))?;
+    let mut directory = Some(
+        std::env::current_dir()
+            .map_err(|error| error.to_string())?
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let mut submit = |source: &str| -> Result<()> {
+        let response = transport::post_to(
+            &info,
+            ApiEndpoint::Console,
+            &serde_json::json!({"source":source,"dialect":kind.label(),"cwd":directory}),
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or("The application returned no console result.")?;
+        directory = None;
+        if let Some(output) = response["output"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        {
+            println!("{output}");
+        }
+        if response["ok"] == true {
+            Ok(())
+        } else {
+            Err(response["status"]
+                .as_str()
+                .unwrap_or("The remote console failed.")
+                .into())
+        }
+    };
+    match args {
+        [flag, source] if flag == "-c" || flag == "--eval" => submit(source),
+        [path] => submit(&std::fs::read_to_string(path).map_err(|error| error.to_string())?),
+        [] => {
+            let terminal = std::io::stdin().is_terminal();
+            for line in std::io::stdin().lock().lines() {
+                let line = line.map_err(|error| error.to_string())?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match submit(&line) {
+                    Ok(()) => {}
+                    Err(error) if terminal => eprintln!("{error}"),
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(())
+        }
+        _ => Err("Usage: cuemol console --connect [--dialect NAME] [-c COMMANDS | SCRIPT]".into()),
+    }
+}
+
 pub fn execute(source: &str, dialect: Dialect) -> Result<()> {
     Runtime::new()?.submit(source, dialect).map(|_| ())
 }

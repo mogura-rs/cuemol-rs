@@ -1676,34 +1676,121 @@ function scenePropertyEditor(info) {
   genericPropertyEditor(info, "scene");
 }
 
+let updateDialog = null;
+let updatePollTimer = null;
+let updateState = null;
+function ensureUpdateDialog() {
+  if (updateDialog) return updateDialog;
+  updateDialog = document.createElement('dialog'); updateDialog.className = 'update-dialog';
+  updateDialog.setAttribute('aria-label', 'CueMol updates');
+  const title = document.createElement('h2'); title.textContent = 'CueMol updates';
+  const installed = document.createElement('p'); installed.dataset.update = 'installed';
+  const message = document.createElement('p'); message.dataset.update = 'message'; message.setAttribute('role', 'status');
+  const notes = document.createElement('a'); notes.dataset.update = 'notes'; notes.textContent = 'Release notes'; notes.target = '_blank'; notes.rel = 'noopener noreferrer'; notes.hidden = true;
+  const install = button('Install update', '', () => { void runUpdateOperation('install'); }); install.dataset.update = 'install'; install.hidden = true;
+  const check = button('Check again', '', () => { void runUpdateOperation('check'); }); check.dataset.update = 'check';
+  const close = button('Close', '', () => updateDialog.close());
+  const actions = document.createElement('div'); actions.className = 'update-actions'; actions.append(check, install, close);
+  updateDialog.append(title, installed, message, notes, actions); document.body.append(updateDialog);
+  updateDialog.addEventListener('close', () => { void invoke('update_request', {operation:'acknowledge'}).catch(() => {}); });
+  return updateDialog;
+}
+function displayUpdateStatus(status, open = false) {
+  if (!status || typeof status.message !== 'string') return;
+  updateState = status;
+  const dialog = ensureUpdateDialog();
+  dialog.querySelector('[data-update="installed"]').textContent = `Installed: ${status.currentVersion}`;
+  dialog.querySelector('[data-update="message"]').textContent = status.message;
+  const notes = dialog.querySelector('[data-update="notes"]');
+  let releaseUrl = null;
+  try { const value = new URL(status.release?.url); if (value.protocol === 'https:' && value.hostname === 'github.com') releaseUrl = value.href; } catch {}
+  notes.hidden = !releaseUrl; if (releaseUrl) notes.href = releaseUrl; else notes.removeAttribute('href');
+  const install = dialog.querySelector('[data-update="install"]'); install.hidden = !status.release?.newer; install.disabled = status.checking || status.installing;
+  dialog.querySelector('[data-update="check"]').disabled = status.checking || status.installing;
+  if (open && !dialog.open) dialog.showModal();
+  clearTimeout(updatePollTimer);
+  if (status.checking || status.installing) updatePollTimer = setTimeout(() => { void runUpdateOperation('status'); }, 250);
+}
+async function runUpdateOperation(operation) {
+  try {
+    const result = await invoke('update_request', {operation});
+    displayUpdateStatus(result, operation !== 'status');
+  } catch (error) {
+    const dialog = ensureUpdateDialog(); dialog.querySelector('[data-update="message"]').textContent = String(error);
+    if (!dialog.open) dialog.showModal();
+  }
+}
+async function showUpdateDialog() {
+  ensureUpdateDialog().showModal();
+  if (!updateState?.checking && !updateState?.installing) await runUpdateOperation('check');
+}
+
+let settingsCategory = "Theme";
+
 function optionsEditor(source) {
   const draft = JSON.parse(JSON.stringify(source));
+  draft.darkMode = document.documentElement.dataset.theme !== "light";
+  draft.updateCheck ??= true;
+  draft.inputDevice ||= draft.multitouchPad ? "trackpad" : "auto";
+  draft.tools = {povray: "", povrayInclude: "", ffmpeg: "", apbs: "", pdb2pqr: "", forceField: "charmm", ...draft.tools};
   const editor = document.createElement("div");
   editor.className = "options-editor";
+  const search = document.createElement("input");
+  search.type = "search";
+  search.placeholder = "Search settings";
+  search.setAttribute("aria-label", "Search settings");
+  search.className = "settings-search";
   const tabs = document.createElement("nav");
   tabs.className = "options-tabs";
-  tabs.setAttribute("aria-label", "Options panes");
+  tabs.setAttribute("aria-label", "Settings categories");
   const paneHost = document.createElement("div");
   paneHost.className = "options-pane-host";
   const panes = new Map();
-
-  const createPane = (name) => {
-    const pane = document.createElement("section");
-    pane.className = "options-pane";
-    pane.dataset.optionsPane = name;
-    pane.hidden = name !== "Misc";
-    paneHost.append(pane);
-    panes.set(name, pane);
-    const tab = button(name, name === "Misc" ? "active" : "", () => {
-      for (const [paneName, item] of panes) item.hidden = paneName !== name;
-      tabs.querySelectorAll("button").forEach((item) => {
-        item.classList.toggle("active", item.textContent === name);
-      });
-    });
-    tab.dataset.optionsTab = name;
-    tabs.append(tab);
+  const groups = new Map();
+  for (const name of ["Display", "Input", "General", "Tools", "Plugins"]) {
+    const details = document.createElement("details"); details.open = true;
+    const summary = document.createElement("summary"); summary.textContent = name;
+    details.append(summary); groups.set(name, details); tabs.append(details);
+  }
+  const available = pane => !pane.dataset.plugin || draft.plugins?.[pane.dataset.plugin];
+  const activate = name => {
+    settingsCategory = name; search.value = ""; refreshCategories();
+    paneHost.scrollTop = 0;
+  };
+  const refreshCategories = () => {
+    const query = search.value.trim().toLowerCase();
+    if (!panes.has(settingsCategory) || !available(panes.get(settingsCategory))) settingsCategory = "Installed";
+    for (const [name, pane] of panes) {
+      const tab = tabs.querySelector(`[data-options-tab="${name}"]`);
+      const matched = available(pane) && (!query || `${name} ${pane.dataset.group} ${pane.textContent}`.toLowerCase().includes(query));
+      tab.hidden = !matched;
+      pane.hidden = !matched || (!query && settingsCategory !== name);
+      tab.classList.toggle("active", name === settingsCategory);
+      tab.setAttribute("aria-current", name === settingsCategory ? "page" : "false");
+    }
+    for (const group of groups.values()) {
+      group.hidden = ![...group.querySelectorAll("button")].some(tab => !tab.hidden);
+      if (query && !group.hidden) group.open = true;
+    }
+  };
+  const createPane = (name, parent, plugin) => {
+    const pane = document.createElement("section"); pane.className = "options-pane";
+    pane.dataset.optionsPane = name; pane.dataset.group = parent;
+    if (plugin) pane.dataset.plugin = plugin;
+    paneHost.append(pane); panes.set(name, pane);
+    const heading = document.createElement("h2"); heading.textContent = name; pane.append(heading);
+    const tab = button(name, "", () => activate(name)); tab.dataset.optionsTab = name;
+    groups.get(parent).append(tab);
     return pane;
   };
+  search.addEventListener("input", refreshCategories);
+  tabs.addEventListener("keydown", event => {
+    if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key) || event.target.tagName !== "BUTTON") return;
+    const buttons = [...tabs.querySelectorAll("details[open] button")].filter(item => !item.hidden);
+    const index = buttons.indexOf(event.target); if (index < 0) return;
+    const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : Math.min(buttons.length - 1, Math.max(0, index + (event.key === "ArrowDown" ? 1 : -1)));
+    event.preventDefault(); buttons[next].focus(); buttons[next].click();
+  });
   const group = (title) => {
     const fieldset = document.createElement("fieldset");
     fieldset.className = "options-group";
@@ -1746,7 +1833,9 @@ function optionsEditor(source) {
     return control;
   };
 
-  const miscPane = createPane("Misc");
+  const themePane = createPane("Theme", "Display");
+  check(themePane, "Dark Mode", draft.darkMode, value => { draft.darkMode = value; });
+  const labelsPane = createPane("Atom Labels", "Display");
   const labelGroup = group("Atom label");
   const font = document.createElement("input");
   font.value = draft.atomLabelFont;
@@ -1757,8 +1846,8 @@ function optionsEditor(source) {
   field(labelGroup, "Font name", font);
   const size = document.createElement("input");
   size.type = "number";
-  size.min = "4";
-  size.max = "144";
+  size.min = "6";
+  size.max = "72";
   size.step = "1";
   size.value = draft.atomLabelSize;
   size.addEventListener("input", () => {
@@ -1800,7 +1889,7 @@ function optionsEditor(source) {
   }
   updateSample();
 
-  const miscGroup = group("Misc settings");
+  const miscGroup = group("Display options");
   const language = select(
     [
       ["en-US", "English (en-US)"],
@@ -1815,9 +1904,27 @@ function optionsEditor(source) {
   check(miscGroup, "Use HiDPI rendering", draft.useHidpi, (value) => {
     draft.useHidpi = value;
   });
-  miscPane.append(labelGroup, miscGroup);
+  labelsPane.append(labelGroup);
+  themePane.append(miscGroup);
+  const renderingPane = createPane("Rendering", "Display");
+  const toolPath = (host, key, label, directory = false) => {
+    const input = document.createElement("input"); input.value = draft.tools[key];
+    input.placeholder = "Use bundled tool or PATH";
+    input.addEventListener("input", () => { draft.tools[key] = input.value; });
+    field(host, label, input);
+    host.append(button(`Browse ${label}…`, "", async () => {
+      try {
+        const path = await dialog.open({directory, multiple: false});
+        if (typeof path === "string") { input.value = path; draft.tools[key] = path; }
+      } catch (error) { showError(error); }
+    }));
+  };
+  toolPath(renderingPane, "povray", "POV-Ray Executable");
+  toolPath(renderingPane, "povrayInclude", "POV-Ray Include Directory", true);
+  toolPath(renderingPane, "ffmpeg", "ffmpeg Executable");
+  renderingPane.append(dialogParagraph("Render layer composition is built in."));
 
-  const keyPane = createPane("Key");
+  const keyPane = createPane("Keyboard", "Input");
   const keyGroup = group("Key bindings");
   const keyTable = document.createElement("table");
   keyTable.className = "shortcut-table";
@@ -1903,7 +2010,7 @@ function optionsEditor(source) {
   keyGroup.append(keyTable, shortcutDetail);
   keyPane.append(keyGroup);
 
-  const filesPane = createPane("Files");
+  const filesPane = createPane("Files", "General");
   const fileGroup = group("File destinations");
   for (const [key, label] of [["dropTarget", "Drag and drop opens into"], ["shellTarget", "File manager opens into"]]) {
     const control = select([["active", "Current scene"], ["new", "New scene"]], draft[key] || "active");
@@ -1913,8 +2020,11 @@ function optionsEditor(source) {
   }
   filesPane.append(fileGroup);
 
-  const mousePane = createPane("Mouse");
+  const mousePane = createPane("Mouse & Navigation", "Input");
   const presetGroup = group("Mouse configuration");
+  const inputDevice = select([["auto", "Auto-detect"], ["mouse", "Mouse"], ["trackpad", "Mac trackpad"]], draft.inputDevice);
+  inputDevice.addEventListener("change", () => { draft.inputDevice = inputDevice.value; draft.multitouchPad = inputDevice.value === "trackpad"; });
+  field(presetGroup, "Pointing device", inputDevice);
   const preset = select(
     [
       ["DefaultViewInConf", "Default"],
@@ -1932,28 +2042,25 @@ function optionsEditor(source) {
   const trackball = document.createElement("input");
   trackball.type = "number";
   trackball.min = "0.1";
-  trackball.max = "10";
+  trackball.max = "5";
   trackball.step = "0.1";
   trackball.value = draft.trackballRadius;
   trackball.addEventListener("input", () => {
     draft.trackballRadius = Number(trackball.value);
   });
-  field(presetGroup, "Trackball radius", trackball);
+  field(presetGroup, "XY Rotation Sensitivity", trackball);
   const hitPrecision = document.createElement("input");
   hitPrecision.type = "number";
-  hitPrecision.min = "0";
-  hitPrecision.max = "100";
+  hitPrecision.min = "1";
+  hitPrecision.max = "50";
   hitPrecision.step = "1";
   hitPrecision.value = draft.hitPrecision;
   hitPrecision.addEventListener("input", () => {
     draft.hitPrecision = Number(hitPrecision.value);
   });
-  field(presetGroup, "Hit precision", hitPrecision);
+  field(presetGroup, "Pick Precision", hitPrecision);
   check(presetGroup, "Momentum scroll", draft.momentumScroll, (value) => {
     draft.momentumScroll = value;
-  });
-  check(presetGroup, "Multitouch trackpad", draft.multitouchPad, (value) => {
-    draft.multitouchPad = value;
   });
   check(presetGroup, "Emulate right mouse button", draft.emulateRightButton, (value) => {
     draft.emulateRightButton = value;
@@ -1963,26 +2070,45 @@ function optionsEditor(source) {
   }
   mousePane.append(presetGroup);
 
-  const pluginsPane = createPane("Plugins");
+  const updatesPane = createPane("Updates", "General");
+  check(updatesPane, "Check for Updates at Startup", draft.updateCheck, value => { draft.updateCheck = value; });
+  updatesPane.append(button("Check for Updates", "", () => { void showUpdateDialog(); }));
+  const apbsPane = createPane("APBS / PDB2PQR", "Tools");
+  toolPath(apbsPane, "apbs", "APBS Executable");
+  toolPath(apbsPane, "pdb2pqr", "pdb2pqr Executable");
+  const forceField = select(["charmm", "amber", "tyl06", "peoepb", "swanson"].map(value => [value, value]), draft.tools.forceField);
+  forceField.addEventListener("change", () => { draft.tools.forceField = forceField.value; });
+  field(apbsPane, "pdb2pqr Force Field", forceField);
+  const pluginsPane = createPane("Installed", "Plugins");
   const pluginsGroup = group("Installed plugins");
   draft.plugins = {...draft.plugins};
   for (const [id, name, defaultEnabled] of builtinPlugins) {
-    check(pluginsGroup, name, draft.plugins[id] ?? defaultEnabled, value => { draft.plugins[id] = value; });
+    check(pluginsGroup, name, draft.plugins[id] ?? defaultEnabled, value => { draft.plugins[id] = value; refreshCategories(); });
   }
-  check(pluginsGroup, "MCP: Accept connections", draft.mcpAcceptConnections ?? true, value => { draft.mcpAcceptConnections = value; });
+  const consolePane = createPane("Console", "Plugins", "console");
+  check(consolePane, "Command line access", draft.consoleRemote ?? false, value => { draft.consoleRemote = value; });
+  consolePane.append(dialogParagraph("Allow cuemol console --connect to use this window through its authenticated local server."));
+  const mcpPane = createPane("MCP Server", "Plugins", "mcp");
+  check(mcpPane, "Accept connections", draft.mcpAcceptConnections ?? true, value => { draft.mcpAcceptConnections = value; });
   const mcpPort = document.createElement("input");
   mcpPort.type = "number"; mcpPort.min = "0"; mcpPort.max = "65535"; mcpPort.step = "1";
   mcpPort.value = String(draft.mcpPort ?? 27182);
   mcpPort.addEventListener("change", () => { draft.mcpPort = Number(mcpPort.value); });
-  field(pluginsGroup, "MCP port (0 = automatic)", mcpPort);
-  pluginsGroup.append(dialogParagraph("Connect with cuemol mcp connect after enabling MCP Server."));
+  field(mcpPane, "Port (0 = automatic)", mcpPort);
+  mcpPane.append(dialogParagraph("Connect with cuemol mcp connect."));
   pluginsPane.append(pluginsGroup);
+  const agentPane = createPane("AI Agent", "Plugins", "agent");
+  agentPane.append(dialogParagraph("Open the Agent panel to configure the model, credentials and send shortcuts."));
+  agentPane.append(button("Open Agent settings", "", () => { referenceDialog.close(); selectCueMolActivity("agent"); const details = document.querySelector(".agent-settings"); if (details) details.open = true; }));
+  refreshCategories();
   const cancel = button("Cancel", "", () => referenceDialog.close());
   const ok = button("OK", "dialog-primary", async () => {
     setBusy(true);
     try {
       const result = await invoke("set_preferences", { preferences: draft });
       preferences = result.preferences;
+      document.documentElement.dataset.theme = preferences.darkMode ? "dark" : "light";
+      saveCueMolShell();
       if (snapshot) snapshot.plugins = preferences.plugins;
       renderPluginContributions();
       recordStatus(result.status);
@@ -1994,7 +2120,7 @@ function optionsEditor(source) {
       setBusy(false);
     }
   });
-  editor.append(tabs, paneHost);
+  editor.append(search, tabs, paneHost);
   dialogContent.append(editor);
   dialogActions(cancel, ok);
 }
@@ -9783,7 +9909,7 @@ async function handleLocalAction(action) {
       showBottomPanel("console");
       break;
     case "check-updates":
-      recordStatus("Update check is not available offline");
+      await showUpdateDialog();
       break;
   }
 }
@@ -18581,11 +18707,13 @@ async function start() {
     if (window.__TAURI__?.event?.listen) {
       await window.__TAURI__.event.listen("cuemol-model-changed", refreshRemoteModel);
       await window.__TAURI__.event.listen("cuemol-agent-changed", refreshAgent);
+      await window.__TAURI__.event.listen("cuemol-update-changed", event => displayUpdateStatus(event.payload, event.payload?.notify));
     }
     await setupWindowGeometryPersistence();
     const sequence = ++requestSequence;
     const initial = await invoke("get_initial_state", viewportDimensions());
     preferences = initial.preferences;
+    if (typeof preferences?.darkMode === "boolean") { document.documentElement.dataset.theme = preferences.darkMode ? "dark" : "light"; saveCueMolShell(); }
     snapshot = initial.snapshot;
     await setupApplicationCloseGuard();
     syncEmptyMoleculeDetails();

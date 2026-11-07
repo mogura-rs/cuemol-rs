@@ -1,5 +1,61 @@
 # Validation evidence
 
+## Shared settings categories and native Console access
+
+Native egui and the browser share the category tree and its settings controls;
+Tauri exposes the same groups and search. The shared `Preferences` model replaces
+the duplicated native/Tauri mapping and restores label styles and input values
+from configuration. Validation happens before any preference changes. Explicit
+plugin settings retain precedence over legacy enablement. The controls cover
+theme, labels, mouse/picking, files, tool paths and force fields. Native dialogs
+keep an apply/cancel draft; browser controls save immediately. Configuration and
+startup-script editing remains available in the native egui and browser category.
+
+Native startup checks now honor the saved option, run asynchronously after a
+short delay and notify only for a newer version. Manual checks report absence
+or failure; installation remains an explicit user action. Tauri and egui share
+the update runtime. Its injected task tests check disabled startup, silent
+no-release results, notification and operation exclusivity. No actual installed
+binary was replaced during this validation.
+
+`cuemol console --connect` uses an independently enabled authenticated Console
+endpoint. The listener advertises only enabled endpoints; enabling/disabling
+Console keeps an active MCP endpoint and token. Requests recheck current access
+on the UI/model thread. Submitted commands preserve native input drafts, use
+one GUI history transaction and inherit the client's working directory.
+Disabling access cancels remaining commands. Tauri avoids emitting unchanged
+scene snapshots while a remote command waits for background work.
+
+The shared settings round-trip and atomic-validation tests pass, including
+external paths, force field, theme and update/Console switches. The transport
+checks cover unauthorized requests, isolated endpoints, independent toggles and
+listener lifecycle. Native GUI tests pass (209), including remote submissions,
+input preservation, one-step undo and cancellation. All 185 Tauri model tests pass; five optional tests remain ignored. The full
+61-case Tauri DOM suite and 13 affected browser cases passed before the final
+theme fix. After that fix, three focused WebGL/WebGPU/Tauri cases pass, covering
+theme controls, reload, cross-category search, tool-path drafts and manual
+update status. Nine final protocol/listener tests also pass. Screenshots from
+all three frontends were inspected. The final native GUI binary builds.
+
+Linux OS input confirms theme cancellation/persistence, update preferences,
+CLI edits and one-step undo, relative working-directory propagation, disabling
+Console while MCP stays usable, and category search. The updated Picking and
+Plugin OS scenarios also pass. Native light-theme/search and category screenshots
+were inspected. Native screen/input checks on macOS remain pending permissions.
+
+The comparison found that the old Options Misc/Key/Mouse navigation no longer
+matched the current reference. The usage guide now describes categories and
+places plugin switches under Installed. The old native OS probes used tab
+coordinates; they now operate the category UI. The settings migration also
+exposed an old browser theme-menu path that only wrote its legacy storage key;
+it now updates the shared configuration, invalidates stale drafts and survives
+reload. A layout regression inherited a horizontal layout in both columns;
+explicit vertical layouts and a bounded-column test keep controls on screen.
+The reference blendpng path is intentionally replaced by the existing built-in
+composition; the native/browser help now states that behavior. Full component
+catalog and remaining dialog comparisons are still open.
+
+
 ## Shared Agent runtime and Tauri conversation interface
 
 The provider, conversation, download, cancellation and model-list state moved

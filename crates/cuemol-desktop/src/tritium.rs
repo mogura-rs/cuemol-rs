@@ -663,7 +663,7 @@ mod tests {
         let mut camera = CameraController::default();
         for accept in [false, true] {
             app.open_options_dialog();
-            app.options_pane = OptionsPane::Plugins;
+            app.settings_panel.category = cuemol_ui::settings::Category::Installed;
             let mut harness = egui_kittest::Harness::builder()
                 .with_size(egui::vec2(1280., 900.))
                 .build(|ctx| app.ui(ctx, &mut camera));

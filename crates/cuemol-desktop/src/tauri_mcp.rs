@@ -142,6 +142,11 @@ pub(super) fn poll(
         return;
     };
     while let Ok(request) = api.requests.try_recv() {
+        if request.endpoint == cuemol_command::transport::ApiEndpoint::Console {
+            model.start_remote_console(request);
+            changed();
+            continue;
+        }
         if !model.desktop.mcp_server_enabled() {
             break;
         }
@@ -215,7 +220,7 @@ mod tests {
             .add_molecule("source", molecule);
         let start = |model: &mut AppModel, id, args| {
             let (reply, response) = mpsc::sync_channel(1);
-            model.start_mcp_apbs(cuemol_command::transport::ApiRequest { message:json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"calc_elepot","arguments":args}}), reply });
+            model.start_mcp_apbs(cuemol_command::transport::ApiRequest { endpoint: cuemol_command::transport::ApiEndpoint::Mcp, message:json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"calc_elepot","arguments":args}}), reply });
             response
         };
         let invalid = start(&mut model, 0, json!({"objId":-1,"method":"internal"}));

@@ -1436,16 +1436,6 @@ struct RendererPropertiesInput {
     specific: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ShortcutDto {
-    id: String,
-    key: String,
-    ctrl: bool,
-    alt: bool,
-    shift: bool,
-}
-
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FileOpenContext {
@@ -1470,48 +1460,7 @@ impl FileOpenContext {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PreferencesDto {
-    #[serde(default)]
-    plugins: std::collections::BTreeMap<String, bool>,
-    #[serde(default = "enabled_preference")]
-    mcp_accept_connections: bool,
-    #[serde(default = "default_mcp_port")]
-    mcp_port: u16,
-    #[serde(default)]
-    drop_target: cuemol_desktop_core::FileOpenTarget,
-    #[serde(default)]
-    shell_target: cuemol_desktop_core::FileOpenTarget,
-    atom_label_font: String,
-    atom_label_size: f64,
-    atom_label_color: String,
-    atom_label_italic: bool,
-    atom_label_bold: bool,
-    ui_language: String,
-    use_hidpi: bool,
-    mouse_preset: String,
-    trackball_radius: f64,
-    hit_precision: f64,
-    momentum_scroll: bool,
-    multitouch_pad: bool,
-    emulate_right_button: bool,
-    #[serde(default = "enabled_preference")]
-    gpu_picking: bool,
-    #[serde(default = "enabled_preference")]
-    hover_info: bool,
-    #[serde(default = "enabled_preference")]
-    hover_highlight: bool,
-    shortcuts: Vec<ShortcutDto>,
-}
-
-fn default_mcp_port() -> u16 {
-    27182
-}
-
-fn enabled_preference() -> bool {
-    true
-}
+type PreferencesDto = cuemol_desktop_core::preferences::Preferences;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1670,6 +1619,8 @@ struct AppModel {
     status: String,
     console_session: cuemol_command::console::Session,
     console_run: Option<console::Execution>,
+    remote_console: Option<cuemol_command::transport::ConsoleReply>,
+    updates: cuemol_command::update::UpdateRuntime,
     agent: cuemol_ui::agent_runtime::AgentSession,
     agent_wake: cuemol_ui::agent_runtime::Wake,
 }
@@ -1896,6 +1847,8 @@ impl AppModel {
             mcp_listen_port: None,
             console_session: cuemol_command::console::Session::default(),
             console_run: None,
+            remote_console: None,
+            updates: Default::default(),
             agent: Default::default(),
             agent_wake: Arc::new(|| {}),
             log_lines: startup_log.lines().map(str::to_string).collect(),
@@ -2808,242 +2761,15 @@ impl AppModel {
     }
 
     fn preferences(&self) -> PreferencesDto {
-        let font = self.desktop.style_value(0, "", "DefaultLabel.font_name");
-        let size = self.desktop.style_value(0, "", "DefaultLabel.font_size");
-        let color = self.desktop.style_value(0, "", "DefaultLabel.color");
-        let font_style = self.desktop.style_value(0, "", "DefaultLabel.font_style");
-        let font_weight = self.desktop.style_value(0, "", "DefaultLabel.font_weight");
-        let input = self.desktop.view_input_config();
-        PreferencesDto {
-            plugins: self.desktop.plugin_states(),
-            mcp_accept_connections: self.desktop.config_value("mcp:accept-connections") != "false",
-            mcp_port: self.desktop.mcp_server_port().unwrap_or(27182),
-            drop_target: cuemol_desktop_core::FileOpenTarget::from_config(
-                &self.desktop.config_value("files:drop-target"),
-            ),
-            shell_target: cuemol_desktop_core::FileOpenTarget::from_config(
-                &self.desktop.config_value("files:shell-target"),
-            ),
-            atom_label_font: nonempty_or(font, "san-serif"),
-            atom_label_size: size.parse().unwrap_or(12.0),
-            atom_label_color: nonempty_or(color, "Yellow"),
-            atom_label_italic: matches!(font_style.as_str(), "italic" | "oblique"),
-            atom_label_bold: font_weight == "bold",
-            ui_language: nonempty_or(
-                self.desktop.config_value("general.useragent.locale"),
-                "en-US",
-            ),
-            use_hidpi: config_bool(&self.desktop, "cuemol2.ui.view.use_hidpi", true),
-            mouse_preset: nonempty_or(
-                self.desktop.config_value("cuemol2.ui.viewinconf"),
-                "DefaultViewInConf",
-            ),
-            trackball_radius: input.tbrad(),
-            hit_precision: input.hitprec(),
-            gpu_picking: self.desktop.resolved_view_input(false).gpu_pick(),
-            hover_info: config_bool(&self.desktop, "view_input:hover-info", true),
-            hover_highlight: config_bool(&self.desktop, "view_input:hover-highlight", true),
-            momentum_scroll: config_bool(&self.desktop, "cuemol2.ui.mouse-momentum-scroll", false),
-            multitouch_pad: config_bool(&self.desktop, "cuemol2.ui.mouse-multitouch-pad", false),
-            emulate_right_button: config_bool(
-                &self.desktop,
-                "cuemol2.ui.mouse-emulate-rbutton",
-                false,
-            ),
-            shortcuts: ["view-trans-plusx", "view-trans-minusx"]
-                .into_iter()
-                .map(|id| ShortcutDto {
-                    id: id.to_string(),
-                    key: self.desktop.config_value(&format!("shortcut:{id}:key")),
-                    ctrl: config_bool(&self.desktop, &format!("shortcut:{id}:ctrl"), true),
-                    alt: config_bool(&self.desktop, &format!("shortcut:{id}:alt"), false),
-                    shift: config_bool(&self.desktop, &format!("shortcut:{id}:shift"), false),
-                })
-                .collect(),
-        }
+        let mut preferences = PreferencesDto::from_state(&self.desktop);
+        preferences.use_hidpi = config_bool(&self.desktop, "cuemol2.ui.view.use_hidpi", true);
+        preferences
     }
 
     fn set_preferences(&mut self, preferences: PreferencesDto) -> Result<(), String> {
-        if preferences.atom_label_font.trim().is_empty() {
-            return Err("an atom-label font is required".to_string());
-        }
-        if !preferences.atom_label_size.is_finite()
-            || !(4.0..=144.0).contains(&preferences.atom_label_size)
-        {
-            return Err("atom-label size must be between 4 and 144".to_string());
-        }
-        if preferences.atom_label_color.trim().is_empty() {
-            return Err("an atom-label color is required".to_string());
-        }
-        if !matches!(preferences.ui_language.as_str(), "en-US" | "ja") {
-            return Err(format!(
-                "unsupported UI language: {}",
-                preferences.ui_language
-            ));
-        }
-        if !matches!(
-            preferences.mouse_preset.as_str(),
-            "DefaultViewInConf"
-                | "CootViewInConf"
-                | "PymolViewInConf"
-                | "IphoneViewInConf"
-                | "TrackpadViewInConf"
-        ) {
-            return Err(format!(
-                "unknown mouse preset: {}",
-                preferences.mouse_preset
-            ));
-        }
-        if !preferences.trackball_radius.is_finite()
-            || !(0.1..=10.0).contains(&preferences.trackball_radius)
-        {
-            return Err("trackball radius must be between 0.1 and 10".to_string());
-        }
-        if !preferences.hit_precision.is_finite()
-            || !(0.0..=100.0).contains(&preferences.hit_precision)
-        {
-            return Err("pick precision must be between 0 and 100".to_string());
-        }
-        validate_shortcuts(&preferences.shortcuts)?;
-        self.desktop
-            .set_plugin_states(&preferences.plugins)
-            .map_err(|error| error.to_string())?;
-        self.desktop.put_config_value(
-            "mcp:accept-connections",
-            preferences.mcp_accept_connections.to_string(),
-        );
-        self.desktop
-            .put_config_value("mcp:port", preferences.mcp_port.to_string());
-        self.desktop
-            .put_config_value("files:drop-target", preferences.drop_target.as_str());
-        self.desktop
-            .put_config_value("files:shell-target", preferences.shell_target.as_str());
-
-        self.desktop.set_style_value(
-            0,
-            "user",
-            "DefaultLabel.font_name",
-            preferences.atom_label_font.trim(),
-        );
-        self.desktop.set_style_value(
-            0,
-            "user",
-            "DefaultLabel.font_size",
-            preferences.atom_label_size.to_string(),
-        );
-        self.desktop.set_style_value(
-            0,
-            "user",
-            "DefaultLabel.color",
-            preferences.atom_label_color.trim(),
-        );
-        self.desktop.set_style_value(
-            0,
-            "user",
-            "DefaultLabel.font_style",
-            if preferences.atom_label_italic {
-                "italic"
-            } else {
-                "normal"
-            },
-        );
-        self.desktop.set_style_value(
-            0,
-            "user",
-            "DefaultLabel.font_weight",
-            if preferences.atom_label_bold {
-                "bold"
-            } else {
-                "normal"
-            },
-        );
-        {
-            let input = self.desktop.view_input_config_mut();
-            input.set_style(preferences.mouse_preset.clone());
-            input.set_tbrad(preferences.trackball_radius);
-            input.set_hitprec(preferences.hit_precision);
-        }
-        for (key, value) in [
-            (
-                "style:DefaultLabel.font_name",
-                preferences.atom_label_font.clone(),
-            ),
-            (
-                "style:DefaultLabel.font_size",
-                preferences.atom_label_size.to_string(),
-            ),
-            (
-                "style:DefaultLabel.color",
-                preferences.atom_label_color.clone(),
-            ),
-            (
-                "style:DefaultLabel.font_style",
-                if preferences.atom_label_italic {
-                    "italic".to_string()
-                } else {
-                    "normal".to_string()
-                },
-            ),
-            (
-                "style:DefaultLabel.font_weight",
-                if preferences.atom_label_bold {
-                    "bold".to_string()
-                } else {
-                    "normal".to_string()
-                },
-            ),
-            ("general.useragent.locale", preferences.ui_language.clone()),
-            (
-                "cuemol2.ui.view.use_hidpi",
-                preferences.use_hidpi.to_string(),
-            ),
-            ("cuemol2.ui.viewinconf", preferences.mouse_preset.clone()),
-            ("view_input:tbrad", preferences.trackball_radius.to_string()),
-            ("view_input:hitprec", preferences.hit_precision.to_string()),
-            ("view_input:gpu-pick", preferences.gpu_picking.to_string()),
-            ("view_input:hover-info", preferences.hover_info.to_string()),
-            (
-                "view_input:hover-highlight",
-                preferences.hover_highlight.to_string(),
-            ),
-            (
-                "cuemol2.ui.mouse-momentum-scroll",
-                preferences.momentum_scroll.to_string(),
-            ),
-            (
-                "cuemol2.ui.mouse-multitouch-pad",
-                preferences.multitouch_pad.to_string(),
-            ),
-            (
-                "cuemol2.ui.mouse-emulate-rbutton",
-                preferences.emulate_right_button.to_string(),
-            ),
-        ] {
-            self.desktop.put_config_value(key, value);
-        }
-        for shortcut in &preferences.shortcuts {
-            self.desktop.put_config_value(
-                &format!("shortcut:{}:key", shortcut.id),
-                shortcut.key.clone(),
-            );
-            self.desktop.put_config_value(
-                &format!("shortcut:{}:ctrl", shortcut.id),
-                shortcut.ctrl.to_string(),
-            );
-            self.desktop.put_config_value(
-                &format!("shortcut:{}:alt", shortcut.id),
-                shortcut.alt.to_string(),
-            );
-            self.desktop.put_config_value(
-                &format!("shortcut:{}:shift", shortcut.id),
-                shortcut.shift.to_string(),
-            );
-        }
-        if !preferences.hover_info {
-            self.desktop.set_active_hover_hit(None);
-        }
+        preferences.apply(&mut self.desktop)?;
         self.save_config()?;
-        self.status = "Options updated".to_string();
+        self.status = "Options updated".into();
         Ok(())
     }
 
@@ -8127,6 +7853,7 @@ impl AppModel {
 
 enum ModelRequest {
     LocalApiReady,
+    UpdateRequest(String),
     AgentReady,
     Shutdown,
     Agent {
@@ -9189,34 +8916,6 @@ fn set_scene_attr_default(
     }
 }
 
-fn validate_shortcuts(shortcuts: &[ShortcutDto]) -> Result<(), String> {
-    const IDS: [&str; 2] = ["view-trans-plusx", "view-trans-minusx"];
-    const KEYS: [&str; 4] = ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"];
-    if shortcuts.len() != IDS.len()
-        || !IDS
-            .iter()
-            .all(|id| shortcuts.iter().any(|shortcut| shortcut.id == *id))
-    {
-        return Err("the complete reference shortcut set is required".to_string());
-    }
-    for shortcut in shortcuts {
-        if !KEYS.contains(&shortcut.key.as_str()) {
-            return Err(format!("unsupported shortcut key: {}", shortcut.key));
-        }
-    }
-    for (index, shortcut) in shortcuts.iter().enumerate() {
-        if shortcuts.iter().skip(index + 1).any(|other| {
-            shortcut.key == other.key
-                && shortcut.ctrl == other.ctrl
-                && shortcut.alt == other.alt
-                && shortcut.shift == other.shift
-        }) {
-            return Err(format!("duplicate shortcut: {}", shortcut.key));
-        }
-    }
-    Ok(())
-}
-
 fn default_config_path() -> Option<PathBuf> {
     std::env::var_os("CUEMOL2_CONFIG_FILE")
         .map(PathBuf::from)
@@ -10116,6 +9815,17 @@ fn handle_model_request(
     request: ModelRequest,
 ) -> Result<ModelResponse, String> {
     match request {
+        ModelRequest::UpdateRequest(operation) => {
+            match operation.as_str() {
+                "status"=>{},
+                "check"=>{model.updates.check(false,model.agent_wake.clone());},
+                "install"=>model.updates.install(model.agent_wake.clone())?,
+                "acknowledge"=>model.updates.acknowledge(),
+                _=>return Err("Unknown update operation".into()),
+            }
+            model.updates.poll(model.desktop.config_value("updates:check")!="false",model.agent_wake.clone());
+            Ok(ModelResponse::Inspector(serde_json::to_value(model.updates.snapshot()).map_err(|error|error.to_string())?))
+        }
         ModelRequest::Agent { operation, args } => Ok(ModelResponse::Inspector(model.agent_request(&operation, args)?)),
         ModelRequest::LocalApiReady | ModelRequest::AgentReady | ModelRequest::Shutdown => Ok(ModelResponse::Message(String::new())),
         ModelRequest::Inspector { tool, args } => Ok(ModelResponse::Inspector(model.inspector_request(&tool, &args)?)),
@@ -13606,9 +13316,23 @@ fn spawn_model(initial_paths: Vec<PathBuf>, app: tauri::AppHandle) -> ManagedSta
                     response,
                 });
             });
+            model.updates.schedule_startup();
             let mut api = cuemol_command::transport::GuiApiServer::default();
             let mut protocol = cuemol_command::Protocol::without_history();
             loop {
+                if model.updates.poll(
+                    model.desktop.config_value("updates:check") != "false",
+                    model.agent_wake.clone(),
+                ) {
+                    let _ = app.emit("cuemol-update-changed", model.updates.snapshot());
+                }
+                if model.remote_console.is_some() {
+                    if let Ok(update) = model.poll_console() {
+                        if update.snapshot.is_some() {
+                            let _ = app.emit("cuemol-model-changed", ());
+                        }
+                    }
+                }
                 let (agent_changed, scene_changed) = model.poll_agent();
                 if scene_changed {
                     let _ = app.emit("cuemol-model-changed", ());
@@ -13647,10 +13371,12 @@ fn spawn_model(initial_paths: Vec<PathBuf>, app: tauri::AppHandle) -> ManagedSta
                     model.mcp_listen_port = api.port();
                     let _ = app.emit("cuemol-model-changed", ());
                 }
-                let envelope = if model
-                    .apbs_job
-                    .as_ref()
-                    .is_some_and(|job| job.command.is_some() || job.agent_reply.is_some())
+                let envelope = if model.remote_console.is_some()
+                    || model.updates.pending_startup()
+                    || model
+                        .apbs_job
+                        .as_ref()
+                        .is_some_and(|job| job.command.is_some() || job.agent_reply.is_some())
                 {
                     match receiver.recv_timeout(std::time::Duration::from_millis(30)) {
                         Ok(envelope) => envelope,
@@ -16519,6 +16245,17 @@ fn inspector_request(
 }
 
 #[tauri::command]
+fn update_request(
+    operation: String,
+    state: State<'_, ManagedState>,
+) -> Result<serde_json::Value, String> {
+    match request_model(&state, ModelRequest::UpdateRequest(operation))? {
+        ModelResponse::Inspector(value) => Ok(value),
+        _ => Err("Unexpected update response".into()),
+    }
+}
+
+#[tauri::command]
 fn agent_request(
     operation: String,
     args: serde_json::Value,
@@ -17020,6 +16757,7 @@ pub fn run() -> Result<(), tauri::Error> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            update_request,
             agent_request,
             get_snapshot,
             get_density_histogram,
@@ -17625,6 +17363,8 @@ mod tests {
             mcp_listen_port: None,
             console_session: cuemol_command::console::Session::default(),
             console_run: None,
+            remote_console: None,
+            updates: Default::default(),
             agent: Default::default(),
             agent_wake: Arc::new(|| {}),
             log_lines: Vec::new(),

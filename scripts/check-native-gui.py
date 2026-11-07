@@ -203,6 +203,7 @@ def main():
     parser.add_argument('--file-drop-only', action='store_true')
     parser.add_argument('--picking-only', action='store_true')
     parser.add_argument('--plugins-only', action='store_true')
+    parser.add_argument('--settings-only', action='store_true')
     args = parser.parse_args()
     binary, work = args.binary.resolve(), args.out.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -235,7 +236,8 @@ def main():
         with (config / 'config.tsv').open('a') as stream:
             stream.write('layout:activity\tcrystal\n')
     env = {key: value for key, value in os.environ.items() if not key.startswith('CUEMOL_')}
-    env.update(CUEMOL_CONFIG_DIR=str(config), CUEMOL_CACHE_DIR=str(work / 'cache'))
+    env.update(CUEMOL_CONFIG_DIR=str(config), CUEMOL_CACHE_DIR=str(work / 'cache'),
+               CUEMOL_DISABLE_UPDATE_CHECK='1')
 
     def call(name, arguments=None, timeout=10):
         response = subprocess.run([str(binary), 'mcp', 'call', name, json.dumps(arguments or {})],
@@ -302,29 +304,102 @@ def main():
                 pixels = capture().crop(box).getdata()
                 return sum(b - r > 30 and g - r > 10 for r, g, b in pixels) > 100
 
+            if args.settings_only:
+                primary = 'command' if sys.platform == 'darwin' else 'ctrl'
+                def open_category(row):
+                    click_at(x + 22, y + height - 45)
+                    time.sleep(0.2)
+                    click_at(x + 265, y + row)
+                    time.sleep(0.2)
+                def close_options(apply):
+                    click_at(x + (1004 if apply else 961), y + 714)
+                    time.sleep(0.2)
+                def connect(source, dialect='cuemol'):
+                    return subprocess.run([str(binary), 'console', '--connect', '--dialect', dialect, '-c', source],
+                                          cwd=work, env=env, text=True, capture_output=True, timeout=30)
+                original = call('get_scene_state')
+                before = (config / 'config.tsv').read_text()
+                open_category(216)
+                click_at(x + 418, y + 217)
+                close_options(False)
+                if (config / 'config.tsv').read_text() != before:
+                    raise RuntimeError('Cancelling the theme changed stored preferences')
+                open_category(216)
+                click_at(x + 418, y + 217)
+                click_at(x + 265, y + 423)
+                click_at(x + 418, y + 217)
+                click_at(x + 265, y + 580)
+                click_at(x + 418, y + 217)
+                close_options(True)
+                wait_for(lambda: 'console:remote-access\ttrue' in (config / 'config.tsv').read_text())
+                saved = (config / 'config.tsv').read_text()
+                for setting in ['layout:theme\tlight', 'updates:check\tfalse']:
+                    if setting not in saved:
+                        raise RuntimeError(f'Setting was not persisted: {setting}')
+                info = json.loads((config / 'local-api.json').read_text())
+                if set(info['endpoints']) != {'mcp', 'console'}:
+                    raise RuntimeError('MCP and Console are not independently available')
+                call('clear_undo')
+                uid = original['objects'][0]['id']
+                reply = connect(f'var obj=cuemol.getObject({uid});obj.name="CLI changed";obj.visible=false;print("CLI complete");', 'javascript')
+                if reply.returncode or 'CLI complete' not in reply.stdout:
+                    raise RuntimeError(f'Remote Console failed: {reply.stdout} {reply.stderr}')
+                edited = call('get_scene_state')['objects'][0]
+                if edited['name'] != 'CLI changed' or edited['visible']:
+                    raise RuntimeError('The CLI submission did not edit the visible scene')
+                if connect('undo').returncode:
+                    raise RuntimeError('Remote Console undo failed')
+                restored = call('get_scene_state')['objects'][0]
+                if restored['name'] != original['objects'][0]['name'] or not restored['visible']:
+                    raise RuntimeError('One remote undo did not restore both edits')
+                pwd = connect('pwd')
+                if pwd.returncode or str(work) not in pwd.stdout:
+                    raise RuntimeError('The remote console lost the client working directory')
+                open_category(580)
+                capture('settings-console-light.png')
+                click_at(x + 418, y + 217)
+                close_options(True)
+                wait_for(lambda: json.loads((config / 'local-api.json').read_text())['endpoints'] == ['mcp'])
+                if connect('pwd').returncode == 0:
+                    raise RuntimeError('The CLI connected after access was disabled')
+                if call('get_scene_state')['sceneId'] != original['sceneId']:
+                    raise RuntimeError('Preferences or Console replaced the scene')
+                open_category(216)
+                click_at(x + 530, y + 156)
+                pyautogui.write('pick', interval=0.05)
+                time.sleep(0.2)
+                capture('settings-search.png')
+                close_options(False)
+                report.update(ok=True, settings_cancel=True, theme_persistence=True,
+                              startup_update_preference=True, console_connect=True,
+                              console_shared_history=True, console_working_directory=True,
+                              console_disabled=True, mcp_remains_available=True)
+                print(json.dumps(report), flush=True)
+                return
+
             if args.plugins_only:
                 import socket
 
                 def open_plugins():
                     click_at(x + 22, y + height - 45)
                     time.sleep(0.2)
-                    click_at(x + 526, y + 157)
+                    click_at(x + 265, y + 554)
                     time.sleep(0.2)
 
                 def toggle_examples():
-                    for row in [283, 335, 387]:
-                        click_at(x + 380, y + row)
+                    for row in [217, 269, 321]:
+                        click_at(x + 418, y + row)
 
                 original = call('get_scene_state')
                 before_config = (config / 'config.tsv').read_text()
                 open_plugins()
                 toggle_examples()
-                click_at(x + 938, y + 521)
+                click_at(x + 961, y + 714)
                 if (config / 'config.tsv').read_text() != before_config:
                     raise RuntimeError('Cancelling plugin options saved the draft')
                 open_plugins()
                 toggle_examples()
-                click_at(x + 979, y + 521)
+                click_at(x + 1004, y + 714)
                 wait_for(lambda: 'plugins:catalog:enabled\ttrue' in (config / 'config.tsv').read_text())
                 saved = (config / 'config.tsv').read_text()
                 for line in ['plugins:mdtools:enabled\ttrue', 'plugins:pymol-console:enabled\tfalse']:
@@ -338,8 +413,8 @@ def main():
                 open_plugins()
                 capture('plugin-options-enabled.png')
                 connection = json.loads((config / 'local-api.json').read_text())
-                click_at(x + 380, y + 439)
-                click_at(x + 979, y + 521)
+                click_at(x + 418, y + 373)
+                click_at(x + 1004, y + 714)
                 wait_for(lambda: not (config / 'local-api.json').exists())
                 def stopped():
                     try:
@@ -349,8 +424,8 @@ def main():
                         return True
                 wait_for(stopped)
                 open_plugins()
-                click_at(x + 380, y + 439)
-                click_at(x + 979, y + 521)
+                click_at(x + 418, y + 373)
+                click_at(x + 1004, y + 714)
                 wait_for(lambda: (config / 'local-api.json').exists())
                 if call('get_scene_state')['sceneId'] != original['sceneId']:
                     raise RuntimeError('Reconnecting MCP changed the scene')
@@ -366,21 +441,21 @@ def main():
                 def open_picking():
                     click_at(x + 22, y + height - 45)
                     time.sleep(0.2)
-                    click_at(x + 472, y + 157)
+                    click_at(x + 280, y + 320)
                     time.sleep(0.2)
                 def toggle_picking():
-                    for row_y in [352, 378, 404]:
-                        click_at(x + 380, y + row_y)
+                    for row_y in [321, 347, 373]:
+                        click_at(x + 418, y + row_y)
                 call('clear_undo')
                 call('set_node_prop', {'nodeType': 'scene', 'prop': 'name', 'value': 'edited'})
                 open_picking()
                 toggle_picking()
-                click_at(x + 938, y + 503)
+                click_at(x + 961, y + 714)
                 if not gpu_enabled():
                     raise RuntimeError('Cancelled picking options changed the runtime')
                 open_picking()
                 toggle_picking()
-                click_at(x + 979, y + 503)
+                click_at(x + 1004, y + 714)
                 wait_for(lambda: not gpu_enabled())
                 saved = (config / 'config.tsv').read_text()
                 for key in ['gpu-pick', 'hover-info', 'hover-highlight']:
@@ -392,7 +467,7 @@ def main():
                         raise RuntimeError(f'{command} reverted the picking preference')
                 open_picking()
                 capture('picking-options-final.png')
-                click_at(x + 938, y + 503)
+                click_at(x + 961, y + 714)
                 report.update(ok=True, picking_preferences=True, picking_cancel=True, host_preferences_survive_history=True)
                 print(json.dumps(report), flush=True)
                 return

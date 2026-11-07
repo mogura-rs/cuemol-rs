@@ -317,6 +317,8 @@ struct App {
     about: cuemol_ui::about::AboutDialog,
     dark: bool,
     show_settings: bool,
+    settings_panel: cuemol_ui::settings::SettingsPanel,
+    settings_draft: Option<cuemol_desktop_core::preferences::Preferences>,
     show_render: bool,
     render_hatching: bool,
     render_hatch: cuemol_render::HatchRenderParams,
@@ -368,11 +370,14 @@ impl App {
                 }
             }
         }
-        let dark = storage
-            .as_ref()
-            .and_then(|s| s.get_item("cuemol.theme").ok().flatten())
-            .as_deref()
-            != Some("light");
+        if state.config_value("layout:theme").is_empty() {
+            let theme = storage
+                .as_ref()
+                .and_then(|s| s.get_item("cuemol.theme").ok().flatten())
+                .unwrap_or_else(|| "dark".into());
+            state.put_config_value("layout:theme", theme);
+        }
+        let dark = state.config_value("layout:theme") != "light";
         cc.egui_ctx.set_theme(if dark {
             egui::ThemePreference::Dark
         } else {
@@ -521,6 +526,8 @@ impl App {
             about: cuemol_ui::about::AboutDialog::default(),
             dark,
             show_settings: false,
+            settings_panel: Default::default(),
+            settings_draft: None,
             show_render: false,
             render_hatching: false,
             render_hatch: Default::default(),

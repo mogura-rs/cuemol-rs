@@ -79,3 +79,6 @@ pub mod camera;
 
 #[cfg(feature = "egui")]
 pub mod view;
+
+#[cfg(feature = "egui")]
+pub mod settings;

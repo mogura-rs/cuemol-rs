@@ -30,7 +30,7 @@ async function toggle(page,id){
   await reveal(page,key);await click(page,key);
   await expect.poll(value).not.toBe(before);
 }
-async function openSettings(page){await click(page,'Tools menu');await click(page,'Settings');await reveal(page,'Plugins');if(!(await status(page)).ui.rects['Plugin mdtools'])await click(page,'Plugins');}
+async function openSettings(page){await click(page,'Tools menu');await click(page,'Settings');await click(page,'Settings Installed');}
 async function closeSettings(page){const [x,y,w]=(await status(page)).ui.rects['Settings window'];await page.mouse.click(x+w-14,y+13);await present(page);}
 for(const backend of ['webgl','webgpu'])test(`Plugin settings ${backend} preserve state and restore supported contributions`,async({page},testInfo)=>{
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
@@ -69,5 +69,30 @@ for(const backend of ['webgl','webgpu'])test(`Plugin settings ${backend} preserv
   const saved=await page.evaluate(()=>localStorage.getItem('cuemol.config'));
   expect(saved).toContain('plugins:console:enabled\ttrue');
   expect(saved).toContain('plugins:pymol-console:enabled\tfalse');
+  expect(errors).toEqual([]);
+});
+
+
+for(const backend of ['webgl','webgpu'])test(`Settings categories ${backend} share theme controls and search across groups`,async({page},testInfo)=>{
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  await page.goto(`./?renderer=${backend}`);
+  await expect.poll(async()=>(await status(page))?.scene.sceneId,{timeout:60000}).toBeGreaterThan(0);
+  const theme=()=>page.evaluate(()=>localStorage.getItem('cuemol.config')?.split('\n').find(line=>line.startsWith('layout:theme\t')));
+  await click(page,'Tools menu');await click(page,'Settings');await click(page,'Settings Theme');
+  await click(page,'Dark Mode');await expect.poll(theme).toBe('layout:theme\tlight');
+  await closeSettings(page);await page.reload();
+  await expect.poll(async()=>(await status(page))?.scene.sceneId,{timeout:60000}).toBeGreaterThan(0);
+  await click(page,'View menu');await click(page,'Dark theme');
+  await expect.poll(theme).toBe('layout:theme\tdark');
+  await page.keyboard.press('Escape');
+  await click(page,'Tools menu');await click(page,'Settings');await click(page,'Settings Theme');
+  await click(page,'Dark Mode');await expect.poll(theme).toBe('layout:theme\tlight');
+  await click(page,'Search settings');await page.keyboard.type('pick');await present(page);
+  await expect.poll(async()=>!!(await status(page)).ui.rects['GPU picking']).toBe(true);
+  expect((await status(page)).ui.rects['Dark Mode']).toBeUndefined();
+  const [x,y,w,h]=(await status(page)).ui.rects['Settings window'];
+  expect(x+w).toBeLessThanOrEqual(page.viewportSize().width+1);
+  expect(y+h).toBeLessThanOrEqual(page.viewportSize().height+1);
+  await page.screenshot({path:testInfo.outputPath('settings-search.png')});
   expect(errors).toEqual([]);
 });

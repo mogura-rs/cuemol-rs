@@ -127,6 +127,7 @@ async function openShell(page, storage = {}, options = {}) {
       mousePreset:'DefaultViewInConf',trackballRadius:0.8,hitPrecision:10,
       momentumScroll:false,multitouchPad:false,emulateRightButton:false,
       plugins:options.plugins || {},mcpAcceptConnections:true,mcpPort:0,
+      darkMode:true,updateCheck:true,consoleRemote:false,tools:{},
       gpuPicking:true,hoverInfo:true,hoverHighlight:true,
       shortcuts:[{id:'view-trans-plusx',key:'ArrowRight',ctrl:true,alt:false,shift:false},{id:'view-trans-minusx',key:'ArrowLeft',ctrl:true,alt:false,shift:false}],
     };
@@ -137,6 +138,10 @@ async function openShell(page, storage = {}, options = {}) {
     window.__actionsRunning = false;
     window.__TAURI__ = {core: {invoke: async (command, args) => {
       window.__shellCalls.push({command, args});
+      if (options.updates && command === 'update_request') {
+        const checking=args.operation==='check';
+        return {currentVersion:'0.1.0',message:checking?'Checking for updates…':'CueMol 0.2.0 is available.',checking,installing:false,release:checking?null:{version:'0.2.0',url:'https://github.com/example/cuemol/releases/tag/v0.2.0',newer:true}};
+      }
       if (options.agent && command === 'agent_request') {
         const {operation, args:input} = args;
         if(operation==='configure') agent.settings=structuredClone(input.settings);
@@ -2070,7 +2075,7 @@ test('Tauri native file drops pass one destination through the batch',async({pag
 test('Tauri picking preferences preserve cancellation and stop hover requests', async ({page},testInfo) => {
   const errors=await openShell(page,{}, {picking:true});
   const dialog=page.locator('#reference-dialog');
-  const open=async()=>{await page.getByRole('button',{name:'Settings',exact:true}).click();await dialog.locator('[data-options-tab="Mouse"]').click();};
+  const open=async()=>{await page.getByRole('button',{name:'Settings',exact:true}).click();await dialog.locator('[data-options-tab="Mouse & Navigation"]').click();};
   await open();
   for(const name of ['GPU picking','Hover info','Hover highlight'])await expect(dialog.getByLabel(name,{exact:true})).toBeChecked();
   await dialog.getByLabel('GPU picking',{exact:true}).uncheck();
@@ -2101,7 +2106,7 @@ test('Tauri plugin preferences cancel, restore tabs, and retain dialect choices'
   await expect(page.locator('[data-bottom-select="trajectory"]')).toBeHidden();
   const open=async()=>{
     await page.getByRole('button',{name:'Settings',exact:true}).click();
-    await page.locator('[data-options-tab="Plugins"]').click();
+    await page.locator('[data-options-tab="Installed"]').click();
   };
   await open();
   const dialog=page.locator('#reference-dialog');
@@ -2197,10 +2202,52 @@ test('Tauri Agent respects composition and multiline prompt history boundaries',
   await prompt.evaluate(element=>element.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,isComposing:true,bubbles:true})));
   expect(await page.evaluate(()=>window.__shellCalls.some(call=>call.command==='agent_request'&&call.args.operation==='start'))).toBe(false);
   await page.getByRole('button',{name:'Settings',exact:true}).click();
-  await page.locator('[data-options-tab="Plugins"]').click();
+  await page.locator('[data-options-tab="Installed"]').click();
   await page.locator('#reference-dialog').getByLabel('AI Agent',{exact:true}).uncheck();
   await page.locator('#reference-dialog').getByRole('button',{name:'OK',exact:true}).click();
   await expect(page.locator('[data-activity="agent"]')).toBeHidden();
   await expect(page.locator('[data-activity-panel="agent"]')).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri settings categories search, cancel, persist tools, and check updates',async({page},testInfo)=>{
+  const errors=await openShell(page,{}, {updates:true,plugins:{console:true}});
+  const dialog=page.locator('#reference-dialog');
+  const category=name=>dialog.locator(`[data-options-tab="${name}"]`);
+  const open=async()=>page.getByRole('button',{name:'Settings',exact:true}).click();
+  await open();
+  await expect(category('MCP Server')).toBeHidden();
+  await dialog.getByLabel('Dark Mode',{exact:true}).uncheck();
+  await category('Rendering').click();
+  await dialog.getByLabel('POV-Ray Executable',{exact:true}).fill('tools/renderer');
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme','dark');
+  await open();
+  await expect(dialog.getByLabel('POV-Ray Executable',{exact:true})).toHaveValue('');
+  await dialog.getByLabel('Search settings').fill('ffmpeg');
+  await expect(category('Rendering')).toBeVisible();await expect(category('Theme')).toBeHidden();
+  await category('Rendering').click();
+  await dialog.getByLabel('POV-Ray Executable',{exact:true}).fill('tools/renderer');
+  await dialog.getByLabel('ffmpeg Executable',{exact:true}).fill('tools/movie');
+  await category('APBS / PDB2PQR').click();
+  await dialog.getByRole('combobox',{name:'pdb2pqr Force Field',exact:true}).selectOption('amber');
+  await category('Console').click();
+  await dialog.getByLabel('Command line access',{exact:true}).check();
+  await category('Updates').click();
+  await dialog.getByLabel('Check for Updates at Startup',{exact:true}).uncheck();
+  await dialog.getByRole('button',{name:'Check for Updates',exact:true}).click();
+  const updates=page.getByRole('dialog',{name:'CueMol updates',exact:true});
+  await expect(updates.getByRole('status')).toHaveText('CueMol 0.2.0 is available.');
+  await expect(updates.getByRole('button',{name:'Install update',exact:true})).toBeEnabled();
+  await updates.getByRole('button',{name:'Close',exact:true}).click();
+  await category('Theme').click();await dialog.getByLabel('Dark Mode',{exact:true}).uncheck();
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme','light');
+  const saved=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='set_preferences').at(-1).args.preferences);
+  expect(saved).toMatchObject({darkMode:false,consoleRemote:true,updateCheck:false,tools:{povray:'tools/renderer',ffmpeg:'tools/movie',forceField:'amber'}});
+  await open();await category('Rendering').click();
+  await expect(dialog.getByLabel('ffmpeg Executable',{exact:true})).toHaveValue('tools/movie');
+  await page.screenshot({path:testInfo.outputPath('settings-categories.png')});
   expect(errors).toEqual([]);
 });

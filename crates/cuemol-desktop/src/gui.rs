@@ -1,3 +1,5 @@
+#[path = "remote_console.rs"]
+mod remote_console;
 use cuemol_command::animation_graph::{editor_time_ms, Graph as AnimationGraph};
 #[path = "gui_actions.rs"]
 mod actions;
@@ -728,6 +730,17 @@ impl NativeRunner {
             return;
         };
         while let Ok(request) = api.requests.try_recv() {
+            if request.endpoint == cuemol_command::transport::ApiEndpoint::Console {
+                app.cancel_numeric_previews(&mut gpu.camera);
+                let _ = app
+                    .state
+                    .set_active_view_camera(&gpu.camera.to_qsys_camera("__current"));
+                app.start_remote_console(request, &self.egui_ctx);
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                continue;
+            }
             let name = request.message["params"]["name"].as_str().unwrap_or("");
             let is_call = self.protocol.is_tool_call(&request.message);
             if is_call && cuemol_command::tool_is_mutating(name) {
@@ -1340,6 +1353,7 @@ struct GuiApplication {
     console: cuemol_ui::console::ConsoleEditor,
     console_session: cuemol_command::console::Session,
     console_run: Option<GuiConsoleExecution>,
+    remote_console: Option<cuemol_command::transport::ConsoleReply>,
     pending_script_view: bool,
     selection_text: String,
     selected_object: Option<cuemol_core::Uid>,
@@ -1492,7 +1506,7 @@ struct GuiApplication {
     about: cuemol_ui::about::AboutDialog,
     updates: updates::Updates,
     show_options: bool,
-    options_pane: OptionsPane,
+    settings_panel: cuemol_ui::settings::SettingsPanel,
     options_draft: Option<NativePreferences>,
     show_scene_props: bool,
     scene_properties_draft: Option<NativeSceneProperties>,
@@ -2546,48 +2560,7 @@ enum LeftPanel {
     Animation,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OptionsPane {
-    Misc,
-    Key,
-    Mouse,
-    Plugins,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NativeShortcut {
-    id: String,
-    key: String,
-    ctrl: bool,
-    alt: bool,
-    shift: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct NativePreferences {
-    plugins: Vec<(String, bool)>,
-    mcp_accept_connections: bool,
-    mcp_port: u16,
-    drop_target: cuemol_desktop_core::FileOpenTarget,
-    shell_target: cuemol_desktop_core::FileOpenTarget,
-    atom_label_font: String,
-    atom_label_size: f64,
-    atom_label_color: String,
-    atom_label_italic: bool,
-    atom_label_bold: bool,
-    ui_language: String,
-    use_hidpi: bool,
-    mouse_preset: String,
-    input_device: String,
-    trackball_radius: f64,
-    hit_precision: f64,
-    momentum_scroll: bool,
-    emulate_right_button: bool,
-    hover_info: bool,
-    hover_highlight: bool,
-    gpu_picking: bool,
-    shortcuts: Vec<NativeShortcut>,
-}
+type NativePreferences = cuemol_desktop_core::preferences::Preferences;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum NativePropertyObject {
@@ -4501,72 +4474,6 @@ const fn view_property(
     }
 }
 
-impl NativePreferences {
-    fn from_state(state: &DesktopAppState) -> Self {
-        let input = state.view_input_config();
-        Self {
-            mcp_accept_connections: state.config_value("mcp:accept-connections") != "false",
-            mcp_port: state.mcp_server_port().unwrap_or(27182),
-            plugins: cuemol_desktop_core::plugins::BUILTIN_PLUGINS
-                .iter()
-                .filter(|plugin| !plugin.always_enabled)
-                .map(|plugin| (plugin.id.into(), state.plugin_enabled(plugin.id)))
-                .collect(),
-            drop_target: cuemol_desktop_core::FileOpenTarget::from_config(
-                &state.config_value("files:drop-target"),
-            ),
-            shell_target: cuemol_desktop_core::FileOpenTarget::from_config(
-                &state.config_value("files:shell-target"),
-            ),
-            atom_label_font: nonempty_or(
-                state.style_value(0, "", "DefaultLabel.font_name"),
-                "san-serif",
-            ),
-            atom_label_size: state
-                .style_value(0, "", "DefaultLabel.font_size")
-                .parse()
-                .unwrap_or(12.0),
-            atom_label_color: nonempty_or(state.style_value(0, "", "DefaultLabel.color"), "Yellow"),
-            atom_label_italic: matches!(
-                state.style_value(0, "", "DefaultLabel.font_style").as_str(),
-                "italic" | "oblique"
-            ),
-            atom_label_bold: state.style_value(0, "", "DefaultLabel.font_weight") == "bold",
-            ui_language: nonempty_or(state.config_value("general.useragent.locale"), "en-US"),
-            use_hidpi: config_bool(state, "cuemol2.ui.view.use_hidpi", false),
-            input_device: nonempty_or(
-                state.config_value("view_input:device"),
-                if config_bool(state, "cuemol2.ui.mouse-multitouch-pad", false) {
-                    "trackpad"
-                } else {
-                    "auto"
-                },
-            ),
-            mouse_preset: nonempty_or(
-                state.config_value("cuemol2.ui.viewinconf"),
-                "DefaultViewInConf",
-            ),
-            trackball_radius: input.tbrad(),
-            hit_precision: input.hitprec(),
-            momentum_scroll: config_bool(state, "cuemol2.ui.mouse-momentum-scroll", false),
-            emulate_right_button: config_bool(state, "cuemol2.ui.mouse-emulate-rbutton", false),
-            hover_info: config_bool(state, "view_input:hover-info", true),
-            hover_highlight: config_bool(state, "view_input:hover-highlight", true),
-            gpu_picking: state.resolved_view_input(false).gpu_pick(),
-            shortcuts: ["view-trans-plusx", "view-trans-minusx"]
-                .into_iter()
-                .map(|id| NativeShortcut {
-                    id: id.to_string(),
-                    key: state.config_value(&format!("shortcut:{id}:key")),
-                    ctrl: config_bool(state, &format!("shortcut:{id}:ctrl"), true),
-                    alt: config_bool(state, &format!("shortcut:{id}:alt"), false),
-                    shift: config_bool(state, &format!("shortcut:{id}:shift"), false),
-                })
-                .collect(),
-        }
-    }
-}
-
 impl LeftPanel {
     const ALL: [LeftPanel; 8] = [
         LeftPanel::Workspace,
@@ -4808,6 +4715,7 @@ impl GuiApplication {
             console: cuemol_ui::console::ConsoleEditor::default(),
             console_session: cuemol_command::console::Session::default(),
             console_run: None,
+            remote_console: None,
             pending_script_view: false,
             selection_text: String::new(),
             selected_object: None,
@@ -4923,7 +4831,7 @@ impl GuiApplication {
             about: cuemol_ui::about::AboutDialog::default(),
             updates: Default::default(),
             show_options: false,
-            options_pane: OptionsPane::Misc,
+            settings_panel: Default::default(),
             options_draft: None,
             show_scene_props: false,
             scene_properties_draft: None,
@@ -5096,6 +5004,8 @@ impl GuiApplication {
         app.load_agent_settings();
         app.apply_stored_preferences();
         app.load_command_history();
+        #[cfg(not(test))]
+        app.updates.schedule_startup();
         match crate::run_startup_script(&mut app.state) {
             Ok(Some((log, selection))) => {
                 app.log_lines.extend(log.lines().map(str::to_string));
@@ -5178,7 +5088,7 @@ impl GuiApplication {
                     continue;
                 }
                 let (sender, receiver) = mpsc::sync_channel(1);
-                self.start_apbs_command(cuemol_command::transport::ApiRequest {message:serde_json::json!({"jsonrpc":"2.0","id":0,"method":"tools/call","params":{"name":name,"arguments":arguments}}),reply:sender});
+                self.start_apbs_command(cuemol_command::transport::ApiRequest { endpoint: cuemol_command::transport::ApiEndpoint::Mcp,message:serde_json::json!({"jsonrpc":"2.0","id":0,"method":"tools/call","params":{"name":name,"arguments":arguments}}),reply:sender});
                 if let Some(job) = &mut self.apbs_job {
                     job.command = None;
                     job.agent_reply = Some(reply);
@@ -5410,7 +5320,8 @@ impl GuiApplication {
         }
         self.clipboard_focus.begin_frame(ctx);
         self.tritium_layout(ctx, camera);
-        self.updates.show(ctx);
+        self.updates
+            .show(ctx, self.state.config_value("updates:check") != "false");
         self.dialogs(ctx, camera);
         self.clipboard_focus.end_frame(ctx);
         self.apply_script_view(camera);
@@ -13845,6 +13756,9 @@ impl GuiApplication {
     }
 
     fn cancel_console(&mut self, reason: &str) {
+        if let Some(pending) = self.remote_console.take() {
+            pending.finish(&self.log_lines, false, reason);
+        }
         if self.console_run.take().is_some() {
             if let Err(error) = self.console_session.finish_submission() {
                 self.log_lines.push(error);
@@ -13906,7 +13820,7 @@ impl GuiApplication {
         changed
     }
 
-    fn poll_console(&mut self, ctx: &egui::Context) {
+    fn advance_console(&mut self, ctx: &egui::Context) {
         use cuemol_command::console::Action;
         use cuemol_ui::console_runtime::ConsoleStep;
         let Some(mut run) = self.console_run.take() else {
@@ -19128,7 +19042,6 @@ impl GuiApplication {
     }
 
     fn open_options_dialog(&mut self) {
-        self.options_pane = OptionsPane::Misc;
         self.options_draft = Some(NativePreferences::from_state(&self.state));
         self.show_options = true;
     }
@@ -19144,52 +19057,60 @@ impl GuiApplication {
         let mut open = self.show_options;
         let mut accept = false;
         let mut cancel = false;
+        let mut agent_settings = false;
+        let mut actions = Vec::new();
         egui::Window::new("Options")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(620.0)
-            .min_width(520.0)
+            .open(&mut open).collapsible(false).resizable(true)
+            .default_size([800., 580.])
+            .max_width((ctx.content_rect().width()-40.).max(320.)).min_size([620., 360.])
+            .max_height((ctx.content_rect().height()-50.).max(200.))
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.options_pane, OptionsPane::Misc, "Misc");
-                    ui.selectable_value(&mut self.options_pane, OptionsPane::Key, "Key");
-                    ui.selectable_value(&mut self.options_pane, OptionsPane::Mouse, "Mouse");
-                    ui.selectable_value(&mut self.options_pane, OptionsPane::Plugins, "Plugins");
-                });
-                ui.separator();
-                match self.options_pane {
-                    OptionsPane::Misc => Self::options_misc_ui(ui, &mut draft),
-                    OptionsPane::Key => Self::options_key_ui(ui, &mut draft),
-                    OptionsPane::Mouse => Self::options_mouse_ui(ui, &mut draft),
-                    OptionsPane::Plugins => {
-                        ui.strong("Installed plugins");
-                        ui.checkbox(&mut draft.mcp_accept_connections, "MCP: Accept connections");
-                        ui.horizontal(|ui| {
-                            ui.label("MCP port (0 = automatic)");
-                            ui.add(egui::DragValue::new(&mut draft.mcp_port));
-                        });
-                        ui.label("Connect with cuemol mcp connect after enabling MCP Server.");
-                        for (id, enabled) in &mut draft.plugins {
-                            if let Some(plugin) = cuemol_desktop_core::plugins::BUILTIN_PLUGINS
-                                .iter()
-                                .find(|plugin| plugin.id == id)
-                            {
-                                ui.checkbox(enabled, plugin.name);
+                let height=(ui.available_height()-38.).max(180.);
+                ui.allocate_ui(egui::vec2(ui.available_width(),height),|ui| {
+                    actions=self.settings_panel.show(ui,&mut draft,false,|category,ui| {
+                        match category {
+                            cuemol_ui::settings::Category::Agent => {
+                                ui.label("Configure the model, API keys and message shortcuts in the Agent panel.");
+                                agent_settings=ui.button("Open Agent settings").clicked();
                             }
+                            cuemol_ui::settings::Category::Advanced => {
+                                ui.label("Configuration is saved in config.tsv in the application configuration directory.");
+                                ui.code("cuemol config show");
+                                ui.label("Startup JavaScript runs when the application opens.");
+                                ui.code("startup.js");
+                            }
+                            _=>{}
                         }
-                    }
-                }
+                    });
+                });
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("OK").clicked() {
-                        accept = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                    }
+                    accept=ui.button("OK").clicked();
+                    cancel=ui.button("Cancel").clicked();
                 });
             });
+        for action in actions {
+            match action {
+                cuemol_ui::settings::Action::CheckUpdates => self.updates.check(ctx),
+                cuemol_ui::settings::Action::Browse(path) => {
+                    let picker = rfd::FileDialog::new().set_title(path.label());
+                    let selected = if path == cuemol_ui::settings::ToolPath::PovrayInclude {
+                        picker.pick_folder()
+                    } else {
+                        picker.pick_file()
+                    };
+                    if let Some(selected) = selected {
+                        *path.value_mut(&mut draft) = selected.to_string_lossy().into_owned();
+                    }
+                }
+            }
+        }
+        if agent_settings {
+            self.activity = Some(cuemol_ui::shell::Activity::Agent);
+            self.show_options = false;
+            self.options_draft = Some(draft);
+            return;
+        }
         if accept {
             match self.apply_preferences(&draft) {
                 Ok(()) => {
@@ -19212,315 +19133,31 @@ impl GuiApplication {
         }
     }
 
-    fn options_misc_ui(ui: &mut egui::Ui, draft: &mut NativePreferences) {
-        ui.group(|ui| {
-            ui.strong("Files");
-            for (label, target) in [
-                ("Drag and drop opens into", &mut draft.drop_target),
-                ("File manager opens into", &mut draft.shell_target),
-            ] {
-                egui::ComboBox::from_label(label)
-                    .selected_text(if *target == cuemol_desktop_core::FileOpenTarget::New {
-                        "New scene"
-                    } else {
-                        "Current scene"
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            target,
-                            cuemol_desktop_core::FileOpenTarget::Active,
-                            "Current scene",
-                        );
-                        ui.selectable_value(
-                            target,
-                            cuemol_desktop_core::FileOpenTarget::New,
-                            "New scene",
-                        );
-                    });
-            }
-        });
-        ui.add_space(8.0);
-        ui.group(|ui| {
-            ui.set_min_width(ui.available_width());
-            ui.strong("Atom label");
-            egui::Grid::new("options_misc_atom_label")
-                .num_columns(2)
-                .spacing([12.0, 7.0])
-                .show(ui, |ui| {
-                    ui.label("Font:");
-                    ui.text_edit_singleline(&mut draft.atom_label_font);
-                    ui.end_row();
-                    ui.label("Size:");
-                    ui.add(
-                        egui::DragValue::new(&mut draft.atom_label_size)
-                            .range(4.0..=144.0)
-                            .speed(1.0),
-                    );
-                    ui.end_row();
-                    ui.label("Color:");
-                    ui.text_edit_singleline(&mut draft.atom_label_color);
-                    ui.end_row();
-                    ui.label("");
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut draft.atom_label_italic, "Italic");
-                        ui.checkbox(&mut draft.atom_label_bold, "Bold");
-                    });
-                    ui.end_row();
-                    ui.label("Sample:");
-                    let mut sample = egui::RichText::new("ABC abc 123")
-                        .size(draft.atom_label_size.clamp(4.0, 72.0) as f32);
-                    if draft.atom_label_italic {
-                        sample = sample.italics();
-                    }
-                    if draft.atom_label_bold {
-                        sample = sample.strong();
-                    }
-                    if let Ok(color) = cuemol_gfx::parse_color(&draft.atom_label_color) {
-                        if let Some(color) = color.rgba8() {
-                            sample = sample.color(egui::Color32::from_rgba_unmultiplied(
-                                color.r, color.g, color.b, color.a,
-                            ));
-                        }
-                    }
-                    egui::Frame::new()
-                        .fill(egui::Color32::WHITE)
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::GRAY))
-                        .inner_margin(egui::Margin::symmetric(8, 4))
-                        .show(ui, |ui| {
-                            ui.label(sample);
-                        });
-                    ui.end_row();
-                });
-        });
-        ui.add_space(8.0);
-        ui.group(|ui| {
-            ui.set_min_width(ui.available_width());
-            ui.strong("Misc settings");
-            egui::ComboBox::from_label("UI language")
-                .selected_text(match draft.ui_language.as_str() {
-                    "ja" => "Japanese (ja)",
-                    _ => "English (en-US)",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut draft.ui_language,
-                        "en-US".to_string(),
-                        "English (en-US)",
-                    );
-                    ui.selectable_value(&mut draft.ui_language, "ja".to_string(), "Japanese (ja)");
-                });
-            ui.checkbox(&mut draft.use_hidpi, "Enable HiDPI (Retina) display");
-        });
-    }
-
-    fn options_key_ui(ui: &mut egui::Ui, draft: &mut NativePreferences) {
-        ui.label("Key config:");
-        egui::Grid::new("options_key_bindings")
-            .striped(true)
-            .num_columns(5)
-            .spacing([12.0, 7.0])
-            .show(ui, |ui| {
-                for heading in ["Name", "Key", "Ctrl", "Alt", "Shift"] {
-                    ui.strong(heading);
-                }
-                ui.end_row();
-                for shortcut in &mut draft.shortcuts {
-                    let name = match shortcut.id.as_str() {
-                        "view-trans-plusx" => "Translate view +X",
-                        "view-trans-minusx" => "Translate view −X",
-                        _ => shortcut.id.as_str(),
-                    };
-                    ui.label(name);
-                    egui::ComboBox::from_id_salt(format!("options-key-{}", shortcut.id))
-                        .selected_text(&shortcut.key)
-                        .show_ui(ui, |ui| {
-                            for key in ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"] {
-                                ui.selectable_value(&mut shortcut.key, key.to_string(), key);
-                            }
-                        });
-                    ui.checkbox(&mut shortcut.ctrl, "");
-                    ui.checkbox(&mut shortcut.alt, "");
-                    ui.checkbox(&mut shortcut.shift, "");
-                    ui.end_row();
-                }
-            });
-    }
-
-    fn options_mouse_ui(ui: &mut egui::Ui, draft: &mut NativePreferences) {
-        egui::ComboBox::from_label("Input device")
-            .selected_text(&draft.input_device)
-            .show_ui(ui, |ui| {
-                for value in ["auto", "mouse", "trackpad"] {
-                    ui.selectable_value(&mut draft.input_device, value.into(), value);
-                }
-            });
-        egui::ComboBox::from_label("View operation preset")
-            .selected_text(mouse_preset_label(&draft.mouse_preset))
-            .show_ui(ui, |ui| {
-                for (value, label) in MOUSE_PRESETS {
-                    ui.selectable_value(&mut draft.mouse_preset, value.to_string(), *label);
-                }
-            });
-        egui::Grid::new("options_mouse_values")
-            .num_columns(2)
-            .spacing([12.0, 7.0])
-            .show(ui, |ui| {
-                ui.label("XY-rot sensitivity:");
-                ui.add(
-                    egui::DragValue::new(&mut draft.trackball_radius)
-                        .range(0.1..=10.0)
-                        .speed(0.1),
-                );
-                ui.end_row();
-                ui.label("Pick precision:");
-                ui.add(
-                    egui::DragValue::new(&mut draft.hit_precision)
-                        .range(0.0..=100.0)
-                        .speed(1.0),
-                );
-                ui.end_row();
-            });
-        ui.checkbox(&mut draft.momentum_scroll, "Momentum scroll");
-        ui.checkbox(&mut draft.emulate_right_button, "Emulate mouse R button");
-        ui.checkbox(&mut draft.gpu_picking, "GPU picking")
-            .on_hover_text("Pick rendered geometry. Turn off to pick atom centers on the CPU.");
-        ui.checkbox(&mut draft.hover_info, "Hover info");
-        ui.checkbox(&mut draft.hover_highlight, "Hover highlight");
-    }
-
     fn apply_preferences(
         &mut self,
         preferences: &NativePreferences,
     ) -> std::result::Result<(), String> {
-        validate_native_preferences(preferences)?;
-        self.state
-            .set_plugin_states(&preferences.plugins.iter().cloned().collect())
-            .map_err(|error| error.to_string())?;
-        self.state.put_config_value(
-            "mcp:accept-connections",
-            preferences.mcp_accept_connections.to_string(),
-        );
-        self.state
-            .put_config_value("mcp:port", preferences.mcp_port.to_string());
-        self.agent.settings.enabled = self.state.plugin_enabled("agent");
-        if !self.agent.settings.enabled {
-            self.agent.cancel("AI Agent plugin disabled.");
-        }
-        self.state
-            .put_config_value("files:drop-target", preferences.drop_target.as_str());
-        self.state
-            .put_config_value("files:shell-target", preferences.shell_target.as_str());
-        self.state.set_style_value(
-            0,
-            "user",
-            "DefaultLabel.font_name",
-            preferences.atom_label_font.trim(),
-        );
-        self.state.set_style_value(
-            0,
-            "user",
-            "DefaultLabel.font_size",
-            preferences.atom_label_size.to_string(),
-        );
-        self.state.set_style_value(
-            0,
-            "user",
-            "DefaultLabel.color",
-            preferences.atom_label_color.trim(),
-        );
-        self.state.set_style_value(
-            0,
-            "user",
-            "DefaultLabel.font_style",
-            if preferences.atom_label_italic {
-                "italic"
-            } else {
-                "normal"
-            },
-        );
-        self.state.set_style_value(
-            0,
-            "user",
-            "DefaultLabel.font_weight",
-            if preferences.atom_label_bold {
-                "bold"
-            } else {
-                "normal"
-            },
-        );
-        {
-            let input = self.state.view_input_config_mut();
-            input.set_style(preferences.mouse_preset.clone());
-            input.set_tbrad(preferences.trackball_radius);
-            input.set_hitprec(preferences.hit_precision);
-        }
-        for (key, value) in [
-            (
-                "style:DefaultLabel.font_name",
-                preferences.atom_label_font.trim().to_string(),
-            ),
-            (
-                "style:DefaultLabel.font_size",
-                preferences.atom_label_size.to_string(),
-            ),
-            (
-                "style:DefaultLabel.color",
-                preferences.atom_label_color.trim().to_string(),
-            ),
-            (
-                "style:DefaultLabel.font_style",
-                if preferences.atom_label_italic {
-                    "italic".to_string()
-                } else {
-                    "normal".to_string()
-                },
-            ),
-            (
-                "style:DefaultLabel.font_weight",
-                if preferences.atom_label_bold {
-                    "bold".to_string()
-                } else {
-                    "normal".to_string()
-                },
-            ),
-            ("general.useragent.locale", preferences.ui_language.clone()),
-            (
-                "cuemol2.ui.view.use_hidpi",
-                preferences.use_hidpi.to_string(),
-            ),
-            ("cuemol2.ui.viewinconf", preferences.mouse_preset.clone()),
-            ("view_input:device", preferences.input_device.clone()),
-            ("view_input:tbrad", preferences.trackball_radius.to_string()),
-            ("view_input:hitprec", preferences.hit_precision.to_string()),
-            ("view_input:gpu-pick", preferences.gpu_picking.to_string()),
-            ("view_input:hover-info", preferences.hover_info.to_string()),
-            (
-                "view_input:hover-highlight",
-                preferences.hover_highlight.to_string(),
-            ),
-            (
-                "cuemol2.ui.mouse-momentum-scroll",
-                preferences.momentum_scroll.to_string(),
-            ),
-            (
-                "cuemol2.ui.mouse-emulate-rbutton",
-                preferences.emulate_right_button.to_string(),
-            ),
-        ] {
-            self.state.put_config_value(key, value);
-        }
-        for shortcut in &preferences.shortcuts {
-            for (field, value) in [
-                ("key", shortcut.key.clone()),
-                ("ctrl", shortcut.ctrl.to_string()),
-                ("alt", shortcut.alt.to_string()),
-                ("shift", shortcut.shift.to_string()),
-            ] {
-                self.state
-                    .put_config_value(&format!("shortcut:{}:{field}", shortcut.id), value);
-            }
-        }
+        preferences.apply(&mut self.state)?;
+        self.light_theme = !preferences.dark_mode;
+        self.apply_tool_preferences();
+        self.sync_agent_plugin();
         self.persist_config_state()
+    }
+
+    fn apply_tool_preferences(&mut self) {
+        let resolve = |tool: &str| {
+            cuemol_command::external::resolve(&self.state, tool)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| tool.into())
+        };
+        self.apbs_executable = resolve("apbs");
+        self.pdb2pqr_executable = resolve("pdb2pqr");
+        self.pov_render_settings.executable = resolve("povray");
+        self.animation_render_settings.povray_executable = resolve("povray");
+        self.animation_render_settings.ffmpeg_executable = resolve("ffmpeg");
+        let tools = cuemol_desktop_core::preferences::ToolPreferences::from_state(&self.state);
+        self.pov_render_settings.include_dir = tools.povray_include;
+        self.apbs_force_field = tools.force_field;
     }
 
     fn persist_config_state(&self) -> std::result::Result<(), String> {
@@ -32805,77 +32442,9 @@ fn config_bool(state: &DesktopAppState, key: &str, fallback: bool) -> bool {
     }
 }
 
-fn mouse_preset_label(value: &str) -> &str {
-    MOUSE_PRESETS
-        .iter()
-        .find_map(|(preset, label)| (*preset == value).then_some(*label))
-        .unwrap_or(value)
-}
-
+#[cfg(test)]
 fn validate_native_preferences(preferences: &NativePreferences) -> std::result::Result<(), String> {
-    if preferences.atom_label_font.trim().is_empty() {
-        return Err("an atom-label font is required".to_string());
-    }
-    if !preferences.atom_label_size.is_finite()
-        || !(4.0..=144.0).contains(&preferences.atom_label_size)
-    {
-        return Err("atom-label size must be between 4 and 144".to_string());
-    }
-    if preferences.atom_label_color.trim().is_empty() {
-        return Err("an atom-label color is required".to_string());
-    }
-    if !matches!(preferences.ui_language.as_str(), "en-US" | "ja") {
-        return Err(format!(
-            "unsupported UI language: {}",
-            preferences.ui_language
-        ));
-    }
-    if !MOUSE_PRESETS
-        .iter()
-        .any(|(preset, _)| *preset == preferences.mouse_preset)
-    {
-        return Err(format!(
-            "unknown mouse preset: {}",
-            preferences.mouse_preset
-        ));
-    }
-    if !preferences.trackball_radius.is_finite()
-        || !(0.1..=10.0).contains(&preferences.trackball_radius)
-    {
-        return Err("trackball radius must be between 0.1 and 10".to_string());
-    }
-    if !preferences.hit_precision.is_finite() || !(0.0..=100.0).contains(&preferences.hit_precision)
-    {
-        return Err("pick precision must be between 0 and 100".to_string());
-    }
-    const IDS: [&str; 2] = ["view-trans-plusx", "view-trans-minusx"];
-    const KEYS: [&str; 4] = ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"];
-    if preferences.shortcuts.len() != IDS.len()
-        || !IDS.iter().all(|id| {
-            preferences
-                .shortcuts
-                .iter()
-                .any(|shortcut| shortcut.id == *id)
-        })
-    {
-        return Err("the complete reference shortcut set is required".to_string());
-    }
-    for shortcut in &preferences.shortcuts {
-        if !KEYS.contains(&shortcut.key.as_str()) {
-            return Err(format!("unsupported shortcut key: {}", shortcut.key));
-        }
-    }
-    for (index, shortcut) in preferences.shortcuts.iter().enumerate() {
-        if preferences.shortcuts.iter().skip(index + 1).any(|other| {
-            shortcut.key == other.key
-                && shortcut.ctrl == other.ctrl
-                && shortcut.alt == other.alt
-                && shortcut.shift == other.shift
-        }) {
-            return Err(format!("duplicate shortcut: {}", shortcut.key));
-        }
-    }
-    Ok(())
+    cuemol_desktop_core::preferences::validate(preferences)
 }
 
 fn default_config_path() -> Option<PathBuf> {
@@ -34576,8 +34145,12 @@ mod tests {
 
         let ctx = egui::Context::default();
         app.open_options_dialog();
-        for pane in [OptionsPane::Misc, OptionsPane::Key, OptionsPane::Mouse] {
-            app.options_pane = pane;
+        for pane in [
+            cuemol_ui::settings::Category::Labels,
+            cuemol_ui::settings::Category::Keys,
+            cuemol_ui::settings::Category::Mouse,
+        ] {
+            app.settings_panel.category = pane;
             let _ = ctx.run(egui::RawInput::default(), |ctx| app.options_dialog(ctx));
             assert!(app.show_options);
             assert!(app.options_draft.is_some());
@@ -41596,7 +41169,7 @@ mod tests {
             );
         }
 
-        // (1b3) Reference Options window with the Misc pane open.
+        // (1b3) Reference Options window with the Theme category open.
         {
             let mut app = GuiApplication::new();
             let mut camera = CameraController::default();

@@ -3,6 +3,8 @@ mod clipboard;
 mod config_io;
 mod file_open;
 pub mod plugins;
+#[cfg(feature = "scripting")]
+pub mod preferences;
 pub use clipboard::GuiClipboardPayload;
 pub use file_open::{FileOpenBatch, FileOpenTarget};
 mod scene_save;
@@ -2939,6 +2941,8 @@ impl DesktopAppState {
         for entry in entries {
             self.put_config_value(&entry.key, entry.value);
         }
+        #[cfg(feature = "scripting")]
+        preferences::restore_runtime(self);
         Ok(count)
     }
 

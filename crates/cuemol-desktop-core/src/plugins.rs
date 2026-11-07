@@ -66,6 +66,10 @@ pub const BUILTIN_PLUGINS: &[BuiltinPlugin] = &[
 ];
 
 impl DesktopAppState {
+    pub fn console_remote_enabled(&self) -> bool {
+        self.plugin_enabled("console") && self.config_value("console:remote-access") == "true"
+    }
+
     pub fn mcp_server_enabled(&self) -> bool {
         self.plugin_enabled("mcp") && self.config_value("mcp:accept-connections") != "false"
     }

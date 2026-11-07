@@ -15,7 +15,7 @@ pub(super) struct Execution {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Update {
-    snapshot: Option<Box<AppSnapshot>>,
+    pub(super) snapshot: Option<Box<AppSnapshot>>,
     running: bool,
 }
 
@@ -65,6 +65,13 @@ impl AppModel {
         if !self.desktop.console_dialect_enabled(dialect.label()) {
             return Err("Console plugin or dialect is disabled.".into());
         }
+        if let Some(pending) = self.remote_console.take() {
+            pending.finish(
+                &self.log_lines,
+                false,
+                "Console replaced by another submission.",
+            );
+        }
         self.console_run = None;
         self.console_session.finish_submission()?;
         self.console_session.begin_submission(source, dialect);
@@ -86,6 +93,13 @@ impl AppModel {
     }
 
     pub(super) fn stop_console(&mut self) -> Update {
+        if let Some(pending) = self.remote_console.take() {
+            pending.finish(
+                &self.log_lines,
+                false,
+                "Console stopped; completed edits are kept.",
+            );
+        }
         if self.console_run.take().is_some() {
             if let Err(error) = self.console_session.finish_submission() {
                 self.log_lines.push(error);
@@ -164,7 +178,7 @@ impl AppModel {
         Ok(())
     }
 
-    pub(super) fn poll_console(&mut self) -> Result<Update, String> {
+    fn advance_console(&mut self) -> Result<Update, String> {
         let Some(mut run) = self.console_run.take() else {
             return Ok(self.console_update(false));
         };
@@ -293,5 +307,141 @@ impl AppModel {
             self.log_lines.push(error);
         }
         Ok(self.console_update(changed))
+    }
+}
+
+impl AppModel {
+    pub(super) fn start_remote_console(&mut self, request: cuemol_command::transport::ApiRequest) {
+        let parsed = (|| {
+            if !self.desktop.console_remote_enabled() {
+                return Err("Command line access is disabled.".into());
+            }
+            if self.console_run.is_some() || self.remote_console.is_some() {
+                return Err("The console is already running.".into());
+            }
+            let source = request.message["source"]
+                .as_str()
+                .filter(|source| !source.trim().is_empty())
+                .ok_or("A console source is required.")?
+                .to_owned();
+            let dialect = cuemol_command::transport::console_dialect(&request.message)?;
+            if !self.desktop.console_dialect_enabled(dialect.label()) {
+                return Err("Console dialect is disabled.".into());
+            }
+            if let Some(directory) = request.message["cwd"].as_str() {
+                self.console_session
+                    .set_working_directory(Path::new(directory))?;
+            }
+            self.begin_remote_edit()?;
+            Ok::<_, String>((source, dialect))
+        })();
+        let (source, dialect) = match parsed {
+            Ok(value) => value,
+            Err(error) => {
+                cuemol_command::transport::reject_console(request, error);
+                return;
+            }
+        };
+        self.agent.cancel("Command line submission started.");
+        let pending = cuemol_command::transport::ConsoleReply::new(request, &self.log_lines);
+        match self.start_console(&source, dialect) {
+            Ok(_) => {
+                self.remote_console = Some(pending);
+                let _ = self.poll_console();
+            }
+            Err(error) => pending.finish(&self.log_lines, false, &error),
+        }
+    }
+    pub(super) fn poll_console(&mut self) -> Result<Update, String> {
+        if self.remote_console.is_some() && !self.desktop.console_remote_enabled() {
+            return Ok(self.stop_console());
+        }
+        let result = self.advance_console();
+        if let Some(pending) = &mut self.remote_console {
+            pending.collect(&self.log_lines);
+        }
+        if self.console_run.is_none() {
+            if let Some(pending) = self.remote_console.take() {
+                let status = result
+                    .as_ref()
+                    .err()
+                    .map(String::as_str)
+                    .unwrap_or(&self.status);
+                pending.finish(
+                    &self.log_lines,
+                    result.is_ok() && self.status == "Console executed",
+                    status,
+                );
+            }
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    fn request(
+        source: &str,
+    ) -> (
+        cuemol_command::transport::ApiRequest,
+        std::sync::mpsc::Receiver<Option<Value>>,
+    ) {
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        (
+            cuemol_command::transport::ApiRequest {
+                endpoint: cuemol_command::transport::ApiEndpoint::Console,
+                message: serde_json::json!({"source":source,"dialect":"cuemol"}),
+                reply,
+            },
+            receiver,
+        )
+    }
+    #[test]
+    fn remote_console_uses_gui_history_and_cancels_when_access_is_disabled() {
+        let mut model = super::super::tests::model_without_gpu();
+        model.desktop.open_bytes("probe.pdb",b"ATOM      1  CA  ALA A   1       1.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let uid = model.desktop.active_object_summaries()[0].uid;
+        model
+            .desktop
+            .scene_manager_mut()
+            .object_mut(uid)
+            .unwrap()
+            .set_name("probe");
+        let (req, rx) = request("rename probe, changed");
+        model.start_remote_console(req);
+        assert_eq!(rx.recv().unwrap().unwrap()["ok"], false);
+        model
+            .desktop
+            .put_config_value("console:remote-access", "true");
+        let (req, rx) = request("hide probe; rename probe, changed");
+        model.start_remote_console(req);
+        assert_eq!(rx.recv().unwrap().unwrap()["ok"], true);
+        assert_eq!(model.undo_stack.len(), 1);
+        let (req, rx) = request("undo");
+        model.start_remote_console(req);
+        assert_eq!(rx.recv().unwrap().unwrap()["ok"], true);
+        assert_eq!(
+            model.desktop.scene_manager().object(uid).unwrap().name(),
+            "probe"
+        );
+        let source = std::iter::repeat_n("pwd", 200)
+            .chain(["rename probe, late"])
+            .collect::<Vec<_>>()
+            .join(";");
+        let (req, rx) = request(&source);
+        model.start_remote_console(req);
+        assert!(rx.try_recv().is_err());
+        assert!(model.console_run.is_some());
+        model
+            .desktop
+            .put_config_value("console:remote-access", "false");
+        model.poll_console().unwrap();
+        assert_eq!(rx.recv().unwrap().unwrap()["ok"], false);
+        assert!(model.console_run.is_none());
+        assert_eq!(
+            model.desktop.scene_manager().object(uid).unwrap().name(),
+            "probe"
+        );
     }
 }
