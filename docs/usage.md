@@ -857,6 +857,9 @@ and shadow choices, with grouped advanced controls. NPR offers raytracing or AO;
 its Detail tab edits hatch layers and tone specifications. Selecting a quality
 step changes its own settings, while manual edits are reflected as Custom.
 Switching the rendering backend retains each backend's scene settings.
+Displaying numeric settings preserves saved values outside the controls' input
+ranges. Editing applies the input limits; starting a render still validates the
+requested image size. Viewing a setting alone does not create an Undo entry.
 
 NPR Detail includes primary Strength/Curve, editable line/dot/stipple layers,
 advanced variation controls and shading/ink settings. Controls become available

@@ -82,6 +82,33 @@ test('Render preview uses saved dimensions and saves the displayed transparent P
   expect(errors).toEqual([]);
 });
 
+for (const renderer of ['webgl', 'webgpu']) {
+  test(`Rendering displays saved values without clamping or adding history (${renderer})`, async ({page}) => {
+    await open(page, renderer);
+    await call(page, 'set_render_settings', {settings:'unit=in; width=0.01; height=0.02; dpi=6000; umbreon.lightIntensity=11'});
+    await rect(page, 'Render DPI');
+    await page.waitForTimeout(650);
+    expect(await page.evaluate(() => window.cuemol.status().rendering.settings)).toMatchObject({unit:'in',width:0.01,height:0.02,dpi:6000});
+    await click(page, 'Render settings Render');
+    await click(page, 'Render group Lights');
+    await rect(page, 'Light intensity');
+    await page.waitForTimeout(650);
+    expect((await page.evaluate(() => window.cuemol.status().rendering.settings))['umbreon.lightIntensity']).toBe(11);
+    await call(page, 'undo');
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().rendering.settings.width)).toBe(64);
+    await click(page, 'Render mode Movie');
+    await click(page, 'Render settings Image');
+    await call(page, 'set_render_settings', {settings:'unit=px; width=9000; height=10000'});
+    await rect(page, 'Render Width');
+    await page.waitForTimeout(650);
+    expect(await page.evaluate(() => window.cuemol.status().rendering.settings)).toMatchObject({width:9000,height:10000});
+    await field(page, 'Render Width', 10001);
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().rendering.settings.width)).toBe(8192);
+    await call(page, 'undo');
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().rendering.settings.width)).toBe(9000);
+  });
+}
+
 test('Still history restores its mode and physical size after movie mode', async ({page}) => {
   await open(page);
   await call(page, 'set_render_settings', {settings:'unit=in; width=2; height=1; dpi=24'});

@@ -1,5 +1,37 @@
 # Validation evidence
 
+## Rendering controls preserve saved numeric values
+
+The shared egui controls previously clamped stored image dimensions, DPI and
+backend properties when displaying them. This also queued a scene edit and
+could add an Undo entry without user input. Focused regressions reproduced the
+mutations, including a change from 9,000 to 8,192 pixels and from 9,600 to 4,800
+DPI. The controls now preserve existing values and apply bounds only to input.
+Movie dimensions, frame rate and bitrate follow the same rule. Job validation
+remains separate from displaying settings.
+
+All 74 shared UI tests pass on Linux and macOS, and all 232 native GUI tests pass
+on macOS. The headless workspace passes 1,630 tests with default features and
+1,841 with the CI scripting feature set; both exclude five explicit external/GPU
+checks. The read-only reference checkout is present for these workspace runs.
+The default run exposed an obsolete test that rejected the now-supported POV-Ray backend;
+it now verifies transactional rejection of an unknown backend. The shared UI
+run found a simulated Select All event that sent only Control on macOS, causing
+the axis test to insert into the old text. It now sends egui's logical command
+modifier and retains the numerical and history assertions.
+
+Both WebGL and WebGPU regressions preserve small physical dimensions, high DPI
+and backend properties while viewing the controls, without adding an Undo entry.
+Movie dimensions also remain unchanged until edited; an out-of-range typed edit
+still clamps to the input limit, and Undo restores the previous stored value.
+All 27 affected browser Rendering and movie checks pass against the rebuilt
+WASM, including the NPR controls and backend/history workflows. The macOS native
+binary builds and its transferred copy has an identical SHA-256. Actual macOS
+screen/input checks still await operating-system permissions.
+Twelve distribution-helper checks and Linux installer/self-upgrade fixtures pass,
+including checksum rejection and replacement rollback. These fixture checks do
+not constitute a newly published multi-platform release.
+
 ## Tauri startup options and native WebKit verification
 
 Tauri startup arguments previously used a direct loading command and bypassed

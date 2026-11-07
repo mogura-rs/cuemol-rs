@@ -376,7 +376,7 @@ fn spin_axis_presets_and_cartesian_components_preserve_explicit_mode() {
             physical_key: None,
             pressed: true,
             repeat: false,
-            modifiers: egui::Modifiers::CTRL,
+            modifiers: egui::Modifiers::COMMAND,
         },
         egui::Event::Text("2".into()),
         egui::Event::Key {
@@ -391,6 +391,6 @@ fn spin_axis_presets_and_cartesian_components_preserve_explicit_mode() {
         h.detail()["properties"]["axis"].as_str().unwrap(),
     )
     .unwrap();
-    assert!((axis.y / axis.x - 2.).abs() < 1e-9);
+    assert!((axis.y / axis.x - 2.).abs() < 1e-9, "axis={axis:?}");
     assert_eq!(h.history.len(), 2);
 }

@@ -190,6 +190,7 @@ impl RenderPanel {
                     ui.add(
                         egui::DragValue::new(&mut value)
                             .range(1. ..=8192.)
+                            .clamp_existing_to_range(false)
                             .speed(10.)
                             .max_decimals(0)
                             .suffix(" px"),
@@ -250,6 +251,7 @@ impl RenderPanel {
             let response = ui.add(
                 egui::DragValue::new(&mut self.movie.fps)
                     .range(f64::MIN_POSITIVE..=f64::MAX)
+                    .clamp_existing_to_range(false)
                     .speed(0.1)
                     .max_decimals(3)
                     .suffix(" fps"),
@@ -295,6 +297,7 @@ impl RenderPanel {
                     let response = ui.add(
                         egui::DragValue::new(&mut self.movie.bitrate_kbps)
                             .range(1..=u32::MAX)
+                            .clamp_existing_to_range(false)
                             .suffix(" kbps"),
                     );
                     self.record("Movie bitrate", &response);

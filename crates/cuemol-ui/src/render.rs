@@ -807,6 +807,7 @@ impl RenderPanel {
                     ui.add(
                         egui::DragValue::new(&mut value)
                             .range(min..=max)
+                            .clamp_existing_to_range(false)
                             .speed(speed)
                             .max_decimals(if unit == "px" { 0 } else { 3 })
                             .suffix(format!(" {unit}")),
@@ -839,6 +840,7 @@ impl RenderPanel {
             let response = ui.add(
                 egui::DragValue::new(&mut dpi)
                     .range(1. ..=4800.)
+                    .clamp_existing_to_range(false)
                     .max_decimals(3),
             );
             self.record("Render DPI", &response);
@@ -1081,6 +1083,7 @@ impl RenderPanel {
                                         row["min"].as_f64().unwrap_or(0.)
                                             ..=row["max"].as_f64().unwrap_or(10000.),
                                     )
+                                    .clamp_existing_to_range(false)
                                     .speed(row["step"].as_f64().unwrap_or(0.1))
                                     .max_decimals(if integer { 0 } else { 3 }),
                             )
@@ -1318,6 +1321,78 @@ mod tests {
         assert_eq!(panel.editor.number("height"), 1.);
         assert_eq!(panel.editor.number("dpi"), 150.);
         assert_eq!(panel.editor.pixels(), [300, 150]);
+    }
+
+    #[test]
+    fn showing_image_controls_preserves_saved_values_outside_input_ranges() {
+        for movie_mode in [false, true] {
+            let ctx = Context::default();
+            let mut panel = RenderPanel::default();
+            let stored = json!({"unit":"px", "width":9000, "height":10000, "dpi":9600})
+                .as_object()
+                .unwrap()
+                .clone();
+            panel.editor.sync(Some(1), &stored);
+            panel.movie_mode = movie_mode;
+            panel.movie.fps = 0.;
+            panel.movie.bitrate_kbps = 0;
+            let before = panel.editor.values.clone();
+            for _ in 0..2 {
+                let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        panel.settings(
+                            ui,
+                            false,
+                            &RenderControls {
+                                can_start: true,
+                                pov_error: None,
+                                movie_error: None,
+                                view_size: [640, 480],
+                            },
+                        )
+                    });
+                });
+            }
+            assert_eq!(panel.editor.values, before, "movie mode: {movie_mode}");
+            assert!(!panel.editor.pending());
+            assert_eq!(panel.movie.fps, 0.);
+            assert_eq!(panel.movie.bitrate_kbps, 0);
+        }
+    }
+
+    #[test]
+    fn showing_numeric_render_properties_preserves_values_outside_input_ranges() {
+        for (block, rows) in catalog().as_object().unwrap() {
+            for row in
+                rows.as_array().unwrap().iter().filter(|row| {
+                    matches!(row["type"].as_str(), Some("integer" | "real" | "combo"))
+                })
+            {
+                let ctx = Context::default();
+                let mut panel = RenderPanel::default();
+                panel.editor.sync(Some(1), &Default::default());
+                let backend = block != "common";
+                panel.editor.values.insert(
+                    "backend".into(),
+                    json!(if backend { block.as_str() } else { "povray" }),
+                );
+                let key = row["key"].as_str().unwrap();
+                let path = if backend {
+                    format!("{block}.{key}")
+                } else {
+                    key.into()
+                };
+                panel.editor.values.insert(
+                    path.clone(),
+                    json!(row["max"].as_f64().unwrap_or(10000.) + 1.),
+                );
+                let before = panel.editor.values.clone();
+                let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| panel.property(ui, row, backend));
+                });
+                assert_eq!(panel.editor.values, before, "{path}");
+            }
+        }
     }
 
     #[test]
