@@ -156,11 +156,12 @@ async function openShell(page, storage = {}, options = {}) {
     const events = new Map();
     window.__finishAgent=()=>{agent.running=false;agent.message='Complete';agent.messages.push({role:'Tool',text:'get_scene_state {}',image:null,tool:{name:'get_scene_state',input:'{}',result:'{\"objects\":[]}',ok:true}},{role:'Assistant',text:'<img src=x onerror=alert(1)> kept as text',image:null});events.get('cuemol-agent-changed')?.();};
     window.__shellCalls = [];
-    if (options.nativeRenderingWindow) window.__TAURI_INTERNALS__ = {};
+    if (options.nativeRenderingWindow || options.nativeMenu) window.__TAURI_INTERNALS__ = {};
     window.__actionsRunning = false;
     window.__TAURI__ = {core: {invoke: async (command, args) => {
       window.__shellCalls.push({command, args});
       if (command === 'render_window_request') return;
+      if (command === 'application_menu_request') return Boolean(options.nativeMenu);
       if (command === 'prepare_application_close') {
         if(window.__closePreparationError)throw new Error('Pending render settings could not be saved');
         if(options.closeGuard)snapshot.scenes[0].modified=true;
@@ -690,7 +691,8 @@ async function openShell(page, storage = {}, options = {}) {
       window.__requestApplicationClose=()=>appWindow.close();
       window.__TAURI__.webviewWindow={getCurrentWebviewWindow:()=>appWindow};
     }
-    if(options.agent) window.__TAURI__.event={listen:async(name,callback)=>{events.set(name,callback);return ()=>events.delete(name);}};
+    if(options.agent || options.nativeMenu) window.__TAURI__.event={listen:async(name,callback)=>{events.set(name,callback);return ()=>events.delete(name);}};
+    window.__nativeMenu = id => events.get('cuemol-menu-action')?.({payload:id});
     const backendInvoke=window.__TAURI__.core.invoke;
     window.__TAURI__.core.invoke=async(command,args)=>structuredClone(await backendInvoke(command,structuredClone(args)));
     if(options.files) window.__TAURI__.webviewWindow={getCurrentWebviewWindow:()=>({
@@ -712,6 +714,48 @@ async function openShell(page, storage = {}, options = {}) {
   await expect(page.locator('#error-alert-dialog')).not.toBeVisible();
   return errors;
 }
+
+test('Tauri native application menu routes actions and blocks dialogs without losing text paste', async ({page}, testInfo) => {
+  const errors = await openShell(page, {}, {nativeMenu:true, closeGuard:true});
+  await expect(page.locator('body')).toHaveClass(/native-application-menu/);
+  await expect(page.locator('.application-menu')).toBeHidden();
+  expect(await page.evaluate(() => __shellCalls.filter(call => call.command === 'application_menu_request').slice(0, 2).map(call => call.args.operation))).toEqual(['supported', 'clear']);
+  const emit = id => page.evaluate(id => window.__nativeMenu(id), id);
+  const menuState = () => page.evaluate(() => __shellCalls.filter(call => call.command === 'application_menu_request' && call.args.operation === 'state').at(-1)?.args.state);
+  await expect.poll(menuState).toMatchObject({hasScene:true, paletteVisible:true, blocked:false});
+  await emit('view-tool-palette');
+  await expect.poll(menuState).toMatchObject({paletteVisible:false});
+  await emit('options');
+  const dialog = page.locator('#reference-dialog');
+  await expect(dialog).toBeVisible();
+  await expect.poll(menuState).toMatchObject({blocked:true});
+  const calls = await page.evaluate(() => __shellCalls.length);
+  await emit('quit');
+  await emit('new-tab');
+  expect(await page.evaluate(count => __shellCalls.slice(count).some(call => ['prepare_application_close','new_tab'].includes(call.command)), calls)).toBe(false);
+  const field = dialog.getByLabel('Search settings');
+  await field.click();
+  await page.evaluate(() => {window.__clipboardText='ffmpeg';});
+  await emit('paste');
+  await expect(field).toHaveValue('ffmpeg');
+  expect(await page.evaluate(() => __shellCalls.filter(call => call.command === 'undo').length)).toBe(0);
+  await page.screenshot({path:testInfo.outputPath('native-menu-preferences.png')});
+  await dialog.getByRole('button', {name:'Cancel',exact:true}).click();
+  await expect.poll(menuState).toMatchObject({blocked:false});
+  await page.evaluate(() => {window.__delayMorphPicker=true;});
+  await emit('open-file');
+  await expect.poll(() => page.evaluate(() => typeof window.__releaseMorphPicker)).toBe('function');
+  await expect.poll(() => page.evaluate(() => __shellCalls.filter(call => call.command === 'application_menu_request' && call.args.operation === 'native-dialog').at(-1)?.args.blocked)).toBe(true);
+  await emit('quit');
+  expect(await page.evaluate(() => window.__closedWindows)).toBe(0);
+  await page.evaluate(() => window.__releaseMorphPicker(null));
+  await expect.poll(() => page.evaluate(() => __shellCalls.filter(call => call.command === 'application_menu_request' && call.args.operation === 'native-dialog').at(-1)?.args.blocked)).toBe(false);
+  await emit('quit');
+  await expect(page.locator('#reference-dialog')).toContainText('Unsaved');
+  await page.locator('#reference-dialog').getByRole('button', {name:'Cancel',exact:true}).click();
+  expect(await page.evaluate(() => window.__closedWindows)).toBe(0);
+  expect(errors).toEqual([]);
+});
 
 test('Tauri style rows open on double click with their own scope', async ({page}) => {
   const errors = await openShell(page, {}, {styles:true});

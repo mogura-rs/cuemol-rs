@@ -8,6 +8,10 @@ fn wake(ctx: &egui::Context) -> cuemol_command::update::Wake {
     std::sync::Arc::new(move || ctx.request_repaint())
 }
 impl Updates {
+    pub fn is_open(&self) -> bool {
+        self.visible
+    }
+
     pub fn schedule_startup(&mut self) {
         self.runtime.schedule_startup();
     }

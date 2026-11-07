@@ -476,7 +476,20 @@ function clearRecentFiles() {
   renderRecentMenu();
 }
 
+async function openRecentFile(entry) {
+  closeMenus();
+  const opened = entry.ftype === 'script'
+    ? await executeScriptPath(entry.path)
+    : await openSelectedPaths([entry.path]);
+  if (!opened) {
+    recentFiles = recentFiles.filter(item => item.path !== entry.path);
+    saveRecentFiles();
+    renderRecentMenu();
+  }
+}
+
 function renderRecentMenu() {
+  CueMolApplicationMenu.sync();
   if (!recentMenu) return;
   recentMenu.replaceChildren();
   if (recentFiles.length === 0) {
@@ -485,18 +498,7 @@ function renderRecentMenu() {
     recentMenu.append(empty);
   } else {
     for (const entry of recentFiles) {
-      const open = button(fileBasename(entry.path), "", async () => {
-        closeMenus();
-        const opened =
-          entry.ftype === "script"
-            ? await executeScriptPath(entry.path)
-            : await openSelectedPaths([entry.path]);
-        if (!opened) {
-          recentFiles = recentFiles.filter((item) => item.path !== entry.path);
-          saveRecentFiles();
-          renderRecentMenu();
-        }
-      });
+      const open = button(fileBasename(entry.path), "", () => openRecentFile(entry));
       open.title = entry.path;
       open.setAttribute("role", "menuitem");
       recentMenu.append(open);
@@ -8308,6 +8310,7 @@ async function completeOutputCommand() {
 
 function applyCenterMark(value) {
   centerMark = value;
+  CueMolApplicationMenu.sync();
   centerMarkElement.classList.toggle("axis", value === "axis");
   centerMarkElement.classList.toggle("none", value === "none");
   document.querySelectorAll("[data-center-mark]").forEach((item) => {
@@ -8593,6 +8596,10 @@ function closeSidePanelCard(card) {
 }
 
 async function handleLocalAction(action) {
+  if (action === 'devtools') {
+    await invoke('application_menu_request', {operation: 'devtools'});
+    return;
+  }
   switch (action) {
     case "focus-main": {
       const getCurrent = tauri?.webviewWindow?.getCurrentWebviewWindow || tauri?.window?.getCurrentWindow;
@@ -15544,6 +15551,7 @@ function renderTrajectory() {
 }
 
 function renderProjectionControls() {
+  CueMolApplicationMenu.sync();
   projectionReadout.textContent = snapshot.perspective ? "PERSPECTIVE" : "ORTHO";
   document.querySelectorAll("input[name='projection']").forEach((input) => {
     input.checked = input.value === (snapshot.perspective ? "perspective" : "orthographic");
@@ -15584,6 +15592,7 @@ function scheduleSecondaryPanelRender() {
 
 function renderShell() {
   if (!snapshot) return;
+  CueMolApplicationMenu.sync();
   renderPluginContributions();
   normalizeSelection();
   const workspaceRenderKey = workspaceChromeRenderKey();
@@ -16452,6 +16461,53 @@ async function exportPng(kind = "png") {
     if (session) await request("release").catch(() => {});
     imageExportActive = false;
   }
+}
+
+function applicationMenuState() {
+  return {
+    hasScene: Boolean(snapshot?.activeSceneUid), background: snapshot?.background || '',
+    colorProofing: Boolean(snapshot?.colorProofing), perspective: Boolean(snapshot?.perspective),
+    centerMark, paletteVisible: !cueMolPaletteCollapsed, recent: recentFiles.map(entry => entry.path),
+  };
+}
+
+async function handleApplicationMenuAction(id) {
+  closeMenus();
+  if (id.startsWith('recent:')) {
+    const path = id.slice(7);
+    await openRecentFile(recentFiles.find(entry => entry.path === path) || {path, ftype: recentFileType(path)});
+    return;
+  }
+  const actions = {
+    'new-tab': 'new-scene', 'open-file': 'open', 'close-tab': 'close-scene',
+    'open-scene': 'open-scene', 'save-scene': 'save', 'save-scene-as': 'save-as',
+    'export-png': 'export', 'export-umbreon': 'export-umbreon',
+    'export-pov': 'export-pov', 'export-stl': 'export-stl', 'export-mqo': 'export-mqo',
+    undo: 'undo', redo: 'redo', cut: 'cut', copy: 'copy', paste: 'paste', 'select-all': 'select-all', 'clear-undo': 'clear-undo',
+  };
+  if (actions[id]) { await handleAction(actions[id]); return; }
+  const dialogs = {
+    about: 'About CueMol3', options: 'Options', 'save-file-as': 'Save File As',
+    'save-current-view': 'Save Current View', 'merge-mol': 'Merge molecule',
+    'delete-mol-atoms': 'Delete mol atoms', 'change-chain-id': 'Change chain ID',
+    'change-resid-num': 'Change residue number', 'image-render': 'Rendering',
+    'movie-render': 'Animation rendering', 'scene-props': 'Scene Properties',
+    'view-props': 'View Property', 'mol-superpose': 'Molecular superposition',
+    interaction: 'Interaction', 'reassign-2ndry': 'Reassign secondary str',
+    'morph-anim': 'Mol morphing animation', 'mol-surf': 'Mol surface generation',
+    'surf-cutter': 'Mol surface cutter', apbs: 'APBS elepot calculation',
+  };
+  if (dialogs[id]) { await showReferenceDialog(dialogs[id]); return; }
+  const local = {'check-updates': 'check-updates', quit: 'quit', 'reload-scene': 'reload-scene', 'color-proof': 'color-proof', 'window-main': 'focus-main', 'window-render': 'focus-rendering'};
+  if (local[id]) { await handleLocalAction(local[id]); return; }
+  if (id === 'clear-recent') clearRecentFiles();
+  else if (id === 'bg-white' || id === 'bg-black') {
+    const background = id.slice(3);
+    if (snapshot?.background !== background) await mutate('set_background', {background});
+  } else if (id === 'view-perspective' || id === 'view-orthographic') {
+    if (snapshot && snapshot.perspective !== (id === 'view-perspective')) await cameraCommand('projection');
+  } else if (id.startsWith('center-mark-')) await cameraCommand(id);
+  else if (id === 'view-tool-palette') setCueMolPaletteCollapsed(!cueMolPaletteCollapsed);
 }
 
 async function handleAction(action, depth = 0) {
@@ -17485,6 +17541,7 @@ async function start() {
     applyViewport(initial.viewport, sequence);
     void renderViewport();
     renderShell();
+    await CueMolApplicationMenu.start({main: true, state: applicationMenuState, action: handleApplicationMenuAction});
     scheduleMoleculeDetailsRefresh();
     const preloadPdbHistory = () => void requestPdbHistory();
     if (typeof globalThis.requestIdleCallback === "function") {

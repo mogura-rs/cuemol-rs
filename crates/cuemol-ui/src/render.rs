@@ -116,6 +116,10 @@ impl Default for RenderPanel {
 }
 
 impl RenderPanel {
+    pub fn confirmation_open(&self) -> bool {
+        self.confirm_clear || self.confirm_movie_replace || self.confirm_movie_cleanup
+    }
+
     pub fn begin(&mut self, ctx: &Context, source: RenderSource) {
         self.started = Some(ctx.input(|i| i.time));
         self.pending_source = Some(source);

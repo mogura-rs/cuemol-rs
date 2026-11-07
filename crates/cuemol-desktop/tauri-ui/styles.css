@@ -135,6 +135,18 @@ summary:focus-visible {
 
 /* Native application menu */
 
+body.native-application-menu .app-shell {
+  grid-template-rows: 36px minmax(0, 1fr) 24px;
+}
+
+body.native-application-menu .app-shell:has(.ribbon.collapsed) {
+  grid-template-rows: 0 minmax(0, 1fr) 24px;
+}
+
+body.native-application-menu .application-menu {
+  display: none;
+}
+
 .application-menu {
   display: flex;
   align-items: center;

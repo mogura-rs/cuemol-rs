@@ -182,6 +182,8 @@ impl GuiApplication {
         };
         let result = match action {
             cuemol_ui::RenderAction::SaveMovie => {
+                #[cfg(target_os = "macos")]
+                let _menu_guard = application_menu::NativeDialogGuard::new();
                 let filename = path.file_name().unwrap_or_default().to_string_lossy();
                 let Some(destination) = rfd::FileDialog::new().set_file_name(filename).save_file()
                 else {

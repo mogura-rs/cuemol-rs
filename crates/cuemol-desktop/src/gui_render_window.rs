@@ -12,6 +12,36 @@ pub(super) struct RenderWindow {
 }
 
 impl RenderWindow {
+    #[cfg(target_os = "macos")]
+    pub(super) fn wants_keyboard_input(&self) -> bool {
+        self.ctx.wants_keyboard_input()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn menu_edit(&mut self, app: &mut GuiApplication, id: &str) {
+        let editing = self.ctx.wants_keyboard_input();
+        if !crate::application_menu::allowed(id, app.ray_panel.confirmation_open(), editing) {
+            return;
+        }
+        let event = match id {
+            "undo" => clipboard::edit_key(egui::Key::Z, false),
+            "redo" => clipboard::edit_key(egui::Key::Z, true),
+            "select-all" if editing => clipboard::edit_key(egui::Key::A, false),
+            "copy" if editing => egui::Event::Copy,
+            "cut" if editing => egui::Event::Cut,
+            "paste" if editing => match app.system_clipboard.read() {
+                Ok(text) => egui::Event::Paste(text),
+                Err(error) => {
+                    app.ray_panel.message = format!("Clipboard error: {error}");
+                    return;
+                }
+            },
+            _ => return,
+        };
+        self.input.egui_input_mut().events.push(event);
+        self.window.request_redraw();
+    }
+
     fn new(
         event_loop: &ActiveEventLoop,
         gpu: &GpuState,

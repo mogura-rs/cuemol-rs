@@ -3,12 +3,18 @@ mod remote_console;
 use cuemol_command::animation_graph::{editor_time_ms, Graph as AnimationGraph};
 #[path = "gui_actions.rs"]
 mod actions;
+#[cfg(target_os = "macos")]
+#[path = "gui_application_menu.rs"]
+mod application_menu;
 #[path = "gui_clipboard.rs"]
 mod clipboard;
 #[path = "gui_history.rs"]
 mod history;
 #[path = "gui_image_export.rs"]
 mod image_export;
+#[cfg(any(target_os = "macos", test))]
+#[path = "gui_menu_actions.rs"]
+mod menu_actions;
 #[path = "gui_movie.rs"]
 mod movie;
 #[path = "navigation.rs"]
@@ -243,6 +249,8 @@ fn send_native_tool_result(
 }
 
 struct NativeRunner {
+    #[cfg(target_os = "macos")]
+    application_menu: Option<application_menu::ApplicationMenu>,
     api: cuemol_command::transport::GuiApiServer,
     protocol: cuemol_command::Protocol,
     window: Option<Arc<Window>>,
@@ -270,6 +278,8 @@ impl NativeRunner {
         cuemol_ui::shell::configure_fonts(&mut fonts);
         egui_ctx.set_fonts(fonts);
         Self {
+            #[cfg(target_os = "macos")]
+            application_menu: None,
             api: cuemol_command::transport::GuiApiServer::default(),
             protocol: cuemol_command::Protocol::without_history(),
             window: None,
@@ -341,6 +351,8 @@ impl ApplicationHandler for NativeRunner {
         let _ = self.guard_gui_callback(event_loop, "user_event", |this, event_loop| {
             this.poll_gpu_init(event_loop);
             this.poll_config_init(event_loop);
+            #[cfg(target_os = "macos")]
+            this.poll_application_menu();
             if let Some(render) = &this.render_window {
                 if render.visible {
                     render.window.request_redraw();
@@ -854,6 +866,8 @@ impl NativeRunner {
             app.file_drop_batch = None;
         }
         self.sync_render_window(event_loop);
+        #[cfg(target_os = "macos")]
+        self.sync_application_menu();
         if self.should_exit_now() {
             event_loop.exit();
         }
@@ -1378,6 +1392,7 @@ struct GuiApplication {
     ray_panel: cuemol_ui::RenderPanel,
     render_visible: bool,
     native_render_window: bool,
+    native_application_menu: bool,
     render_focus_requested: bool,
     main_focus_requested: bool,
     ray_movie_job: Option<cuemol_command::movie::MovieJob>,
@@ -4651,6 +4666,7 @@ impl GuiApplication {
             ray_panel: cuemol_ui::RenderPanel::default(),
             render_visible: false,
             native_render_window: false,
+            native_application_menu: false,
             render_focus_requested: false,
             main_focus_requested: false,
             ray_movie_job: None,
@@ -5376,6 +5392,9 @@ impl GuiApplication {
     }
 
     fn menu_bar(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        if self.native_application_menu {
+            return;
+        }
         let response = egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -15017,6 +15036,8 @@ impl GuiApplication {
                 self.ray_panel.refresh_movie_outputs();
             }
             cuemol_ui::RenderAction::PickMovieFolder => {
+                #[cfg(target_os = "macos")]
+                let _menu_guard = application_menu::NativeDialogGuard::new();
                 if let Some(path) = rfd::FileDialog::new()
                     .set_directory(&self.ray_panel.movie.output_dir)
                     .pick_folder()
@@ -15042,6 +15063,8 @@ impl GuiApplication {
                 }
             }
             cuemol_ui::RenderAction::Save => {
+                #[cfg(target_os = "macos")]
+                let _menu_guard = application_menu::NativeDialogGuard::new();
                 if let Some(bytes) = &self.ray_panel.png {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("PNG image", &["png"])
@@ -19043,6 +19066,8 @@ impl GuiApplication {
             match action {
                 cuemol_ui::settings::Action::CheckUpdates => self.updates.check(ctx),
                 cuemol_ui::settings::Action::Browse(path) => {
+                    #[cfg(target_os = "macos")]
+                    let _menu_guard = application_menu::NativeDialogGuard::new();
                     let picker = rfd::FileDialog::new().set_title(path.label());
                     let selected = if path == cuemol_ui::settings::ToolPath::PovrayInclude {
                         picker.pick_folder()
@@ -29966,6 +29991,8 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
 }
 
 fn native_file_dialog(dialog: NativeFileDialog, initial: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let _menu_guard = application_menu::NativeDialogGuard::new();
     let spec = native_file_dialog_spec(dialog);
     let picker = native_file_picker(spec, initial);
     let path = if spec.save {
@@ -29977,6 +30004,8 @@ fn native_file_dialog(dialog: NativeFileDialog, initial: &str) -> Option<PathBuf
 }
 
 fn native_multi_file_dialog(dialog: NativeFileDialog, initial: &str) -> Option<Vec<PathBuf>> {
+    #[cfg(target_os = "macos")]
+    let _menu_guard = application_menu::NativeDialogGuard::new();
     let spec = native_file_dialog_spec(dialog);
     if spec.save {
         return None;
@@ -29985,6 +30014,8 @@ fn native_multi_file_dialog(dialog: NativeFileDialog, initial: &str) -> Option<V
 }
 
 fn native_folder_dialog(title: &str, initial: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let _menu_guard = application_menu::NativeDialogGuard::new();
     let mut picker = rfd::FileDialog::new().set_title(title);
     let initial = initial.trim();
     if !initial.is_empty() {

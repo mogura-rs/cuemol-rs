@@ -38,7 +38,7 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 pollster = { version = "0.4", optional = true }
 rfd = { version = "0.16", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
-tauri = { version = "2.11.5", optional = true }
+tauri = { version = "2.11.5", features = ["devtools"], optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 # cookie 0.18.1 still calls the pre-0.3.52 parsing API used by Tauri.
 time = { version = "=0.3.51", optional = true }
@@ -46,9 +46,19 @@ tempfile = { version = "3", default-features = false, optional = true }
 wgpu = { version = "27.0.1", optional = true }
 winit = { version = "0.30.13", optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.19.3", default-features = false, optional = true }
+objc2 = { version = "0.6.4", optional = true }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication"], optional = true }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std"], optional = true }
+
 [features]
 default = []
 egui-gui = [
+  "dep:muda",
+  "dep:objc2",
+  "dep:objc2-app-kit",
+  "dep:objc2-foundation",
   "dep:tempfile",
   "dep:clipboard-rs",
   "dep:cuemol-ui",
@@ -70,6 +80,9 @@ egui-gui = [
 # Tauri desktop shell: the webview draws the panels and the shared wgpu renderer
 # supplies the molecular viewport as a PNG data URI.
 tauri-gui = [
+  "dep:objc2",
+  "dep:objc2-app-kit",
+  "dep:objc2-foundation",
   "dep:tempfile",
   "dep:base64",
   "dep:clipboard-rs",

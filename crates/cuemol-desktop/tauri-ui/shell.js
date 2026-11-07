@@ -63,6 +63,7 @@ function setCueMolPaletteCollapsed(collapsed, save = true) {
   cap.setAttribute('aria-expanded', String(!cueMolPaletteCollapsed));
   document.querySelector('.menu [data-toggle-palette]').classList.toggle('checked', !cueMolPaletteCollapsed);
   if (save) saveCueMolShell();
+  CueMolApplicationMenu.sync();
 }
 
 function selectCueMolActivity(name, toggle = true) {

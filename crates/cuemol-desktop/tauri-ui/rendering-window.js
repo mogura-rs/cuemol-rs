@@ -59,6 +59,10 @@ async function showRendering() {
 }
 
 async function startRenderingWindow() {
+  await CueMolApplicationMenu.start({action: async id => {
+    if (id === 'close-tab') await transition(() => CueMolRendering.close());
+    else if (id === 'undo' || id === 'redo') await CueMolRendering.historyAction(id);
+  }});
   CueMolRendering.onClose = async () => {
     try { await saveGeometry(); } catch (error) { console.warn('Cannot save Rendering window geometry:', error); }
     await invoke('render_window_request', {operation: 'hide'});

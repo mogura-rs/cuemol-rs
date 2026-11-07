@@ -1,5 +1,55 @@
 # Validation evidence
 
+## macOS application menus
+
+Native egui and Tauri now install the shared CueMol3 application-menu structure
+on macOS and hide their duplicate in-window menu bars. The application menu
+contains About, updates, Preferences, Services, visibility commands and guarded
+Quit. File/Edit/Rendering/Scene/View/Tools/Window use the current reference
+ordering. Dynamic checks and recent-file identities follow application state.
+Tauri exposes its WebView developer tools; egui has no WebView to inspect.
+
+Modal dialogs block application actions while retaining focused text editing.
+Native file pickers hold the same block until completion or cancellation. The
+Rendering window remains modeless; its editing commands target its field or
+selected scene, and Close Tab hides only that child window. Tauri resets stale
+window-specific menu blocks when its frontend starts again.
+
+The actual macOS run exposed a check-state defect that unit and DOM tests had
+missed: AppKit toggles a checked item before dispatch, so choosing an already
+selected projection could clear its mark without changing the camera. Both
+adapters now reconcile those automatic toggles with model state on dispatch.
+
+Validation:
+
+- Native GUI/library: 243 passed. Shared UI: 76 passed. Tauri model/library:
+  213 passed with six existing ignored tests. Shell contracts: 68 passed.
+- The full Tauri DOM suite passed all 95 cases. After the frontend restart
+  reset, both focused application-menu cases passed again. They cover root and
+  Rendering text/scene routing, modal blocking, native-picker cancellation and
+  unsaved-scene exit cancellation. The Preferences screenshot was inspected.
+- Normal Linux native and Tauri builds and current Apple-silicon native and
+  Tauri builds pass. The native-only menu dependency is gated to macOS, so the
+  egui Linux build does not acquire GTK menu dependencies.
+- On the authorized Apple-silicon host, an in-process AppKit probe operated the
+  menus in both real applications. It verified repeated projection selection,
+  palette toggles, separate Rendering-window creation, OS close/reopen,
+  background changes and Quit reaching the unsaved-scene guard. The guard
+  disabled other commands while preserving Edit text items. macOS displayed
+  the Preferences item as Settings. Both processes exited successfully through
+  the probe after verifying the guard. Tauri also recovered its menu after
+  reloading a WebView with an outstanding dialog block, then passed the complete
+  menu/window scenario again.
+
+The host did not grant foreground key-window focus to these SSH launches.
+Therefore the probe used AppKit window close where focused Close Tab could not
+be established. It verifies real menu dispatch and OS-window lifecycle, not
+physical mouse/keyboard input, child-focus routing or final application Quit.
+Those distinctions remain separate from the DOM, model and previous Linux
+OS-input checks. Evidence is under `.cache/current-audit/macmenu-*` and
+`.cache/current-audit/cuemol-macmenu-*`. The usage guide now distinguishes the
+macOS About/Preferences locations from the non-macOS Help/Edit locations.
+
 ## Product display name and obsolete window shortcut
 
 Native egui, Tauri and browser titles, About panels and copied runtime details
@@ -25,7 +75,7 @@ conversion failed, while the same packaging script succeeded on that host.
 Evidence is under `.cache/current-audit/product-*` and the corresponding
 `cuemol-product-*` Rust logs. The usage guide also now points stereo controls
 to View > View property; the direct View-menu description was stale.
-Platform-specific native menus remain a separate follow-up.
+The subsequent macOS application-menu work is recorded above.
 
 ## Native exit with pending Rendering edits
 

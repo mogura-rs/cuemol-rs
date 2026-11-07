@@ -33,12 +33,21 @@ drag and create one undo step when released. Escape cancels the drag and
 restores the original value and default state. Hold Shift for finer adjustments
 or Ctrl/Cmd for larger steps. Tauri also accepts dragging the field label.
 
-Use **Help → About CueMol3** to inspect the version, source commit, build time,
+Use **Help → About CueMol3**, or **CueMol3 → About CueMol3** in the macOS
+application menu, to inspect the version, source commit, build time,
 compiler, target and the libraries used by the selected frontend. **Copy** puts
 these rows on the clipboard for bug reports. Native builds include the OS
 release; browser and Tauri builds also include the browser or WebView user agent.
 Builds without Git metadata display `unavailable` for the commit. Reproducible
 builds can set `SOURCE_DATE_EPOCH` to control the reported UTC build time.
+
+Both native frontends use the macOS system menu bar. It includes Preferences,
+update checks, standard application visibility commands and the File, Edit,
+Rendering, Scene, View, Tools and Window menus. Edit commands follow the focused
+text field or scene, including text fields in dialogs. A dialog disables other
+application menu commands until it closes. The modeless Rendering window remains
+independent; its Edit > Undo/Redo uses its selected scene, and File > Close Tab
+hides that window. Tauri also provides View > Toggle Developer Tools.
 
 ### File destinations
 
@@ -799,8 +808,10 @@ print('Startup commands loaded');
 
 ### Settings categories
 
-Edit > Options opens preferences in all three frontends. The browser dialog is
-titled Settings. These controls use the same Display, Input, General, Tools and
+Edit > Options opens preferences in the browser and in native Windows/Linux
+windows. On macOS, use CueMol3 > Preferences or Command-comma; current macOS
+versions may display this item as Settings. The browser dialog is titled
+Settings. These controls use the same Display, Input, General, Tools and
 Plugins groups. Search shows matching
 categories across groups. Display includes the theme and default atom-label
 font, size, color, bold and italic values. Input retains the mouse presets,
@@ -934,7 +945,7 @@ controls' input ranges, and changing away from NPR returns to the Render tab.
 The native egui and Tauri windows also offer POV-Ray, including radiosity, lighting, shadows,
 stereo, clipping and post-blending. Select POV-Ray from the rendering backend
 control. It uses the executable and include directory selected in the Tools
-preferences under Edit > Options,
+preferences in Options (Preferences in the macOS application menu),
 falling back to the bundled executable. Missing tools appear beside the disabled
 Start button. The browser can edit and save these settings, but POV-Ray execution
 requires the native application. Shared image commands also use a scene's selected

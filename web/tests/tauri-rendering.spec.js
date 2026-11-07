@@ -9,7 +9,7 @@ const picture = new PNG({width:3000,height:2500});
 for(let i=0;i<picture.data.length;i+=4){picture.data[i]=30;picture.data[i+1]=100;picture.data[i+2]=150;picture.data[i+3]=160;}
 const image = `data:image/png;base64,${PNG.sync.write(picture).toString('base64')}`;
 
-async function open(page, standalone = false) {
+async function open(page, standalone = false, nativeMenu = false) {
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
   await page.route('http://rendering.test/**',async route=>{
     const path=new URL(route.request().url()).pathname.slice(1);
@@ -17,7 +17,7 @@ async function open(page, standalone = false) {
     if(!path){await route.fulfill({contentType:'text/html',body:'<html><head><meta charset="utf-8"><link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="rendering.css"><script src="rendering.js"></script></head><body></body></html>'});return;}
     await route.fulfill({contentType:path.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL(path,root))});
   });
-  await page.addInitScript(({catalog,hatchCatalog,image,standalone})=>{
+  await page.addInitScript(({catalog,hatchCatalog,image,standalone,nativeMenu})=>{
     const values={backend:'umbreon',width:1200,height:1200,unit:'px',dpi:600,transparentBg:false};
     for(const [prefix,rows]of Object.entries(catalog))for(const row of rows){const key=prefix==='common'?row.key:`${prefix}.${row.key}`;if(key in values)continue;values[key]=row.type==='boolean'?false:row.type==='color'?'#000000':row.type==='enum'?(row.enumValues||row.options)[0]:row.min??1;}
     values['umbreon_npr.hatchStyle']='pencil';values['umbreon_npr.hatchLayersSpec']='';values['umbreon_npr.hatchToneSpec']='';
@@ -46,10 +46,13 @@ async function open(page, standalone = false) {
     window.renderCalls=[];window.savedPaths=[];window.confirmClear=false;
     window.chooseOutputPath=async()=>{window.savedPaths.push(state.current.id);return 'image.png';};
     window.showConfirmationDialog=async()=>window.confirmClear;
-    window.__windowOperations=[];
+    window.__windowOperations=[];window.__menuRequests=[];
     window.invoke=async(command,input={})=>{
       const {operation,args}=input;
       if(command==='get_preferences')return {darkMode:false};
+      if(command==='application_menu_request'){window.__menuRequests.push(input);return nativeMenu;}
+      if(command==='clipboard_text')return window.__clipboardText || '';
+      if(command==='set_clipboard_text'){window.__clipboardText=input.text;return;}
       if(command==='render_window_request'){window.__windowOperations.push(operation);window.__windowHidden=operation==='hide';return;}
       if(command!=='rendering_request')throw new Error(command);
       window.renderCalls.push({operation,args:structuredClone(args)});
@@ -86,16 +89,41 @@ async function open(page, standalone = false) {
     window.finishRender=()=>{state.running=false;state.message='Rendered 3000 × 2500';state.livePreview=false;state.preview=null;const record={id:next++,size:state.movieMode?[values.width,values.height]:[3000,2500],source:{scene_name:`Scene ${state.sceneId}`,settings:structuredClone(values)},elapsed_seconds:0.1};if(state.movieMode){record.movie={frameCount:3,framesAvailable:true,moviePath:'temporary/movie.mp4',options:structuredClone(state.movieOptions)};state.frame=2;state.availableFrames=3;state.hasMovieOutputs=true;}records.push(record);state.historyLength=records.length;state.selected=records.length-1;state.current=record;};
     window.liveMovieFrame=()=>{state.livePreview=true;state.preview={size:[3000,2500],frame:0};state.progress={completed:1,total:3};};
     if(standalone){
+      if(nativeMenu)window.__TAURI_INTERNALS__={};
       window.__nativeEvents={};
       const appWindow={innerSize:async()=>({width:1000,height:700}),outerPosition:async()=>({x:200,y:100}),setSize:async()=>{},setPosition:async()=>{},onMoved:async()=>{},onResized:async()=>{}};
       window.__TAURI__={core:{invoke:window.invoke},dialog:{save:async()=>null,confirm:async()=>false},webviewWindow:{getCurrentWebviewWindow:()=>appWindow},event:{listen:async(name,callback)=>{window.__nativeEvents[name]=callback;}},window:{availableMonitors:async()=>[{position:{x:0,y:0},size:{width:1920,height:1080}}]},dpi:{PhysicalSize:class{},PhysicalPosition:class{}}};
     }
-  },{catalog,hatchCatalog,image,standalone});
+  },{catalog,hatchCatalog,image,standalone,nativeMenu});
   await page.goto('http://rendering.test/');
   if(!standalone)await page.evaluate(()=>CueMolRendering.open());
   else await expect(page.getByRole('dialog',{name:'Rendering',exact:true})).toBeVisible();
   return errors;
 }
+
+test('Tauri native application menu edits the Rendering field or selected scene and closes only its window',async({page})=>{
+  const errors=await open(page,true,true);
+  const panel=page.getByRole('dialog',{name:'Rendering',exact:true});
+  const emit=id=>page.evaluate(id=>window.__nativeEvents['cuemol-menu-action']({payload:id}),id);
+  await expect.poll(()=>page.evaluate(()=>typeof window.__nativeEvents['cuemol-menu-action'])).toBe('function');
+  await panel.getByRole('button',{name:'Movie',exact:true}).click();
+  const name=panel.getByRole('textbox',{name:'Base name',exact:true});
+  await name.click();
+  await emit('select-all');
+  await page.evaluate(()=>{window.__clipboardText='selected movie';});
+  await emit('paste');
+  await expect(name).toHaveValue('selected movie');
+  expect(await page.evaluate(()=>renderCalls.some(call=>call.operation==='undo'))).toBe(false);
+  await panel.focus();
+  await emit('undo');
+  await expect.poll(()=>page.evaluate(()=>renderCalls.filter(call=>call.operation==='undo').length)).toBe(1);
+  await emit('redo');
+  await expect.poll(()=>page.evaluate(()=>renderCalls.filter(call=>call.operation==='redo').length)).toBe(1);
+  await emit('close-tab');
+  await expect(panel).toBeHidden();
+  expect(await page.evaluate(()=>__windowOperations.at(-1))).toBe('hide');
+  expect(errors).toEqual([]);
+});
 
 test('Tauri Rendering retains image history, framing and save-copy settings operations',async({page})=>{
   const errors=await open(page);const panel=page.getByRole('dialog',{name:'Rendering',exact:true});

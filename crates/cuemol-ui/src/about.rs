@@ -9,6 +9,10 @@ pub struct AboutDialog {
 }
 
 impl AboutDialog {
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
     pub fn open(&mut self, rows: Rows) {
         self.rows = rows;
         self.open = true;

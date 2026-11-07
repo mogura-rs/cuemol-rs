@@ -597,6 +597,8 @@ impl GuiApplication {
                             self.clear_log();
                         }
                         if ui.small_button("Save As…").clicked() {
+                            #[cfg(target_os = "macos")]
+                            let _menu_guard = application_menu::NativeDialogGuard::new();
                             if let Some(path) = rfd::FileDialog::new()
                                 .set_file_name("output.log")
                                 .save_file()

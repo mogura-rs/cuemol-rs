@@ -400,5 +400,6 @@ const CueMolRendering = (() => {
     clearInterval(timer);timer=setInterval(()=>{if(!pending&&dialogElement.open)send('poll');},250);
     frame();
   }
-  return {open, close, onClose: null};
+  const historyAction = operation => ['undo', 'redo'].includes(operation) ? request(operation) : Promise.resolve();
+  return {open, close, historyAction, onClose: null};
 })();

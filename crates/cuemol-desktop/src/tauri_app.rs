@@ -37,6 +37,8 @@ use cuemol_desktop_core::effects::ViewportOptions;
 mod actions;
 #[path = "tauri_agent.rs"]
 mod agent;
+#[path = "tauri_application_menu.rs"]
+mod application_menu;
 #[path = "tauri_console.rs"]
 mod console;
 #[path = "tauri_history.rs"]
@@ -16942,8 +16944,10 @@ pub fn run() -> Result<(), tauri::Error> {
         .plugin(tauri_plugin_dialog::init())
         .manage(render_window::WindowState::default())
         .on_window_event(render_window::window_event)
+        .on_menu_event(application_menu::menu_event)
         .setup(move |app| {
             app.manage(spawn_model(initial_paths, app.handle().clone()));
+            application_menu::install(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -16951,6 +16955,7 @@ pub fn run() -> Result<(), tauri::Error> {
             agent_request,
             rendering_request,
             render_window::render_window_request,
+            application_menu::application_menu_request,
             get_snapshot,
             prepare_application_close,
             get_density_histogram,

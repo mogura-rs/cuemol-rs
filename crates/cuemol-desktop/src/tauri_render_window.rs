@@ -6,6 +6,9 @@ pub(super) struct WindowState {
 }
 
 pub(super) fn window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
+    if matches!(event, tauri::WindowEvent::Destroyed) {
+        application_menu::clear_window(window.app_handle(), window.label());
+    }
     if window.label() == "rendering" {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
@@ -59,6 +62,7 @@ pub(super) async fn render_window_request(
                     .get_webview_window("rendering")
                     .ok_or("Rendering window is unavailable")?;
                 if operation == "hide" {
+                    application_menu::clear_window(&app, "rendering");
                     window.hide().map_err(|error| error.to_string())?;
                 } else {
                     window.show().map_err(|error| error.to_string())?;
