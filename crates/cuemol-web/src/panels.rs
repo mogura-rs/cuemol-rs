@@ -184,6 +184,7 @@ impl App {
             &mut open,
             self.render_cancel.is_some(),
             cuemol_ui::RenderControls {
+                can_start: !self.busy && self.state.active_scene().is_some(),
                 size: &mut self.render_size,
                 transparent: &mut self.render_transparent,
                 hatching: &mut self.render_hatching,
@@ -198,8 +199,30 @@ impl App {
         }
         if action == cuemol_ui::RenderAction::Save {
             if let Some(bytes) = &self.render_panel.png {
-                if let Err(error) = download("cuemol.png", bytes, "image/png") {
+                if let Err(error) = download(&self.render_panel.filename(), bytes, "image/png") {
                     self.message = js_error(error);
+                }
+            }
+        }
+        if action == cuemol_ui::RenderAction::Copy {
+            if let Some(bytes) = self.render_panel.png.clone() {
+                self.copy_render_image(&bytes);
+            }
+        }
+        if action == cuemol_ui::RenderAction::UseSettings {
+            if let Some(source) = self
+                .render_panel
+                .history
+                .current()
+                .map(|entry| entry.source.clone())
+            {
+                if self.call_shared(
+                    "set_render_settings",
+                    json!({"settings": source.settings_argument()}),
+                ) {
+                    self.open_render();
+                } else {
+                    self.render_panel.message = self.message.clone();
                 }
             }
         }
@@ -230,22 +253,20 @@ impl App {
                 settings.push_str("; ");
                 settings.push_str(&cuemol_command::hatch_settings(&self.render_hatch));
             }
-            match cuemol_command::call_tool(
-                &mut self.state,
-                &mut self.camera,
-                "set_render_settings",
-                &json!({"settings":settings}),
-            ) {
-                Ok(_) => {
-                    self.render_panel.begin(ctx);
-                    self.render_async(
-                        "get_screenshot",
-                        &json!({"width":self.render_size[0],"height":self.render_size[1]}),
-                        None,
-                        true,
-                    );
-                }
-                Err(e) => self.message = e.to_string(),
+            if self.call_shared("set_render_settings", json!({"settings":settings})) {
+                self.render_panel.begin(
+                    ctx,
+                    cuemol_command::render_history::RenderSource::capture(&self.state)
+                        .unwrap_or_default(),
+                );
+                self.render_async(
+                    "get_screenshot",
+                    &json!({"width":self.render_size[0],"height":self.render_size[1]}),
+                    None,
+                    true,
+                );
+            } else {
+                self.render_panel.failed(self.message.clone());
             }
         }
     }

@@ -73,6 +73,24 @@ impl Clipboard {
         }
     }
 
+    pub(crate) fn write_png(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.invalidate_menu_kind();
+        #[cfg(not(test))]
+        {
+            use clipboard_rs::common::{RustImage, RustImageData};
+            let image = RustImageData::from_bytes(bytes).map_err(|error| error.to_string())?;
+            self.handle()?
+                .set_image(image)
+                .map_err(|error| error.to_string())
+        }
+        #[cfg(test)]
+        {
+            image::load_from_memory(bytes)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+    }
+
     pub(crate) fn write_payload(&mut self, payload: &GuiClipboardPayload) -> Result<(), String> {
         self.invalidate_menu_kind();
         #[cfg(test)]

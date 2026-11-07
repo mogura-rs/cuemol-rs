@@ -801,7 +801,7 @@ impl App {
             self.message = "Open a scene file before reloading it.".into();
         }
     }
-    fn open_render(&mut self) {
+    pub(super) fn open_render(&mut self) {
         if let Ok(settings) = cuemol_command::render_settings(&self.state) {
             self.render_panel
                 .read_settings(&settings, &mut self.render_size);

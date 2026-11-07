@@ -1174,7 +1174,7 @@ impl App {
                         Err(e) => {
                             self.message = e.to_string();
                             if preview {
-                                self.render_panel.message = self.message.clone();
+                                self.render_panel.failed(self.message.clone());
                             }
                         }
                     }
@@ -1325,7 +1325,7 @@ impl App {
             Err(e) => {
                 self.message = e.to_string();
                 if preview {
-                    self.render_panel.message = self.message.clone();
+                    self.render_panel.failed(self.message.clone());
                 }
             }
         }

@@ -4,6 +4,7 @@ use cuemol_desktop_core::GuiPastedNode;
 use cuemol_ui::clipboard::Scope;
 
 pub(super) enum Completion {
+    ImageWritten(Result<(), String>),
     Written {
         revision: u64,
         cut: Option<Target>,
@@ -18,6 +19,33 @@ pub(super) enum Completion {
 }
 
 impl App {
+    pub(super) fn copy_render_image(&mut self, png: &[u8]) {
+        let result = (|| -> Result<js_sys::Promise, JsValue> {
+            let parts = js_sys::Array::new();
+            parts.push(&js_sys::Uint8Array::from(png));
+            let options = web_sys::BlobPropertyBag::new();
+            options.set_type("image/png");
+            let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &options)?;
+            let data = js_sys::Object::new();
+            js_sys::Reflect::set(&data, &"image/png".into(), &blob)?;
+            let item = web_sys::ClipboardItem::new_with_record_from_str_to_blob_promise(&data)?;
+            let items = js_sys::Array::new();
+            items.push(&item);
+            let window =
+                web_sys::window().ok_or_else(|| JsValue::from_str("Clipboard is unavailable"))?;
+            Ok(window.navigator().clipboard().write(&items))
+        })();
+        match result {
+            Ok(promise) => spawn_local(async move {
+                let result = JsFuture::from(promise).await.map(|_| ()).map_err(js_error);
+                enqueue(Event::Clipboard(Completion::ImageWritten(result)));
+            }),
+            Err(error) => {
+                self.render_panel.message = format!("Clipboard error: {}", js_error(error));
+            }
+        }
+    }
+
     fn clipboard_target(&self) -> Option<Target> {
         if self.clipboard_focus.scope == Some(Scope::Cameras) {
             return Some(Target::Camera {
@@ -110,6 +138,14 @@ impl App {
             self.clipboard_focus.finish_text_read(*id);
         }
         match completion {
+            Completion::ImageWritten(result) => {
+                self.render_panel.message = match result {
+                    Ok(()) => "Image copied to clipboard".into(),
+                    Err(error) => format!("Clipboard error: {error}"),
+                };
+                self.message = self.render_panel.message.clone();
+            }
+
             Completion::Written {
                 result: Err(error), ..
             }

@@ -20,8 +20,8 @@ async function field(page,name,value) {
   await page.keyboard.insertText(String(value));await present(page);
   await page.keyboard.press('Tab');await present(page);
 }
-async function open(page) {
-  await page.goto('./?renderer=webgl');
+async function open(page, renderer = 'webgl') {
+  await page.goto(`./?renderer=${renderer}`);
   await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
   await load(page,'preview.pdb',Buffer.from(molecule));
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
@@ -130,7 +130,7 @@ test('Scene eye controls, collapsed children and paint entries update live state
 test('Render remains usable in a small desktop window',async({page},testInfo)=>{
   await page.setViewportSize({width:800,height:600});
   await open(page);
-  for (const name of ['Start Render','Save render','Render Width','Render Height','Render DPI']) {
+  for (const name of ['Start Render','Render Width','Render Height','Render DPI']) {
     const [x,y,w,h]=await rect(page,name);
     expect(x).toBeGreaterThanOrEqual(0);expect(y).toBeGreaterThanOrEqual(0);
     expect(x+w).toBeLessThanOrEqual(800);expect(y+h).toBeLessThanOrEqual(600);
@@ -231,3 +231,83 @@ test('webgpu Stop during OIDN loading preserves the preview and suppresses late 
     release();
   }
 });
+
+
+for (const backend of ['webgl', 'webgpu']) {
+  test(`Render history exports the selected image and restores settings with Undo (${backend})`, async ({page}, testInfo) => {
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator.clipboard, 'write', { configurable: true, value: async items => {
+        if (window.__copyError) throw new Error('Clipboard rejected');
+        const blob = await items[0].getType('image/png');
+        window.__copiedImage = Array.from(new Uint8Array(await blob.arrayBuffer()));
+      }});
+    });
+    await open(page, backend);
+    await click(page, 'Render transparent');
+    await click(page, 'Start Render');
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toContain('Rendered 64 × 48');
+    const first = await save(page);
+    await field(page, 'Render Width', 96);
+    await field(page, 'Render Height', 72);
+    await field(page, 'Render DPI', 72);
+    await click(page, 'Start Render');
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toContain('Rendered 96 × 72');
+    const second = await save(page);
+    await call(page, 'clear_undo');
+    const camera = await page.evaluate(() => window.cuemol.status().view);
+    await click(page, 'Previous render');
+    expect((await save(page)).equals(first)).toBe(true);
+    await click(page, 'Copy render');
+    await expect.poll(() => page.evaluate(() => window.__copiedImage?.length)).toBe(first.length);
+    expect(Buffer.from(await page.evaluate(() => window.__copiedImage)).equals(first)).toBe(true);
+    await page.evaluate(() => { window.__copyError = true; });
+    await click(page, 'Copy render');
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toContain('Clipboard rejected');
+    const viewport = page.viewportSize();
+    for (const name of ['Start Render', 'Save render', 'Render preview', 'Use render settings']) {
+      const [x, y, width, height] = await rect(page, name);
+      expect(x).toBeGreaterThanOrEqual(0); expect(y).toBeGreaterThanOrEqual(0);
+      expect(x + width).toBeLessThanOrEqual(viewport.width);
+      expect(y + height).toBeLessThanOrEqual(viewport.height);
+    }
+    await click(page, 'Next render');
+    expect((await save(page)).equals(second)).toBe(true);
+    await click(page, 'Previous render');
+    const readSettings = async () => {
+      const state = await call(page, 'execute_script', { source: "var s=scene.getAppData('render'); print(s.width+':'+s.height+':'+s.dpi);" });
+      return JSON.parse(state.message).log;
+    };
+    expect(await readSettings()).toBe('96:72:72\n');
+    await call(page, 'undo');
+    expect(await readSettings()).toBe('96:72:72\n');
+    await click(page, 'Use render settings');
+    expect(await readSettings()).toBe('64:48:300\n');
+    await call(page, 'undo');
+    expect(await readSettings()).toBe('96:72:72\n');
+    await call(page, 'redo');
+    expect(await readSettings()).toBe('64:48:300\n');
+    expect(await page.evaluate(() => window.cuemol.status().view)).toEqual(camera);
+    await click(page, 'Render actual size');
+    await click(page, 'Render zoom in');
+    const [x, y, w, h] = await rect(page, 'Render preview');
+    await page.mouse.move(x + w / 2, y + h / 2);
+    await page.keyboard.down('Control');
+    await page.mouse.wheel(0, -500);
+    await page.keyboard.up('Control');
+    await page.mouse.down();
+    await page.mouse.move(x + w / 2 + 20, y + h / 2 + 10, {steps: 3});
+    await page.mouse.up();
+    await click(page, 'Fit render');
+    await page.screenshot({path: testInfo.outputPath(`render-history-${backend}.png`)});
+    await click(page, 'Clear render history');
+    await click(page, 'Cancel clear render history');
+    expect((await save(page)).equals(first)).toBe(true);
+    await click(page, 'Clear render history');
+    await click(page, 'Confirm clear render history');
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().ui.rects['Save render'])).toBeUndefined();
+    expect(await readSettings()).toBe('64:48:300\n');
+    expect(errors).toEqual([]);
+  });
+}

@@ -14989,6 +14989,27 @@ impl GuiApplication {
         self.tool_dialog = Some("Native rendering".into());
     }
 
+    fn apply_native_render_settings(
+        &mut self,
+        settings: &str,
+        camera: &mut cuemol_qsys::Camera,
+    ) -> cuemol_core::Result<()> {
+        self.cancel_console("Scene changed outside the console; remaining commands cancelled.");
+        let mut before = self.capture_script_undo();
+        let args = serde_json::json!({"settings": settings});
+        before.record = cuemol_command::console::actions::Record::operation(
+            &self.state,
+            "set_render_settings",
+            &args,
+        );
+        cuemol_command::call_tool(&mut self.state, camera, "set_render_settings", &args)?;
+        if !before.state.same_scene_undo_state(&self.state) {
+            self.push_undo_snapshot(before);
+            self.rebuild_snapshot();
+        }
+        Ok(())
+    }
+
     fn native_render_dialog(&mut self, ctx: &egui::Context, camera: &CameraController) {
         if self.tool_dialog.as_deref() != Some("Native rendering") {
             return;
@@ -14999,6 +15020,7 @@ impl GuiApplication {
             &mut open,
             self.ray_job.is_some(),
             cuemol_ui::RenderControls {
+                can_start: self.state.active_scene().is_some(),
                 size: &mut self.ray_size,
                 transparent: &mut self.ray_transparent,
                 hatching: &mut self.ray_hatching,
@@ -15016,7 +15038,7 @@ impl GuiApplication {
                 if let Some(bytes) = &self.ray_panel.png {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("PNG image", &["png"])
-                        .set_file_name("render.png")
+                        .set_file_name(self.ray_panel.filename())
                         .save_file()
                     {
                         let result = fs::write(&path, bytes);
@@ -15024,6 +15046,32 @@ impl GuiApplication {
                             Ok(()) => self.set_status(format!("Saved {}", path.display())),
                             Err(error) => self.set_status(error.to_string()),
                         }
+                    }
+                }
+            }
+            cuemol_ui::RenderAction::Copy => {
+                if let Some(png) = self.ray_panel.png.clone() {
+                    self.ray_panel.message = match self.system_clipboard.write_png(&png) {
+                        Ok(()) => "Image copied to clipboard".into(),
+                        Err(error) => format!("Clipboard error: {error}"),
+                    };
+                }
+            }
+            cuemol_ui::RenderAction::UseSettings => {
+                if let Some(source) = self
+                    .ray_panel
+                    .history
+                    .current()
+                    .map(|entry| entry.source.clone())
+                {
+                    let mut current = camera.to_qsys_camera("__current");
+                    match self
+                        .apply_native_render_settings(&source.settings_argument(), &mut current)
+                    {
+                        Ok(()) => {
+                            self.open_native_render();
+                        }
+                        Err(error) => self.ray_panel.message = error.to_string(),
                     }
                 }
             }
@@ -15050,12 +15098,7 @@ impl GuiApplication {
                     settings.push_str("; ");
                     settings.push_str(&cuemol_command::hatch_settings(&self.ray_hatch));
                 }
-                let result = cuemol_command::call_tool(
-                    &mut self.state,
-                    &mut current,
-                    "set_render_settings",
-                    &serde_json::json!({"settings":settings}),
-                )
+                let result = self.apply_native_render_settings(&settings, &mut current)
                 .and_then(|_| {
                     cuemol_command::prepare_render(
                         &self.state,
@@ -15073,13 +15116,17 @@ impl GuiApplication {
                             let _ = sender
                                 .send(prepared.run_with_cancel(&cancel).map_err(|e| e.to_string()));
                         });
-                        self.ray_panel.begin(ctx);
+                        self.ray_panel.begin(
+                            ctx,
+                            cuemol_command::render_history::RenderSource::capture(&self.state)
+                                .unwrap_or_default(),
+                        );
                         self.ray_job = Some(receiver);
                         self.set_status("Rendering image...");
                     }
                     Err(error) => {
-                        self.ray_panel.message = error.to_string();
-                        self.set_error(error);
+                        self.ray_panel.failed(error.to_string());
+                        self.set_status(error.to_string());
                     }
                 }
             }
@@ -15105,7 +15152,7 @@ impl GuiApplication {
         };
         self.ray_cancel = None;
         if let Err(error) = result {
-            self.ray_panel.message = error;
+            self.ray_panel.failed(error);
         }
         self.set_status(self.ray_panel.message.clone());
     }
@@ -31012,16 +31059,30 @@ impl GpuState {
                 &screen_descriptor,
             );
         }
-        for id in &textures_delta.free {
-            self.egui_renderer.free_texture(id);
-        }
         command_buffers.push(encoder.finish());
-        self.queue.submit(command_buffers);
+        submit_egui_commands(
+            &self.queue,
+            &mut self.egui_renderer,
+            command_buffers,
+            &textures_delta.free,
+        );
         self.picking.start_readback();
         let _ = self.device.poll(wgpu::PollType::Poll);
         self.effects_pending |= self.picking.is_pending();
         frame.present();
         Ok(())
+    }
+}
+
+fn submit_egui_commands(
+    queue: &wgpu::Queue,
+    renderer: &mut egui_wgpu::Renderer,
+    commands: Vec<wgpu::CommandBuffer>,
+    free: &[egui::TextureId],
+) {
+    queue.submit(commands);
+    for id in free {
+        renderer.free_texture(id);
     }
 }
 
@@ -31429,9 +31490,76 @@ mod tests {
         app.ray_job = Some(receiver);
         app.ray_cancel = Some(Arc::new(AtomicBool::new(true)));
         app.poll_native_render(&ctx);
-        assert_eq!(app.ray_panel.png.as_deref(), Some(png.as_slice()));
+        assert_eq!(app.ray_panel.png.as_deref(), Some(png.as_ref()));
         assert!(app.ray_job.is_none() && app.ray_cancel.is_none());
         assert_eq!(app.ray_panel.message, "Render cancelled");
+    }
+
+    #[test]
+    fn native_render_history_restores_one_backend_with_one_undo() {
+        let mut app = GuiApplication::new();
+        app.state.open_bytes("history.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n").unwrap();
+        let mut camera = CameraController::default();
+        let mut current = camera.to_qsys_camera("current");
+        app.apply_native_render_settings("backend=umbreon; width=32; height=24; dpi=72; umbreon.useGI=false; umbreon.aoEnabled=false; umbreon.supersample=1; umbreon.denoise=None; povray.shadow=true", &mut current).unwrap();
+        let source = cuemol_command::render_history::RenderSource::capture(&app.state).unwrap();
+        assert!(!source.settings.contains_key("povray.shadow"));
+        let ctx = egui::Context::default();
+        app.ray_panel.begin(&ctx, source);
+        let result = cuemol_command::prepare_render(
+            &app.state,
+            &current,
+            "get_screenshot",
+            &serde_json::json!({}),
+        )
+        .unwrap()
+        .run_with_cancel(&AtomicBool::new(false))
+        .unwrap();
+        app.ray_panel.result(&ctx, &result).unwrap();
+        app.apply_native_render_settings("width=40; dpi=300; povray.shadow=false", &mut current)
+            .unwrap();
+        app.undo_stack.clear();
+        app.redo_stack.clear();
+        app.ray_panel.select_result(&ctx, 0).unwrap();
+        assert!(app.undo_stack.is_empty());
+        let settings = app
+            .ray_panel
+            .history
+            .current()
+            .unwrap()
+            .source
+            .settings_argument();
+        let before_camera = current.clone();
+        app.apply_native_render_settings(&settings, &mut current)
+            .unwrap();
+        assert_eq!(current, before_camera);
+        assert_eq!(app.undo_stack.len(), 1);
+        let restored = cuemol_command::render_settings(&app.state).unwrap();
+        assert_eq!(restored["width"], 32);
+        assert_eq!(restored["dpi"], 72);
+        assert_eq!(restored["povray.shadow"], false);
+        app.apply_native_render_settings(&settings, &mut current)
+            .unwrap();
+        assert_eq!(app.undo_stack.len(), 1);
+        app.undo(&mut camera);
+        assert_eq!(
+            cuemol_command::render_settings(&app.state).unwrap()["width"],
+            40
+        );
+        app.redo(&mut camera);
+        assert_eq!(
+            cuemol_command::render_settings(&app.state).unwrap()["width"],
+            32
+        );
+        let png = app.ray_panel.png.clone().unwrap();
+        assert!(app.system_clipboard.write_png(&png).is_ok());
+        assert!(app.system_clipboard.write_png(b"invalid").is_err());
+        app.ray_panel.clear_results();
+        assert_eq!(app.undo_stack.len(), 1);
+        assert_eq!(
+            cuemol_command::render_settings(&app.state).unwrap()["width"],
+            32
+        );
     }
 
     #[test]
@@ -32643,6 +32771,82 @@ mod tests {
         buffer.upload(&device, &queue, &[1_u32; 8]);
         assert_eq!(buffer.capacity, 512);
         assert_eq!(buffer.buffer.size(), 512);
+    }
+
+    #[test]
+    fn native_egui_texture_removed_during_its_last_paint_is_freed_after_submit() {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            eprintln!("GPU texture lifetime check skipped: no adapter");
+            return;
+        };
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut renderer =
+            egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
+        let id = egui::TextureId::Managed(7);
+        let delta = egui::epaint::ImageDelta::full(
+            egui::ColorImage::filled([2, 2], egui::Color32::RED),
+            egui::TextureOptions::LINEAR,
+        );
+        renderer.update_texture(&device, &queue, id, &delta);
+        let mut mesh = egui::Mesh::with_texture(id);
+        mesh.add_rect_with_uv(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(8., 8.)),
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1., 1.)),
+            egui::Color32::WHITE,
+        );
+        let jobs = [egui::ClippedPrimitive {
+            clip_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(8., 8.)),
+            primitive: egui::epaint::Primitive::Mesh(mesh),
+        }];
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("egui-last-texture-frame"),
+            size: wgpu::Extent3d {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let screen = ScreenDescriptor {
+            size_in_pixels: [8, 8],
+            pixels_per_point: 1.,
+        };
+        let mut commands = renderer.update_buffers(&device, &queue, &mut encoder, &jobs, &screen);
+        {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui-last-texture-paint"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            renderer.render(&mut pass.forget_lifetime(), &jobs, &screen);
+        }
+        commands.push(encoder.finish());
+        submit_egui_commands(&queue, &mut renderer, commands, &[id]);
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        assert!(pollster::block_on(device.pop_error_scope()).is_none());
     }
 
     #[test]

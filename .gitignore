@@ -38,6 +38,7 @@ web/playwright-report/
 __pycache__/
 *.py[cod]
 .venv/
+/uv.lock
 *.egg-info/
 .ipynb_checkpoints/
 

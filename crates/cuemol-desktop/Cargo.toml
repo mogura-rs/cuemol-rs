@@ -25,7 +25,7 @@ cuemol-anim.workspace = true
 cuemol-render.workspace = true
 cuemol-xtal.workspace = true
 bytemuck = { version = "1.25", features = ["derive"], optional = true }
-clipboard-rs = { version = "0.3.5", default-features = false, features = ["wayland"], optional = true }
+clipboard-rs = { version = "0.3.5", default-features = false, features = ["wayland", "image"], optional = true }
 egui = { version = "0.33.3", optional = true }
 egui-wgpu = { version = "0.33.3", optional = true }
 # `accesskit` keeps egui-winit's `PlatformOutput` destructuring in sync with egui's

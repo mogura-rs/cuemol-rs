@@ -1,8 +1,10 @@
 use base64::Engine;
+use cuemol_command::render_history::{RenderHistory, RenderSource};
 use cuemol_render::{HatchRenderParams, UmbreonRenderParams};
 use egui::{Context, Response, TextureHandle};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[derive(Default, PartialEq, Eq)]
 pub enum RenderAction {
@@ -11,9 +13,12 @@ pub enum RenderAction {
     Start,
     Stop,
     Save,
+    Copy,
+    UseSettings,
 }
 
 pub struct RenderControls<'a> {
+    pub can_start: bool,
     pub size: &'a mut [u32; 2],
     pub transparent: &'a mut bool,
     pub hatching: &'a mut bool,
@@ -27,7 +32,11 @@ pub struct RenderPanel {
     unit: String,
     dimensions: [f64; 2],
     preview: Option<TextureHandle>,
-    pub png: Option<Vec<u8>>,
+    pub png: Option<Arc<[u8]>>,
+    pub history: RenderHistory,
+    pending_source: Option<RenderSource>,
+    viewer: ImageFraming,
+    confirm_clear: bool,
     pub message: String,
     started: Option<f64>,
     pub rects: BTreeMap<String, [f32; 4]>,
@@ -52,6 +61,10 @@ impl Default for RenderPanel {
             dimensions: [1200.; 2],
             preview: None,
             png: None,
+            history: RenderHistory::default(),
+            pending_source: None,
+            viewer: ImageFraming::default(),
+            confirm_clear: false,
             message: "No render result yet. Press Start Render to render the current view.".into(),
             started: None,
             rects: BTreeMap::new(),
@@ -109,27 +122,46 @@ impl RenderPanel {
         )
     }
 
-    pub fn begin(&mut self, ctx: &Context) {
+    pub fn begin(&mut self, ctx: &Context, source: RenderSource) {
         self.started = Some(ctx.input(|i| i.time));
+        self.pending_source = Some(source);
         self.message = "Rendering image…".into();
     }
 
+    pub fn failed(&mut self, message: impl Into<String>) {
+        self.started = None;
+        self.pending_source = None;
+        self.message = message.into();
+    }
+
+    pub fn filename(&self) -> String {
+        self.history
+            .current()
+            .map(|entry| entry.filename())
+            .unwrap_or_else(|| "render.png".into())
+    }
+
     pub fn result(&mut self, ctx: &Context, value: &Value) -> Result<(), String> {
-        let png = base64::engine::general_purpose::STANDARD
+        let png: Arc<[u8]> = base64::engine::general_purpose::STANDARD
             .decode(value["_image"].as_str().ok_or("Render returned no image")?)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .into();
         let image = image::load_from_memory(&png)
             .map_err(|e| e.to_string())?
             .into_rgba8();
-        let size = [image.width() as usize, image.height() as usize];
-        let image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
-        self.preview =
-            Some(ctx.load_texture("render-preview", image, egui::TextureOptions::LINEAR));
-        self.png = Some(png);
+        let size = [image.width(), image.height()];
         let elapsed = self
             .started
-            .take()
-            .map(|start| ctx.input(|i| i.time) - start);
+            .map(|start| (ctx.input(|i| i.time) - start).max(0.));
+        self.history.push(
+            png.clone(),
+            self.pending_source.clone().unwrap_or_default(),
+            size,
+            elapsed,
+        )?;
+        self.started = None;
+        self.pending_source = None;
+        self.replace_preview(ctx, png, image);
         self.message = format!(
             "Rendered {} × {}{}",
             size[0],
@@ -137,6 +169,35 @@ impl RenderPanel {
             elapsed.map(|s| format!(" in {s:.1} s")).unwrap_or_default()
         );
         Ok(())
+    }
+
+    fn replace_preview(&mut self, ctx: &Context, png: Arc<[u8]>, image: image::RgbaImage) {
+        let size = [image.width() as usize, image.height() as usize];
+        let image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+        self.preview =
+            Some(ctx.load_texture("render-preview", image, egui::TextureOptions::LINEAR));
+        self.viewer
+            .replace(egui::vec2(size[0] as f32, size[1] as f32));
+        self.png = Some(png);
+        ctx.request_repaint();
+    }
+
+    pub fn select_result(&mut self, ctx: &Context, index: usize) -> Result<(), String> {
+        let (png, image) = self.history.select_with(index, |png| {
+            image::load_from_memory(png)
+                .map(|image| image.into_rgba8())
+                .map_err(|e| e.to_string())
+        })?;
+        self.replace_preview(ctx, png, image);
+        Ok(())
+    }
+
+    pub fn clear_results(&mut self) {
+        self.history.clear();
+        self.preview = None;
+        self.png = None;
+        self.viewer = ImageFraming::default();
+        self.confirm_clear = false;
     }
 
     fn record(&mut self, label: &str, response: &Response) {
@@ -176,8 +237,16 @@ impl RenderPanel {
                             egui::vec2(left_width, height),
                             egui::Layout::top_down(egui::Align::LEFT),
                             |ui| {
-                                self.preview(ui, (height - 128.).max(160.));
-                                action = self.actions(ui, running, controls.hatching);
+                                action = self.preview(ui, (height - 176.).max(120.), running);
+                                let run = self.actions(
+                                    ui,
+                                    running,
+                                    controls.can_start,
+                                    controls.hatching,
+                                );
+                                if run != RenderAction::None {
+                                    action = run;
+                                }
                             },
                         );
                         ui.separator();
@@ -191,66 +260,227 @@ impl RenderPanel {
                     });
                 } else {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        self.preview(ui, 180.);
-                        action = self.actions(ui, running, controls.hatching);
+                        action = self.preview(ui, 240., running);
+                        let run = self.actions(ui, running, controls.can_start, controls.hatching);
+                        if run != RenderAction::None {
+                            action = run;
+                        }
                         self.settings(ui, running, &mut controls);
                     });
                 }
             });
+        if self.confirm_clear {
+            egui::Window::new("Clear render history")
+                .id(egui::Id::new("clear-render-history"))
+                .collapsible(false).resizable(false).show(ctx, |ui| {
+                    ui.label("Discard every render and delete its temporary image? The scenes are unaffected.");
+                    ui.horizontal(|ui| {
+                        let cancel = ui.button("Cancel");
+                        self.record("Cancel clear render history", &cancel);
+                        if cancel.clicked() { self.confirm_clear = false; ctx.request_repaint(); }
+                        let clear = ui.button("Clear");
+                        self.record("Confirm clear render history", &clear);
+                        if clear.clicked() { self.clear_results(); ctx.request_repaint(); }
+                    });
+                });
+        }
         action
     }
 
-    fn preview(&mut self, ui: &mut egui::Ui, height: f32) {
+    fn preview(&mut self, ui: &mut egui::Ui, height: f32, running: bool) -> RenderAction {
+        let mut action = RenderAction::None;
+        let top = ui.cursor().top();
+        if self.png.is_some() {
+            ui.horizontal_wrapped(|ui| {
+                let index = self.history.selected().unwrap_or(0);
+                for (label, enabled, target) in [
+                    ("Previous", index > 0, index.saturating_sub(1)),
+                    ("Next", index + 1 < self.history.len(), index + 1),
+                ] {
+                    let response = ui.add_enabled(enabled, egui::Button::new(label));
+                    self.record(&format!("{label} render"), &response);
+                    if response.clicked() {
+                        if let Err(error) = self.select_result(ui.ctx(), target) {
+                            self.message = error;
+                        }
+                    }
+                }
+                ui.label(format!(
+                    "{} / {}",
+                    self.history.selected().unwrap_or(0) + 1,
+                    self.history.len()
+                ));
+                let response = ui.add_enabled(
+                    !running
+                        && self
+                            .history
+                            .current()
+                            .is_some_and(|r| !r.source.settings.is_empty()),
+                    egui::Button::new("Use settings"),
+                );
+                self.record("Use render settings", &response);
+                if response.clicked() {
+                    action = RenderAction::UseSettings;
+                }
+                let response = ui.button("Clear").on_hover_text("Clear render history");
+                self.record("Clear render history", &response);
+                if response.clicked() {
+                    self.confirm_clear = true;
+                }
+                for (label, key, value) in [
+                    ("Save", "Save render", RenderAction::Save),
+                    ("Copy", "Copy render", RenderAction::Copy),
+                ] {
+                    let response = ui.button(label);
+                    self.record(key, &response);
+                    if response.clicked() {
+                        action = value;
+                    }
+                }
+                ui.menu_button("Settings", |ui| {
+                    if let Some(record) = self.history.current() {
+                        ui.label(format!("Scene: {}", record.source.scene_name));
+                        egui::ScrollArea::vertical()
+                            .max_height(240.)
+                            .show(ui, |ui| {
+                                for (key, value) in &record.source.settings {
+                                    ui.label(format!(
+                                        "{key}: {}",
+                                        value
+                                            .as_str()
+                                            .map(str::to_string)
+                                            .unwrap_or_else(|| value.to_string())
+                                    ));
+                                }
+                            });
+                    }
+                });
+                for (label, factor) in [("−", 0.8), ("+", 1.25)] {
+                    let response = ui.button(label);
+                    self.record(
+                        if factor < 1. {
+                            "Render zoom out"
+                        } else {
+                            "Render zoom in"
+                        },
+                        &response,
+                    );
+                    if response.clicked() {
+                        self.viewer
+                            .zoom(self.viewer.scale * factor, egui::Vec2::ZERO);
+                    }
+                }
+                let response = ui.button("100%");
+                self.record("Render actual size", &response);
+                if response.clicked() {
+                    self.viewer.zoom(1., egui::Vec2::ZERO);
+                }
+                let response = ui.button("Fit");
+                self.record("Fit render", &response);
+                if response.clicked() {
+                    self.viewer.fit();
+                }
+                if let Some(record) = self.history.current() {
+                    ui.weak(format!(
+                        "{} · {} × {} · {:.0}%",
+                        record.source.scene_name,
+                        record.size[0],
+                        record.size[1],
+                        self.viewer.scale * 100.
+                    ));
+                }
+            });
+        }
+        let toolbar = ui.cursor().top() - top;
         let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), height),
-            egui::Sense::hover(),
+            egui::vec2(ui.available_width(), (height - toolbar).max(80.)),
+            egui::Sense::click_and_drag(),
         );
         self.record("Render preview", &response);
-        ui.painter().rect_filled(rect, 0., ui.visuals().panel_fill);
+        let painter = ui.painter().with_clip_rect(rect);
+        painter.rect_filled(rect, 0., ui.visuals().panel_fill);
+        self.viewer.viewport = rect.size();
         if let Some(texture) = &self.preview {
-            let size = texture.size_vec2();
-            let scale = (rect.width() / size.x).min(rect.height() / size.y).min(1.);
-            let image_rect = egui::Rect::from_center_size(rect.center(), size * scale);
-            for y in 0..(image_rect.height() / 12.).ceil() as u32 {
-                for x in 0..(image_rect.width() / 12.).ceil() as u32 {
-                    let cell = egui::Rect::from_min_size(
-                        image_rect.min + egui::vec2(x as f32 * 12., y as f32 * 12.),
-                        egui::vec2(12., 12.),
+            if !self.viewer.fitted {
+                self.viewer.fit();
+            }
+            if response.dragged() {
+                self.viewer.pan(ui.input(|i| i.pointer.delta()));
+            }
+            if response.hovered() {
+                let (scroll, modifiers, pinch, pointer) = ui.input(|i| {
+                    (
+                        i.smooth_scroll_delta,
+                        i.modifiers,
+                        i.zoom_delta(),
+                        i.pointer.hover_pos(),
                     )
-                    .intersect(image_rect);
-                    ui.painter().rect_filled(
-                        cell,
-                        0.,
-                        egui::Color32::from_gray(if (x + y) % 2 == 0 { 48 } else { 64 }),
-                    );
+                });
+                let anchor = pointer.unwrap_or(rect.center()) - rect.center();
+                if pinch != 1. {
+                    self.viewer.zoom(self.viewer.scale * pinch, anchor);
+                } else if modifiers.ctrl || modifiers.command {
+                    self.viewer
+                        .zoom(self.viewer.scale * (scroll.y * 0.002).exp(), anchor);
+                } else {
+                    self.viewer.pan(scroll);
                 }
             }
-            ui.painter().image(
-                texture.id(),
-                image_rect,
-                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1., 1.)),
-                egui::Color32::WHITE,
-            );
+            self.viewer.clamp_center();
+            let display = self.viewer.size * self.viewer.scale;
+            let image_rect =
+                egui::Rect::from_min_size(rect.center() - display * self.viewer.center, display);
+            let visible = image_rect.intersect(rect);
+            if visible.is_positive() {
+                let origin = visible.min;
+                for y in 0..(visible.height() / 12.).ceil() as u32 {
+                    for x in 0..(visible.width() / 12.).ceil() as u32 {
+                        let cell = egui::Rect::from_min_size(
+                            origin + egui::vec2(x as f32 * 12., y as f32 * 12.),
+                            egui::vec2(12., 12.),
+                        )
+                        .intersect(visible);
+                        painter.rect_filled(
+                            cell,
+                            0.,
+                            egui::Color32::from_gray(if (x + y) % 2 == 0 { 48 } else { 64 }),
+                        );
+                    }
+                }
+                painter.image(
+                    texture.id(),
+                    image_rect,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1., 1.)),
+                    egui::Color32::WHITE,
+                );
+            }
         } else {
-            let text = ui.painter().layout(
+            let text = painter.layout(
                 "No render result yet.\nPress Start Render to render the current view.".into(),
                 egui::FontId::proportional(13.),
                 ui.visuals().weak_text_color(),
                 (rect.width() - 40.).max(80.),
             );
-            ui.painter().galley(
+            painter.galley(
                 rect.center() - text.size() * 0.5,
                 text,
                 ui.visuals().weak_text_color(),
             );
         }
+        action
     }
 
-    fn actions(&mut self, ui: &mut egui::Ui, running: bool, hatching: &mut bool) -> RenderAction {
+    fn actions(
+        &mut self,
+        ui: &mut egui::Ui,
+        running: bool,
+        can_start: bool,
+        hatching: &mut bool,
+    ) -> RenderAction {
         let mut action = RenderAction::None;
         ui.separator();
         ui.horizontal_wrapped(|ui| {
-            let response = ui.add_enabled(!running, egui::Button::new("Start Render"));
+            let response = ui.add_enabled(!running && can_start, egui::Button::new("Start Render"));
             self.record("Start Render", &response);
             if response.clicked() {
                 action = RenderAction::Start;
@@ -262,11 +492,6 @@ impl RenderPanel {
                 if response.clicked() {
                     action = RenderAction::Stop;
                 }
-            }
-            let response = ui.add_enabled(self.png.is_some(), egui::Button::new("Save PNG…"));
-            self.record("Save render", &response);
-            if response.clicked() {
-                action = RenderAction::Save;
             }
             ui.add_enabled_ui(!running, |ui| {
                 egui::ComboBox::from_id_salt("render-backend")
@@ -283,7 +508,13 @@ impl RenderPanel {
         });
         ui.separator();
         ui.weak("Log");
-        ui.label(&self.message);
+        egui::ScrollArea::vertical()
+            .id_salt("render-result-log")
+            .max_height(64.)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add(egui::Label::new(&self.message).wrap());
+            });
         action
     }
 
@@ -450,5 +681,141 @@ impl RenderPanel {
                     }
                 });
             });
+    }
+}
+
+#[derive(Debug)]
+struct ImageFraming {
+    size: egui::Vec2,
+    viewport: egui::Vec2,
+    center: egui::Vec2,
+    scale: f32,
+    fitted: bool,
+}
+
+impl Default for ImageFraming {
+    fn default() -> Self {
+        Self {
+            size: egui::Vec2::splat(1.),
+            viewport: egui::Vec2::ZERO,
+            center: egui::Vec2::splat(0.5),
+            scale: 1.,
+            fitted: false,
+        }
+    }
+}
+
+impl ImageFraming {
+    fn fit_scale(&self) -> f32 {
+        (self.viewport.x / self.size.x)
+            .min(self.viewport.y / self.size.y)
+            .clamp(0.05, 8.)
+    }
+    fn fit(&mut self) {
+        self.scale = self.fit_scale();
+        self.center = egui::Vec2::splat(0.5);
+        self.fitted = true;
+    }
+    fn replace(&mut self, size: egui::Vec2) {
+        let previous_fit = self.fit_scale();
+        self.size = size;
+        if self.fitted {
+            self.scale = (self.scale * self.fit_scale() / previous_fit).clamp(0.05, 8.);
+        }
+    }
+    fn zoom(&mut self, scale: f32, anchor: egui::Vec2) {
+        let at = self.center + anchor / (self.size * self.scale);
+        self.scale = scale.clamp(0.05, 8.);
+        self.center = at - anchor / (self.size * self.scale);
+        self.clamp_center();
+    }
+    fn pan(&mut self, delta: egui::Vec2) {
+        self.center -= delta / (self.size * self.scale);
+        self.clamp_center();
+    }
+    fn clamp_center(&mut self) {
+        for i in 0..2 {
+            let half = (self.viewport[i] / (self.size[i] * self.scale) * 0.5).min(0.5);
+            self.center[i] = self.center[i].clamp(half, 1. - half);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rendered(color: [u8; 4], size: [u32; 2]) -> Value {
+        let image = image::RgbaImage::from_pixel(size[0], size[1], image::Rgba(color));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        serde_json::json!({"_image": base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())})
+    }
+
+    fn source(name: &str, dpi: u32) -> RenderSource {
+        RenderSource {
+            scene_name: name.into(),
+            settings: serde_json::json!({"dpi": dpi}).as_object().unwrap().clone(),
+        }
+    }
+
+    #[test]
+    fn result_history_keeps_image_settings_and_framing_across_failures() {
+        let ctx = Context::default();
+        let mut panel = RenderPanel::default();
+        panel.begin(&ctx, source("first", 72));
+        panel
+            .result(&ctx, &rendered([255, 0, 0, 128], [10, 20]))
+            .unwrap();
+        let first = panel.png.clone().unwrap();
+        panel.viewer.viewport = egui::vec2(100., 100.);
+        panel.viewer.fit();
+        panel.viewer.zoom(8., egui::Vec2::ZERO);
+        panel.begin(&ctx, source("second", 300));
+        panel
+            .result(&ctx, &rendered([0, 0, 255, 255], [20, 40]))
+            .unwrap();
+        assert_eq!(panel.history.len(), 2);
+        assert_eq!(panel.viewer.scale, 4.);
+        assert_eq!(panel.filename(), "second-20x40.png");
+        panel.select_result(&ctx, 0).unwrap();
+        assert_eq!(panel.png.as_deref(), Some(first.as_ref()));
+        assert_eq!(panel.history.current().unwrap().source.settings["dpi"], 72);
+        assert_eq!(panel.viewer.scale, 8.);
+        panel.begin(&ctx, source("failed", 600));
+        assert!(panel
+            .result(&ctx, &serde_json::json!({"_image": "invalid"}))
+            .is_err());
+        panel.failed("Render cancelled");
+        assert_eq!(panel.history.len(), 2);
+        assert_eq!(panel.history.selected(), Some(0));
+        assert_eq!(panel.png.as_deref(), Some(first.as_ref()));
+        assert!(panel.started.is_none() && panel.pending_source.is_none());
+        assert!(panel.select_result(&ctx, 50).is_err());
+        assert_eq!(panel.history.selected(), Some(0));
+        panel.clear_results();
+        assert!(panel.history.is_empty() && panel.png.is_none() && panel.preview.is_none());
+    }
+
+    #[test]
+    fn zoom_stays_at_pointer_and_pan_is_bounded() {
+        let mut framing = ImageFraming::default();
+        framing.viewport = egui::vec2(200., 100.);
+        framing.replace(egui::vec2(400., 200.));
+        framing.fit();
+        assert_eq!(framing.scale, 0.5);
+        let anchor = egui::vec2(25., -10.);
+        let before = framing.center + anchor / (framing.size * framing.scale);
+        framing.zoom(2., anchor);
+        let after = framing.center + anchor / (framing.size * framing.scale);
+        assert!((before - after).length() < 1e-6);
+        framing.pan(egui::vec2(1e6, -1e6));
+        assert_eq!(framing.center, egui::vec2(0.125, 0.875));
+        framing.fit();
+        assert_eq!(framing.center, egui::Vec2::splat(0.5));
+        framing.zoom(100., egui::Vec2::ZERO);
+        assert_eq!(framing.scale, 8.);
+        framing.zoom(0.0001, egui::Vec2::ZERO);
+        assert_eq!(framing.scale, 0.05);
     }
 }

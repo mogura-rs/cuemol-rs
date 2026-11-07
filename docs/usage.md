@@ -847,14 +847,29 @@ the mock Inspector retain separate values; only Reset clears a modified flag.
 
 ### Image rendering
 
-Open Render to preview an image before saving it. The Image tab sets the size,
-physical units, DPI and transparent background; the Render tab controls quality,
-projection, lighting and NPR settings. Start Render uses the current view and the
-saved scene settings. Stop cancels the running render and retains the previous
-completed preview. Save PNG writes that preview, including its DPI metadata.
-When dimensions use inches, centimeters or millimeters, changing DPI preserves
-the physical size and updates the output pixel count.
-The command APIs retain their direct image/download behavior.
+In the native egui and browser frontends, open Render to preview an image before
+saving it. The Image tab sets size, physical units, DPI and transparency; the
+Render tab controls quality, projection, lighting and NPR settings. Start Render
+stores the edited settings as one undoable scene change and renders the current
+view. Stop and failures retain completed results. When dimensions use inches,
+centimeters or millimeters, changing DPI preserves physical size and updates the
+output pixel count. The command APIs retain their direct image/download behavior.
+
+Previous and Next browse up to 50 completed results without changing the scene.
+Save exports the displayed image with its original DPI metadata; Copy puts that
+image on the system clipboard. Settings shows the captured values, and Use
+settings restores the common settings and the active backend in one Undo step.
+Other backend settings remain unchanged. Clear asks before discarding the image
+history and leaves scenes untouched. Native images use owned temporary files;
+the browser also limits compressed history to 128 MiB, retaining the latest
+result even when it exceeds that budget. Only the displayed image is decoded.
+
+Fit, 100% and the zoom buttons control image framing. Drag or scroll to pan;
+pinch or Ctrl/Command-wheel to zoom around the pointer. Switching results keeps
+framing, with the zoom adjusted for a different image size. Clipboard errors
+appear in the bounded, scrollable log. Tauri still uses its separate POV-Ray and
+animation windows; integrating its render history is tracked in the implementation
+checklist.
 
 Umbreon is implemented in Rust and uses a BVH for primary, shadow, AO, and GI
 rays. Its script exporter applies typed scene render settings, including physical

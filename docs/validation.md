@@ -1,5 +1,53 @@
 # Validation evidence
 
+## Render image history and shared result viewer
+
+Native egui and browser still-image windows now retain completed images with
+source scene names, dimensions, elapsed times and settings snapshots. History is
+limited to 50 entries. Native images live in an individually owned temporary
+directory and are removed on eviction, Clear and normal application shutdown.
+Instances cannot delete each other's files. Browser history shares compressed
+bytes and additionally caps retained data at 128 MiB, always keeping the newest
+image. A single decoded preview texture is retained. Abnormal-exit cleanup of
+native temporary directories is not implemented in this store.
+
+Previous/Next and image framing do not edit scenes or add Undo entries. Save and
+Copy use the selected result, including its original PNG resolution metadata for
+Save. Use settings restores common values and the captured backend as one scene
+edit; settings for other backends remain intact. Render startup now also records
+changed settings in GUI history instead of bypassing it. Failed reads, decoding,
+rendering and cancellation preserve the selected completed image. Clear requires
+confirmation. Fit, actual size, zoom buttons, pointer-anchored wheel/pinch and
+bounded panning retain relative framing when image dimensions change.
+
+The Linux window check exposed a missing repaint after an asynchronous result:
+the image bytes and toolbar were ready, but the texture appeared only after a
+subsequent input event. Preview replacement now requests another frame. The log
+also has a fixed scrolling area so a long clipboard exception cannot expand the
+window beyond the screen. Confirming Clear exposed a second defect: the native
+wgpu integration destroyed egui textures before submitting the frame that still
+referenced them. Texture release now follows queue submission. A GPU regression
+renders a texture on its final frame while that texture is also marked for release.
+The usage documentation's Save PNG label was stale;
+the result toolbar now uses Save and exports the selected history entry.
+
+Validation: 67 shared UI tests, 72 command unit tests and 228 native GUI tests
+pass. Two pre-existing command tests remain ignored. The macOS Tauri model suite
+passes 195 tests with five existing ignored cases after enabling native image
+clipboard support. Three archive tests cover count/byte eviction, ownership,
+failed navigation and cleanup; two viewer tests cover image/settings identity,
+failed results, framing and pointer anchoring. The new native regression checks
+backend isolation, unchanged camera and one-step restoration with Undo/Redo.
+Ten browser cases pass, including WebGL/WebGPU selected-image exports, mocked
+clipboard success/failure, settings restoration, cancellation, physical DPI,
+small-window bounds and OIDN cancellation. Clipboard permission handling is
+mocked there; native image transfer is checked against the actual X11 clipboard.
+The Linux OS-input run also checks image visibility without subsequent input,
+image dimensions and pixels, history browsing, settings restoration and
+camera-preserving Undo/Redo, and cancelling/confirming history deletion without
+terminating the application. Screenshots were inspected. Native and WASM builds
+pass. The Tauri rendering-window and backend/movie integration audit remains open.
+
 ## APBS controls, cancellation and saved potential maps
 
 Native egui and the browser share the APBS electrostatic-potential form. Tauri
