@@ -328,7 +328,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     assert!(HTML.contains("data-center-mark=\"none\">None</button>"));
     assert!(!HTML.contains("Background color: White"));
     assert!(!HTML.contains("Center mark: Cross"));
-    assert_eq!(HTML.matches("class=\"menu-popup has-submenu\"").count(), 2);
+    assert_eq!(HTML.matches("class=\"menu-popup has-submenu\"").count(), 3);
     assert!(CSS.contains(".menu-popup.has-submenu"));
     for command in [
         "undo",

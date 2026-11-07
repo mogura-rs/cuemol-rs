@@ -861,6 +861,19 @@ time/vector fields, selection builders, disabled controls and property reset
 flags can be inspected without changing a scene. The isolated property rows and
 the mock Inspector retain separate values; only Reset clears a modified flag.
 
+### Scene geometry export
+
+Rendering > Export geometry writes the visible scene as binary STL,
+Metasequoia MQO or POV-Ray SDL. These exports use the live camera and scene
+color proofing without changing the scene or its Undo history. The selected
+image-rendering backend does not change the geometry format.
+
+Native applications use a save picker for the chosen format. Keep the generated
+`.inc` beside a native `.pov` file. The browser downloads a standalone `.pov`
+with its geometry included; POV-Ray's standard include library is still needed
+to render it. STL and MQO downloads use the same shared serializers as the native
+application.
+
 ### Image rendering
 
 In the native egui, browser and Tauri frontends, open Render to preview an image

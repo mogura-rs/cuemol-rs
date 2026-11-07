@@ -656,6 +656,7 @@ async function openShell(page, storage = {}, options = {}) {
         target.visible = args.visible;
         return structuredClone(snapshot);
       }
+      if (command === 'export_scene_geometry') return structuredClone(snapshot);
       throw new Error(`Unexpected IPC: ${command}`);
     }}};
     if(options.agent) window.__TAURI__.event={listen:async(name,callback)=>{events.set(name,callback);return ()=>events.delete(name);}};
@@ -670,7 +671,7 @@ async function openShell(page, storage = {}, options = {}) {
       return window.__morphPaths||null;
     },save:async options=>{
       window.__saveDialogOptions=options;
-      return options.defaultPath;
+      return window.__cancelSave ? null : options.defaultPath;
     }};
   }, {storage, options});
   await page.goto('http://tauri.test/');
@@ -3141,5 +3142,25 @@ test('Tauri APBS gates missing tools and cancels a detached pending start by req
   await expect.poll(()=>page.evaluate(()=>window.__apbsJob)).toBeNull();
   await expect(dialog).toBeVisible();
   expect(await page.evaluate(()=>{const calls=window.__shellCalls;return calls.find(c=>c.command==='start_apbs_calculation').args.input.requestId===calls.find(c=>c.command==='cancel_apbs_calculation').args.requestId;})).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri geometry export fixes the format and preserves the scene on picker cancellation', async ({page}) => {
+  const errors = await openShell(page);
+  for (const [format, label] of [['stl','StereoLithography'],['mqo','Metasequoia object'],['pov','POV-Ray SDL']]) {
+    await page.locator('summary').filter({hasText:/^Rendering$/}).click();
+    await page.getByRole('button', {name:'Export geometry',exact:true}).hover();
+    await page.getByRole('button', {name:label,exact:true}).click();
+    await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'export_scene_geometry').at(-1)?.args)).toEqual({path:`Test scene.${format}`,format});
+    expect(await page.evaluate(() => window.__saveDialogOptions)).toEqual({defaultPath:`Test scene.${format}`,filters:[{name:label,extensions:[format]}]});
+  }
+  const before = await page.evaluate(() => window.__shellCalls.filter(call => call.command === 'export_scene_geometry').length);
+  await page.evaluate(() => { window.__cancelSave = true; });
+  await page.locator('summary').filter({hasText:/^Rendering$/}).click();
+  await page.getByRole('button', {name:'Export geometry',exact:true}).hover();
+  await page.getByRole('button', {name:'StereoLithography',exact:true}).click();
+  await expect(page.locator('#status-text')).toHaveText('Ready');
+  expect(await page.evaluate(() => window.__shellCalls.filter(call => call.command === 'export_scene_geometry').length)).toBe(before);
   expect(errors).toEqual([]);
 });

@@ -29,6 +29,7 @@ mod object_export;
 pub mod pdb;
 pub mod render_editor;
 pub mod render_history;
+pub mod scene_export;
 pub use object_export::{prepare_save_object, PreparedObjectSave};
 mod properties;
 pub mod selection;

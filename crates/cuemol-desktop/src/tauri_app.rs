@@ -8301,6 +8301,10 @@ enum ModelRequest {
     ExportPov {
         path: String,
     },
+    ExportGeometry {
+        path: String,
+        format: String,
+    },
     StartPovRender(PovRenderInput),
     PollPovRender,
     CancelPovRender,
@@ -12666,6 +12670,16 @@ fn handle_model_request(
             }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::ExportGeometry { path, format } => {
+            let format = cuemol_command::scene_export::SceneExportFormat::parse(&format)
+                .map_err(|error| error.to_string())?;
+            cuemol_command::scene_export::write_scene_export(
+                &model.desktop, &model.camera, "", format, Path::new(&path),
+            ).map_err(|error| error.to_string())?;
+            model.status = format!("Scene written: {path}");
+            model.log_lines.push(model.status.clone());
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::ExportPov { path } => {
             if path.trim().is_empty() {
                 return Err("a POV-Ray output path is required".to_string());
@@ -16465,6 +16479,18 @@ fn execute_script_file(
 }
 
 #[tauri::command]
+fn export_scene_geometry(
+    path: String,
+    format: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::ExportGeometry { path, format },
+    )?)
+}
+
+#[tauri::command]
 fn export_pov(path: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(&state, ModelRequest::ExportPov { path })?)
 }
@@ -17075,6 +17101,7 @@ pub fn run() -> Result<(), tauri::Error> {
             execute_script,
             execute_script_file,
             export_pov,
+            export_scene_geometry,
             start_pov_render,
             poll_pov_render,
             cancel_pov_render,
@@ -27610,6 +27637,62 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(model.desktop.same_undo_state(&before));
+        assert_eq!(
+            model.desktop.modified_scene_uids(),
+            before.modified_scene_uids()
+        );
+    }
+
+    #[test]
+    fn tauri_geometry_export_writes_selected_format_without_changing_camera_or_history() {
+        let mut model = model_without_gpu();
+        model.desktop.open_bytes("probe.pdb", b"HETATM    1  C1  LIG A   1       2.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let id = model.desktop.active_object_summaries()[0].uid;
+        model
+            .desktop
+            .scene_manager_mut()
+            .object_mut(id)
+            .unwrap()
+            .add_renderer("cpk", "atoms");
+        model.camera.set_center(Vector4::new3(3., -5., 7.));
+        let before = model.desktop.clone();
+        let camera = model.camera.clone();
+        let dir = tempfile::tempdir().unwrap();
+        for format in ["stl", "mqo", "pov"] {
+            let path = dir.path().join(format!("geometry.{format}"));
+            handle_model_request(
+                &mut model,
+                ModelRequest::ExportGeometry {
+                    path: path.to_string_lossy().into_owned(),
+                    format: format.into(),
+                },
+            )
+            .unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(!bytes.is_empty());
+            if format != "pov" {
+                let expected = cuemol_command::scene_export::prepare_scene_export(
+                    &model.desktop,
+                    &camera,
+                    "",
+                    cuemol_command::scene_export::SceneExportFormat::parse(format).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(bytes, expected.bytes);
+            } else {
+                assert!(path.with_extension("inc").is_file());
+            }
+        }
+        assert!(handle_model_request(
+            &mut model,
+            ModelRequest::ExportGeometry {
+                path: dir.path().to_string_lossy().into_owned(),
+                format: "stl".into()
+            }
+        )
+        .is_err());
+        assert!(model.desktop.same_undo_state(&before));
+        assert_eq!(model.camera, camera);
         assert_eq!(
             model.desktop.modified_scene_uids(),
             before.modified_scene_uids()

@@ -2399,6 +2399,7 @@ enum NativeFileDialog {
     SaveRenderedImage,
     SaveRmsdReport,
     ExportScene,
+    ExportGeometry(cuemol_command::scene_export::SceneExportFormat),
     OpenScript,
 }
 
@@ -5647,6 +5648,27 @@ impl GuiApplication {
                         self.choose_export_scene(camera);
                         ui.close();
                     }
+                    ui.menu_button("Export geometry", |ui| {
+                        for (label, format) in [
+                            (
+                                "POV-Ray SDL",
+                                cuemol_command::scene_export::SceneExportFormat::Pov,
+                            ),
+                            (
+                                "StereoLithography",
+                                cuemol_command::scene_export::SceneExportFormat::Stl,
+                            ),
+                            (
+                                "Metasequoia object",
+                                cuemol_command::scene_export::SceneExportFormat::Mqo,
+                            ),
+                        ] {
+                            if ui.button(label).clicked() {
+                                self.choose_export_geometry(camera, format);
+                                ui.close();
+                            }
+                        }
+                    });
                 });
                 ui.menu_button("Scene", |ui| {
                     ui.menu_button("Background", |ui| {
@@ -16314,6 +16336,41 @@ impl GuiApplication {
         }
     }
 
+    fn choose_export_geometry(
+        &mut self,
+        camera: &CameraController,
+        format: cuemol_command::scene_export::SceneExportFormat,
+    ) {
+        let initial = PathBuf::from(&self.export_path).with_extension(format.extension());
+        if let Some(path) = native_file_dialog(
+            NativeFileDialog::ExportGeometry(format),
+            &initial.to_string_lossy(),
+        ) {
+            self.write_geometry_scene(camera, &path, format);
+        }
+    }
+
+    fn write_geometry_scene(
+        &mut self,
+        camera: &CameraController,
+        path: &std::path::Path,
+        format: cuemol_command::scene_export::SceneExportFormat,
+    ) {
+        match cuemol_command::scene_export::write_scene_export(
+            &self.state,
+            &camera.to_qsys_camera("__current"),
+            "",
+            format,
+            path,
+        ) {
+            Ok(()) => {
+                self.export_path = path.to_string_lossy().into_owned();
+                self.set_status(format!("Exported scene to {}", path.display()));
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
     fn choose_export_scene(&mut self, camera: &CameraController) {
         if let Some(path) = native_file_dialog(NativeFileDialog::ExportScene, &self.export_path) {
             self.export_path = path.to_string_lossy().into_owned();
@@ -17370,6 +17427,15 @@ impl GuiApplication {
     }
 
     fn export_current_scene(&mut self, camera: &CameraController) {
+        let path = PathBuf::from(self.export_path.trim());
+        if let Ok(format) = cuemol_command::scene_export::SceneExportFormat::parse(
+            path.extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or(""),
+        ) {
+            self.write_geometry_scene(camera, &path, format);
+            return;
+        }
         if !self.persist_export_camera(camera) {
             return;
         }
@@ -30354,6 +30420,25 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
             default_extension: Some("pov"),
             save: true,
         },
+        NativeFileDialog::ExportGeometry(format) => NativeFileDialogSpec {
+            title: "Select a file to export",
+            filters: match format {
+                cuemol_command::scene_export::SceneExportFormat::Pov => &[NativeFileFilter {
+                    label: "POV-Ray SDL",
+                    extensions: &["pov"],
+                }],
+                cuemol_command::scene_export::SceneExportFormat::Stl => &[NativeFileFilter {
+                    label: "StereoLithography",
+                    extensions: &["stl"],
+                }],
+                cuemol_command::scene_export::SceneExportFormat::Mqo => &[NativeFileFilter {
+                    label: "Metasequoia object",
+                    extensions: &["mqo"],
+                }],
+            },
+            default_extension: Some(format.extension()),
+            save: true,
+        },
         NativeFileDialog::OpenScript => NativeFileDialogSpec {
             title: "Select a File",
             filters: SCRIPT_OPEN_FILTERS,
@@ -32436,6 +32521,51 @@ mod tests {
         assert_eq!(draft.version, crate::GuiQscVersion::Qdf0);
         assert_eq!(draft.compression, crate::GuiQscCompression::Xz);
         assert!(!draft.base64);
+    }
+
+    #[test]
+    fn native_geometry_export_ignores_image_backend_and_preserves_scene_on_failure() {
+        let mut app = GuiApplication::new();
+        app.state.open_bytes("probe.pdb", b"HETATM    1  C1  LIG A   1       2.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let id = app.state.active_object_summaries()[0].uid;
+        app.state
+            .scene_manager_mut()
+            .object_mut(id)
+            .unwrap()
+            .add_renderer("cpk", "atoms");
+        let camera = CameraController {
+            target: Vec3::new(3., -5., 7.),
+            ..Default::default()
+        };
+        app.render_backend = "Umbreon".into();
+        let before = app.state.clone();
+        let dir = tempfile::tempdir().unwrap();
+        for format in [
+            cuemol_command::scene_export::SceneExportFormat::Stl,
+            cuemol_command::scene_export::SceneExportFormat::Mqo,
+        ] {
+            let path = dir.path().join(format!("geometry.{}", format.extension()));
+            app.export_path = path.to_string_lossy().into_owned();
+            app.export_current_scene(&camera);
+            let expected = cuemol_command::scene_export::prepare_scene_export(
+                &app.state,
+                &camera.to_qsys_camera("__current"),
+                "",
+                format,
+            )
+            .unwrap();
+            assert_eq!(std::fs::read(path).unwrap(), expected.bytes);
+        }
+        app.write_geometry_scene(
+            &camera,
+            dir.path(),
+            cuemol_command::scene_export::SceneExportFormat::Stl,
+        );
+        assert!(app.state.same_undo_state(&before));
+        assert_eq!(
+            app.state.modified_scene_uids(),
+            before.modified_scene_uids()
+        );
     }
 
     #[test]

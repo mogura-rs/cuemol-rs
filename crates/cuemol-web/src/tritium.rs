@@ -569,6 +569,17 @@ impl App {
                             self.export_png();
                             ui.close();
                         }
+                        let submenu = ui.menu_button("Export geometry", |ui| {
+                            for (label, format) in [("POV-Ray SDL", "pov"), ("StereoLithography", "stl"), ("Metasequoia object", "mqo")] {
+                                let response = ui.button(label);
+                                self.record_ui_rect(&format!("Export {format}"), &response);
+                                if response.clicked() {
+                                    self.call("export_scene", json!({"path":format!("scene.{format}"), "format":format}));
+                                    ui.close();
+                                }
+                            }
+                        });
+                        self.record_ui_rect("Export geometry", &submenu.response);
                     });
                     self.record_ui_rect("Rendering menu", &rendering_menu.response);
                     let tools_menu = ui.menu_button("Tools", |ui| {

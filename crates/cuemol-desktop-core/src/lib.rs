@@ -15244,6 +15244,42 @@ impl DesktopAppState {
         camera: &Camera,
         options: GuiPovSceneOptions,
     ) -> Result<usize> {
+        let (mut exporter, snapshot, camera, background) =
+            self.prepare_scene_pov_export(scene_uid, selection_text, camera, options)?;
+        let path = path.as_ref();
+        exporter
+            .handler_mut()
+            .set_path(path.to_string_lossy().into_owned());
+        exporter.handler_mut().set_sub_path(
+            "inc",
+            path.with_extension("inc").to_string_lossy().into_owned(),
+        );
+        exporter.write_snapshot_file_with_camera_background(&snapshot, &camera, background)?;
+        Ok(snapshot.atom_count())
+    }
+
+    pub fn scene_pov_source_with_camera(
+        &self,
+        scene_uid: Uid,
+        selection_text: &str,
+        camera: &Camera,
+    ) -> Result<String> {
+        let (mut exporter, snapshot, camera, background) = self.prepare_scene_pov_export(
+            scene_uid,
+            selection_text,
+            camera,
+            GuiPovSceneOptions::default(),
+        )?;
+        exporter.write_snapshot_string_with_camera_background(&snapshot, &camera, background)
+    }
+
+    fn prepare_scene_pov_export(
+        &self,
+        scene_uid: Uid,
+        selection_text: &str,
+        camera: &Camera,
+        options: GuiPovSceneOptions,
+    ) -> Result<(PovSceneExporter, RenderSceneSnapshot, Camera, [f32; 3])> {
         let mut snapshot = self.render_snapshot(scene_uid, selection_text)?;
         self.apply_scene_color_proof_for(scene_uid, &mut snapshot)?;
         let background = self
@@ -15303,16 +15339,7 @@ impl DesktopAppState {
             let styles = self.scene_styles(scene);
             exporter.set_pixel_images(pov_lw_pixel_images(scene, &styles)?);
         }
-        let path = path.as_ref();
-        exporter
-            .handler_mut()
-            .set_path(path.to_string_lossy().into_owned());
-        exporter.handler_mut().set_sub_path(
-            "inc",
-            path.with_extension("inc").to_string_lossy().into_owned(),
-        );
-        exporter.write_snapshot_file_with_camera_background(&snapshot, &camera, background)?;
-        Ok(snapshot.atom_count())
+        Ok((exporter, snapshot, camera, background))
     }
 
     pub fn close_active_scene(&mut self) -> Result<Option<Uid>> {

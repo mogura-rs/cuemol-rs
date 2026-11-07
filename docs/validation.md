@@ -1,5 +1,40 @@
 # Validation evidence
 
+## Scene geometry exports and completed browser baseline
+
+The shell audit found that STL/MQO implementations were not reachable through
+the scene-export menus. Native generic export also treated non-PNG extensions
+as POV, and its previous image-backend choice could block geometry output.
+Native egui, Tauri and browser menus now expose explicit POV, STL and MQO
+operations. A shared preparation function supplies binary STL, text MQO and
+portable POV bytes with the live camera and scene color proofing. POV preparation
+retains scene materials, preamble and background. Native POV output keeps its
+include file; browser output contains its geometry in one downloaded POV file.
+These operations do not modify the scene, saved cameras or Undo history.
+
+Three shared export checks pass on Linux and macOS. They validate binary STL
+records and camera translation, real format contents, native/portable POV
+geometry and background, and state preservation on output failure. The three
+existing core POV checks pass with the reference fixtures present. Native GUI
+checks pass all 234 cases; the new Tauri model case and all 68 shell-contract
+checks also pass. The contract's old fixed count of nested menus was updated
+for the added export submenu.
+
+Two WebGL/WebGPU cases download all three formats and verify their bytes, camera,
+scene and Undo/Redo behavior. A Tauri DOM case verifies format-specific save
+filters and picker cancellation. All three pass. Bundled POV-Ray successfully
+renders both downloaded sources at 320 by 240 pixels, with visible geometry.
+An actual Linux WebKit window also saves all three formats through real native
+pickers, including paths with spaces. File contents, the POV include file,
+camera/history preservation and cancellation pass, and its screenshot was
+inspected. These focused checks do not establish complete menu or platform parity.
+
+Separately, the full browser baseline at `cf1ea5f` completed with all 371 cases
+passing in 43.8 minutes. It used the clean embedded browser distribution and
+precedes the recent-file, current-view and geometry-export additions. Those
+changes have their focused results recorded here; the full run is not evidence
+for the later changes.
+
 ## Current-view file compatibility
 
 The menu audit found a format mismatch behind Save current view. The reference

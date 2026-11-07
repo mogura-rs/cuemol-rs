@@ -16389,6 +16389,22 @@ async function setupApplicationCloseGuard() {
   });
 }
 
+async function exportGeometry(format) {
+  const labels = {pov: "POV-Ray SDL", stl: "StereoLithography", mqo: "Metasequoia object"};
+  if (!Object.hasOwn(labels, format)) return;
+  const sceneId = snapshot?.activeSceneUid;
+  const scene = snapshot?.scenes.find(scene => scene.uid === sceneId);
+  if (!scene) return;
+  const name = (scene.name.trim() || "scene").replace(/[\\/]/g, "_");
+  const path = await dialog?.save?.({
+    defaultPath: `${name}.${format}`,
+    filters: [{name: labels[format], extensions: [format]}],
+  });
+  if (!path) return;
+  if (snapshot?.activeSceneUid !== sceneId) throw new Error("The active scene changed. Reopen the export dialog.");
+  await mutateWithoutViewport("export_scene_geometry", {path, format}, renderStatusAndLog);
+}
+
 async function exportPng() {
   const options = await showPngExportOptions(
     viewportDimensions().width,
@@ -16433,6 +16449,11 @@ async function handleAction(action, depth = 0) {
       break;
     case "export":
       await exportPng();
+      break;
+    case "export-pov":
+    case "export-stl":
+    case "export-mqo":
+      await exportGeometry(action.slice(7));
       break;
     case "new-scene":
       {

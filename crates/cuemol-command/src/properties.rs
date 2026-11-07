@@ -1705,30 +1705,9 @@ fn export(state: &DesktopAppState, camera: &Camera, name: &str, args: &Value) ->
             state.export_active_scene_pov_with_camera(path, "", camera, Default::default())?;
         return Ok(json!({"path":path,"primitives":count}));
     }
-    let mut snapshot = state.active_render_snapshot("")?;
-    state.apply_scene_color_proof(&mut snapshot)?;
-    match format {
-        "stl" => {
-            let exporter = cuemol_render::StlSceneExporter::new();
-            let mesh = cuemol_render::tessellate_snapshot(&snapshot);
-            std::fs::write(
-                path,
-                exporter.write_binary_stl_bytes_with_camera(&mesh, camera),
-            )?;
-        }
-        "mqo" => {
-            let exporter = cuemol_render::MqoSceneExporter::new();
-            std::fs::write(
-                path,
-                exporter.write_snapshot_string_with_camera("scene", &snapshot, camera),
-            )?;
-        }
-        _ => {
-            return Err(CueMolError::invalid_argument(
-                "unsupported scene export format",
-            ))
-        }
-    }
+    let format = crate::scene_export::SceneExportFormat::parse(format)?;
+    let prepared = crate::scene_export::prepare_scene_export(state, camera, "", format)?;
+    std::fs::write(path, prepared.bytes)?;
     Ok(json!({"path":path}))
 }
 

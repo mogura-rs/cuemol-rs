@@ -741,6 +741,24 @@ impl App {
             };
             return;
         }
+        if name == "export_scene" {
+            let path = args["path"].as_str().unwrap_or("scene.pov").to_owned();
+            let format = args["format"]
+                .as_str()
+                .or_else(|| path.rsplit_once('.').map(|(_, ext)| ext))
+                .unwrap_or("pov");
+            if format.eq_ignore_ascii_case("png") {
+                let mut args = args.clone();
+                args["fileName"] = json!(path);
+                self.render_async("render_image", &args, Some(path.to_owned()), false);
+            } else {
+                self.message = match self.export_scene_download(&path, format) {
+                    Ok(()) => format!("Exported {path}"),
+                    Err(error) => format!("Error: {error}"),
+                };
+            }
+            return;
+        }
         if name == "save_object" {
             self.message = match self.save_command_object_download(&args) {
                 Ok(result) => result.to_string(),
@@ -789,6 +807,24 @@ impl App {
         }
         self.call_shared(name, args);
     }
+    fn export_scene_download(&self, path: &str, format: &str) -> Result<(), String> {
+        let format = cuemol_command::scene_export::SceneExportFormat::parse(format)
+            .map_err(|error| error.to_string())?;
+        let prepared = cuemol_command::scene_export::prepare_scene_export(
+            &self.state,
+            &self.camera,
+            "",
+            format,
+        )
+        .map_err(|error| error.to_string())?;
+        let name = path
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|value| !value.is_empty())
+            .unwrap_or("scene");
+        download(name, &prepared.bytes, prepared.mime).map_err(js_error)
+    }
+
     fn save_command_object_download(&mut self, args: &Value) -> Result<Value, String> {
         let prepared =
             cuemol_command::prepare_save_object(&self.state, args).map_err(|e| e.to_string())?;
