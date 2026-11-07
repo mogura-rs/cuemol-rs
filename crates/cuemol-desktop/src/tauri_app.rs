@@ -43,6 +43,8 @@ mod console;
 mod inspector;
 #[path = "tauri_mcp.rs"]
 mod mcp_bridge;
+#[path = "tauri_rendering.rs"]
+mod rendering;
 
 const MAX_VIEW_DIM: u32 = 4_096;
 const MIN_INTERACTIVE_RENDER_SCALE: f64 = 0.5;
@@ -1639,6 +1641,7 @@ struct AppModel {
     apbs_job: Option<TauriApbsJob>,
     pov_render_job: Option<TauriPovRenderJob>,
     pov_render_result: Option<TauriPovRenderResult>,
+    rendering: rendering::Rendering,
     animation_render_job: Option<TauriAnimationRenderJob>,
     log_lines: Vec<String>,
     status: String,
@@ -1868,6 +1871,7 @@ impl AppModel {
             apbs_job: None,
             pov_render_job: None,
             pov_render_result: None,
+            rendering: Default::default(),
             animation_render_job: None,
             remote_revision: 0,
             numeric_preview: None,
@@ -7711,6 +7715,7 @@ impl AppModel {
     }
 
     fn undo(&mut self, depth: usize) -> Result<(), String> {
+        self.flush_rendering()?;
         let count = depth.saturating_add(1).min(self.undo_stack.len());
         if count == 0 {
             self.status = "Nothing to undo".to_string();
@@ -7749,6 +7754,7 @@ impl AppModel {
     }
 
     fn redo(&mut self, depth: usize) -> Result<(), String> {
+        self.flush_rendering()?;
         let count = depth.saturating_add(1).min(self.redo_stack.len());
         if count == 0 {
             self.status = "Nothing to redo".to_string();
@@ -7794,6 +7800,10 @@ impl AppModel {
 }
 
 enum ModelRequest {
+    Rendering {
+        operation: String,
+        args: serde_json::Value,
+    },
     LocalApiReady,
     UpdateRequest(String),
     AgentReady,
@@ -9840,6 +9850,7 @@ fn handle_model_request(
             model.updates.poll(model.desktop.config_value("updates:check")!="false",model.agent_wake.clone());
             Ok(ModelResponse::Inspector(serde_json::to_value(model.updates.snapshot()).map_err(|error|error.to_string())?))
         }
+        ModelRequest::Rendering { operation, args } => Ok(ModelResponse::Inspector(model.rendering_request(&operation, &args)?)),
         ModelRequest::Agent { operation, args } => Ok(ModelResponse::Inspector(model.agent_request(&operation, args)?)),
         ModelRequest::LocalApiReady | ModelRequest::AgentReady | ModelRequest::Shutdown => Ok(ModelResponse::Message(String::new())),
         ModelRequest::Inspector { tool, args } => Ok(ModelResponse::Inspector(model.inspector_request(&tool, &args)?)),
@@ -13340,6 +13351,7 @@ fn handle_model_request(
             )))
         }
         ModelRequest::SaveScene { path, options } => {
+            model.flush_rendering()?;
             let path_buf = PathBuf::from(&path);
             let save_in_place = model
                 .desktop
@@ -13449,6 +13461,12 @@ fn spawn_model(initial_paths: Vec<PathBuf>, app: tauri::AppHandle) -> ManagedSta
             let mut api = cuemol_command::transport::GuiApiServer::default();
             let mut protocol = cuemol_command::Protocol::without_history();
             loop {
+                if model.rendering_pending() {
+                    model.poll_rendering();
+                }
+                if model.take_rendering_change() {
+                    let _ = app.emit("cuemol-model-changed", ());
+                }
                 if model.updates.poll(
                     model.desktop.config_value("updates:check") != "false",
                     model.agent_wake.clone(),
@@ -13500,7 +13518,8 @@ fn spawn_model(initial_paths: Vec<PathBuf>, app: tauri::AppHandle) -> ManagedSta
                     model.mcp_listen_port = api.port();
                     let _ = app.emit("cuemol-model-changed", ());
                 }
-                let envelope = if model.remote_console.is_some()
+                let envelope = if model.rendering_pending()
+                    || model.remote_console.is_some()
                     || model.updates.pending_startup()
                     || model
                         .apbs_job
@@ -16427,6 +16446,18 @@ fn update_request(
 }
 
 #[tauri::command]
+fn rendering_request(
+    operation: String,
+    args: serde_json::Value,
+    state: State<'_, ManagedState>,
+) -> Result<serde_json::Value, String> {
+    match request_model(&state, ModelRequest::Rendering { operation, args })? {
+        ModelResponse::Inspector(value) => Ok(value),
+        _ => Err("Unexpected rendering response".into()),
+    }
+}
+
+#[tauri::command]
 fn agent_request(
     operation: String,
     args: serde_json::Value,
@@ -16930,6 +16961,7 @@ pub fn run() -> Result<(), tauri::Error> {
         .invoke_handler(tauri::generate_handler![
             update_request,
             agent_request,
+            rendering_request,
             get_snapshot,
             get_density_histogram,
             get_molecule_details,
@@ -17529,6 +17561,7 @@ mod tests {
             apbs_job: None,
             pov_render_job: None,
             pov_render_result: None,
+            rendering: Default::default(),
             animation_render_job: None,
             remote_revision: 0,
             numeric_preview: None,

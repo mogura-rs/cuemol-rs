@@ -847,15 +847,15 @@ the mock Inspector retain separate values; only Reset clears a modified flag.
 
 ### Image rendering
 
-In the native egui and browser frontends, open Render to preview an image before
-saving it. The Image tab sets size, physical units, DPI and transparency. The
+In the native egui, browser and Tauri frontends, open Render to preview an image
+before saving it. Tauri also exposes Rendering > Image Rendering. The Image tab sets size, physical units, DPI and transparency. The
 Render tab contains independent supersampling, lighting, AO quality, GI lighting
 and shadow choices, with grouped advanced controls. NPR offers raytracing or AO;
 its Detail tab edits hatch layers and tone specifications. Selecting a quality
 step changes its own settings, while manual edits are reflected as Custom.
 Switching the rendering backend retains each backend's scene settings.
 
-The native window also offers POV-Ray, including radiosity, lighting, shadows,
+The native egui and Tauri windows also offer POV-Ray, including radiosity, lighting, shadows,
 stereo, clipping and post-blending. The POV-Ray menu opens this same window.
 It uses the executable and include directory selected in Settings > Tools,
 falling back to the bundled executable. Missing tools appear beside the disabled
@@ -894,9 +894,10 @@ framing, with the zoom adjusted for a different image size. Clipboard errors
 appear in the bounded, scrollable log. POV-Ray also streams its process output
 there. Large previews use multiple GPU textures to preserve full-resolution
 viewing on devices with smaller texture limits; Save and Copy retain the original
-PNG. Tauri still uses its separate POV-Ray and
-animation windows; integrating its render history is tracked in the implementation
-checklist.
+PNG. Tauri uses its webview image element for the same full-resolution preview.
+Its modeless Rendering window retains history when closed, and its target selector
+waits for the new scene settings before accepting edits. Animation rendering still
+uses a separate window.
 
 Umbreon is implemented in Rust and uses a BVH for primary, shadow, AO, and GI
 rays. Its script exporter applies typed scene render settings, including physical

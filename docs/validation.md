@@ -1,5 +1,51 @@
 # Validation evidence
 
+## Tauri shared Rendering window
+
+Tauri now presents Image, Render and NPR Detail tabs over the shared typed editor,
+render targets and image history. Both the Image Rendering menu and toolbar open
+this window; the POV-Ray menu selects its backend. The old separate POV form is
+removed from the shell, while its existing Rust commands remain compatible.
+Settings include physical units, DPI, backend-specific quality controls and editable
+NPR layers, shading and specification text. Each completed image records its source
+settings, dimensions and elapsed time; Save, Copy, Settings and Use Settings operate
+on the selected record. Closing the window retains its history and running worker.
+Application shutdown cancels and briefly joins the worker.
+
+The model prepares on its own thread and runs the shared renderer in a cancellable
+worker. It keeps completed images in the bounded disk history and returns PNG bytes
+only when the selected record changes. Reading image dimensions does not decode a
+second full-resolution pixel buffer. Initial rendering persists the displayed
+defaults, and pending edits flush before Undo, Redo and scene saving. A scene switch
+flushes edits to their original target. Stale edits and stale image actions fail
+explicitly. The live check exposed a race when a field was edited immediately after
+changing the target: the shell now disables editing until the target response and
+rebuilds its controls for the new scene/view. Settings changes notify the main
+shell so modified markers and Undo controls refresh; window shortcuts flush their
+pending edits before Undo/Redo.
+
+Six focused model regressions pass, including actual image generation, default
+sizes, cancellation/failure preservation, worker cleanup, target guards, immediate
+Undo, backend settings, units, NPR specifications and history output/restoration.
+The full macOS Tauri model suite passes 200 tests with five pre-existing ignored
+checks. All 81 Tauri DOM cases pass; the three Rendering cases pass again after
+target gating, captured-settings viewing, initial fit, wheel/pinch controls and
+Undo/Redo shortcuts were completed. The macOS Tauri application builds. A headless Chrome run connects the real Rust model to the actual Rendering
+JavaScript through a local JSON test adapter. It passes transparent molecular PNG
+output, byte-identical file saving, the model clipboard path, physical-unit
+round-trips, a second target, source-settings restoration, cancellation with previous
+results retained, NPR edits and unchanged active scene/camera. Screenshots were
+inspected. This verifies the model/DOM boundary; it is not an OS clipboard or native
+WebView input test. The local fixture lacks OIDN, so this live run uses raytracing
+without GI; the missing-runtime error also preserves the prior image.
+
+The obsolete source-string compatibility suite reports 23 failures both before and
+after this change. Its older assertions refer to removed labels, previous dialogs
+and code moved into modules. The new Rendering contract passes; those baseline
+checks require reconciliation with the current behavior. Usage previously said
+Tauri retained a separate POV-Ray window without render history; it now describes
+the shared window. Movie integration and target-scoped Undo remain separate work.
+
 ## Shared POV-Ray still-image rendering
 
 The native egui Rendering window now runs POV-Ray alongside Umbreon and NPR.

@@ -4,6 +4,9 @@ const JS: &str = include_str!("../tauri-ui/app.js");
 const CAPABILITIES: &str = include_str!("../capabilities/default.json");
 const NATIVE_GUI_RS: &str = include_str!("../src/gui.rs");
 const TAURI_APP_RS: &str = include_str!("../src/tauri_app.rs");
+const RENDERING_JS: &str = include_str!("../tauri-ui/rendering.js");
+const RENDERING_RS: &str = include_str!("../src/tauri_rendering.rs");
+const RENDERING_CATALOG: &str = include_str!("../../cuemol-command/src/render_editor_catalog.json");
 const DESKTOP_LIB_RS: &str = include_str!("../src/lib.rs");
 
 #[test]
@@ -340,11 +343,6 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "start_apbs_calculation",
         "poll_apbs_calculation",
         "cancel_apbs_calculation",
-        "start_pov_render",
-        "poll_pov_render",
-        "cancel_pov_render",
-        "save_pov_render_image",
-        "clear_pov_render_result",
         "initialize_morph_object",
         "append_morph_frame",
         "insert_morph_frame_from_file",
@@ -1202,7 +1200,7 @@ fn morph_animation_tool_uses_the_reference_frame_columns() {
         .nth(1)
         .and_then(|source| {
             source
-                .split("} else if (title === \"POV-Ray rendering\") {")
+                .split("} else if (title === \"Animation rendering\") {")
                 .next()
         })
         .expect("morph animation dialog");
@@ -1621,55 +1619,53 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
 }
 
 #[test]
-fn pov_render_matches_the_reference_options_and_cancellable_flow() {
+fn rendering_window_uses_shared_settings_history_and_cancellable_worker() {
+    assert!(HTML.contains("data-dialog=\"Rendering\""));
+    assert!(JS.contains("await CueMolRendering.open("));
+    assert!(HTML.contains("./rendering.js"));
+    assert!(HTML.contains("./rendering.css"));
     for label in [
-        "Main options",
-        "Preset size",
-        "Same as view",
-        "1200x1200@600dpi",
         "Projection",
         "Stereo depth",
-        "Transp background",
-        "Clipping plane",
         "Post-render alpha blending",
-        "Edge lines",
-        "Pix labels",
-        "POV-Ray options",
-        "Povray-exe-path",
-        "Povray-inc-path",
+        "Pixel labels",
         "Radiosity",
-        "Use default settings",
-        "Save image…",
-        "Copy to clipboard",
-        "Unzoom",
-        "const zoomLevels = [10, 25, 50, 75, 100, 125, 150, 200, 300]",
-        "`${scene.uid},${view.uid}`",
-        "sceneUid",
-        "viewUid",
-        "Rendered image is not saved. Save image?",
-        "Don't Save",
     ] {
-        assert!(JS.contains(label), "missing POV-Ray option {label}");
-    }
-    for command in [
-        "start_pov_render",
-        "poll_pov_render",
-        "cancel_pov_render",
-        "save_pov_render_image",
-        "clear_pov_render_result",
-    ] {
-        assert!(JS.contains(command), "missing POV-Ray flow {command}");
         assert!(
-            TAURI_APP_RS.contains(command),
-            "missing POV-Ray command {command}"
+            RENDERING_CATALOG.contains(label),
+            "missing shared setting {label}"
         );
     }
-    assert!(NATIVE_GUI_RS.contains("fn start_pov_render"));
-    assert!(NATIVE_GUI_RS.contains("fn poll_pov_render"));
-    assert!(NATIVE_GUI_RS.contains("fn persist_pov_render_settings"));
-    assert!(DESKTOP_LIB_RS.contains("run_pov_process"));
-    assert!(TAURI_APP_RS.contains("overlay_pov_labels(&output.output_path, &job.labels)"));
-    assert!(CSS.contains(".pov-preview-scroll"));
+    for label in [
+        "Start Render",
+        "Stop",
+        "Save Image",
+        "Copy Image",
+        "Use Settings",
+        "Clear History",
+        "NPR Detail",
+        "Render target",
+    ] {
+        assert!(
+            RENDERING_JS.contains(label),
+            "missing render control {label}"
+        );
+    }
+    for behavior in [
+        "RenderEditor",
+        "RenderHistory",
+        "prepare_render",
+        "run_with_cancel",
+        "write_png",
+        "push_undo_for_scene",
+    ] {
+        assert!(
+            RENDERING_RS.contains(behavior),
+            "missing shared behavior {behavior}"
+        );
+    }
+    assert!(TAURI_APP_RS.contains("rendering_request,"));
+    assert!(!JS.contains("await invoke(\"start_pov_render\""));
 }
 
 #[test]
