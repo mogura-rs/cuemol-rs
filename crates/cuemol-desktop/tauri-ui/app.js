@@ -16163,15 +16163,16 @@ async function openScene() {
 }
 
 let fileBatchOpening = false;
-async function openSelectedPaths(paths, dropped = false) {
+async function openSelectedPaths(paths, dropped = false, shell = false) {
   if (fileBatchOpening) return false;
   fileBatchOpening = true;
-  try { return await openSelectedPathsBatch(paths, dropped); }
+  try { return await openSelectedPathsBatch(paths, dropped, shell); }
   finally { fileBatchOpening = false; }
 }
 
-async function openSelectedPathsBatch(paths, dropped) {
+async function openSelectedPathsBatch(paths, dropped, shell = false) {
   const openContext = { target: dropped ? preferences?.dropTarget || "active" : "active" };
+  if (shell) openContext.shell = true;
   const pin = () => {
     if (openContext.sceneId == null) openContext.sceneId = snapshot?.scenes.find(scene => scene.active)?.uid;
   };
@@ -17445,9 +17446,17 @@ async function start() {
     }).observe(viewport);
     if (initial.startupPathsPending) {
       requestAnimationFrame(() => {
-        setTimeout(() => {
+        setTimeout(async () => {
           statusText.textContent = "Loading startup files…";
-          void mutateWithViewport("open_initial_paths");
+          try {
+            const paths = await invoke("take_initial_paths");
+            await openSelectedPaths(paths, false, true);
+            if (statusText.textContent === "Loading startup files…") {
+              statusText.textContent = snapshot?.status || "Ready";
+            }
+          } catch (error) {
+            showError(error);
+          }
         }, 0);
       });
     }

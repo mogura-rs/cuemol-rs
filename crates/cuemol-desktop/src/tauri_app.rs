@@ -14957,6 +14957,20 @@ fn open_scene(
 }
 
 #[tauri::command]
+fn take_initial_paths(state: State<'_, ManagedState>) -> Result<Vec<PathBuf>, String> {
+    let paths = state
+        .startup_paths
+        .lock()
+        .map_err(|_| "startup path state is unavailable".to_string())?
+        .take()
+        .unwrap_or_default();
+    if !paths.is_empty() {
+        let _ = request_model(&state, ModelRequest::StartRendererWarmup)?;
+    }
+    Ok(paths)
+}
+
+#[tauri::command]
 fn open_initial_paths(
     width: u32,
     height: u32,
@@ -16962,6 +16976,7 @@ pub fn run() -> Result<(), tauri::Error> {
             open_paths,
             open_scene,
             open_initial_paths,
+            take_initial_paths,
             reload_scene,
             get_pdb_history,
             get_pdb_info,

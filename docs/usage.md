@@ -61,6 +61,9 @@ it does not require filesystem paths.
 
 Native egui, the browser and Tauri show options before loading each supported
 object file, including ordinary molecule opens, drops and file-manager inputs.
+Tauri startup arguments use this same form and retain the shell-open destination
+preference. Cancelling one file continues with the remaining startup paths;
+cancelling all of them leaves the initial scene untouched.
 The dialog provides reader settings, object/renderer names, renderer types or
 presets, selection and view centering. Without compatible history, molecules default to Automatic
 representations, which creates protein ribbons, nucleotide cartoons and

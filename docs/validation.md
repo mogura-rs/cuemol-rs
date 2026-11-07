@@ -1,5 +1,42 @@
 # Validation evidence
 
+## Tauri startup options and native WebKit verification
+
+Tauri startup arguments previously used a direct loading command and bypassed
+the per-file reader/renderer form. Both the shell regression and an actual Linux
+WebKit window reproduced the bypass. Startup now drains its pending paths once
+and uses the same per-file workflow as menu opens, retaining the shell destination
+policy. Cancelling a file leaves it unopened, and later accepted files share the
+first successful destination. Cancelling the entire batch clears the loading
+message. The older usage statement that every supported object open showed
+options omitted this startup exception; the implementation now matches it.
+
+All 85 Tauri shell/Rendering DOM checks and 68 shell contracts pass. Two new DOM
+checks cover startup batching and cancellation; existing file/drop checks remain
+green. Three focused Tauri file-option model checks pass. Both Linux and macOS
+Tauri binaries build, and formatting and diff checks pass. The source contracts
+now check the path-draining and options workflow instead of direct startup loads.
+
+An isolated Linux WebKit session drives the actual Tauri binary through OS mouse
+and keyboard input, with real IPC and filesystem output. It accepts startup
+options, draws the molecule, edits NPR Strength/Curve, performs keyboard
+Undo/Redo, resets the style and changes backends. It renders a 64-by-48 image,
+and the system clipboard contains matching RGBA pixels. Screenshots are captured
+after the WebView has painted and were inspected. The native GTK Save dialog
+writes the chosen PNG path with identical bytes, including a filename with spaces.
+
+Using an animation prepared through real IPC, the same window renders three
+64-by-48 frames at 29.97 fps and encodes MP4. The bundled FFmpeg decodes three
+distinct frames. OS slider input selects the exact first PNG, and native Save
+Movie As writes identical movie bytes. Re-encoding at 12.5 fps after deleting the
+animation preserves every source frame's bytes and timestamp. Cancelled Cleanup
+keeps the files; confirmed Cleanup removes the matching outputs and retains the
+cached preview. The live view stays unchanged. These checks use the actual
+WebView and native pickers; neither IPC nor the picker results are substituted.
+The earlier Chrome-adapter restrictions below therefore no longer apply to
+these Linux paths. External Open/Reveal applications, macOS screen/input
+permissions and other platform window integration remain separate checks.
+
 ## NPR Detail controls and value preservation
 
 All three frontends now use the shared hatch-field definitions, including primary

@@ -114,7 +114,7 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
         "molecule_selection_action",
         "sequence_action",
         "get_molecule_details",
-        "open_initial_paths",
+        "take_initial_paths",
         "open_scene",
     ] {
         assert!(JS.contains(command), "missing IPC binding {command}");
@@ -1024,7 +1024,8 @@ fn tauri_startup_uses_a_compact_critical_ipc_and_lazy_molecule_details() {
     assert!(secondary_render.contains("if (sidePanelIsExpanded(\"Symmetry\")) renderSymmetry()"));
     assert!(secondary_render.contains("[data-bottom-panel=\"trajectory\"]"));
     assert!(secondary_render.contains("[data-bottom-panel=\"animation\"]"));
-    assert!(JS.contains("void mutateWithViewport(\"open_initial_paths\")"));
+    assert!(JS.contains("await invoke(\"take_initial_paths\")"));
+    assert!(JS.contains("await openSelectedPaths(paths, false, true)"));
     assert!(JS.contains("mutateWithViewport(\"open_paths\""));
     assert!(JS.contains("mutateWithViewport('open_pdb'"));
     assert!(JS.contains("/^[0-9][0-9a-z]{3}$/i"));

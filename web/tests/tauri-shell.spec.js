@@ -214,7 +214,9 @@ async function openShell(page, storage = {}, options = {}) {
         if(operation==='clear') {agent.messages=[];agent.message='';}
         return {agent};
       }
-      if (command === 'get_initial_state') return {snapshot, viewport, preferences: options.picking ? structuredClone(preferences) : options.files ? {dropTarget:'new',plugins:preferences.plugins} : {plugins:preferences.plugins}, startupPathsPending: false};
+      if (command === 'get_initial_state') return {snapshot, viewport, preferences: options.picking ? structuredClone(preferences) : options.files ? {dropTarget:'new',plugins:preferences.plugins} : {plugins:preferences.plugins}, startupPathsPending: !!options.startupPaths?.length};
+      if (command === 'take_initial_paths') return options.startupPaths || [];
+      if (command === 'open_initial_paths') return {snapshot,viewport};
       if (command === 'get_preferences') return structuredClone(preferences);
       if (command === 'set_preferences') { preferences=structuredClone(args.preferences);return {preferences,status:'Options updated'}; }
       if (command === 'get_snapshot') return snapshot;
@@ -672,7 +674,7 @@ async function openShell(page, storage = {}, options = {}) {
     }};
   }, {storage, options});
   await page.goto('http://tauri.test/');
-  await expect(page.locator('#status-text')).toHaveText('Ready');
+  if (!options.startupPaths?.length) await expect(page.locator('#status-text')).toHaveText('Ready');
   await expect(page.locator('#error-alert-dialog')).not.toBeVisible();
   return errors;
 }
@@ -2661,6 +2663,38 @@ test('secondary dialog gates modes, preserves errors, remembers molecule and res
   expect(errors).toEqual([]);
 });
 
+
+test('Tauri startup files wait for per-file options and retain shell destination context',async({page})=>{
+  const errors=await openShell(page,{}, {files:true,fileDefaults:true,empty:true,startupPaths:['first.pdb','second.pdb','third.pdb']});
+  const dialog=page.locator('#reference-dialog');
+  await expect(dialog.getByLabel('Object:',{exact:true})).toHaveValue('first');
+  expect(await page.evaluate(()=>window.__shellCalls.filter(c=>['open_paths','open_initial_paths','open_path_with_renderer_setup'].includes(c.command)))).toEqual([]);
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  await expect(dialog.getByLabel('Object:',{exact:true})).toHaveValue('second');
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await expect(dialog.getByLabel('Object:',{exact:true})).toHaveValue('third');
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  const calls=await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='open_path_with_renderer_setup'));
+  expect(calls.map(call=>call.args.path)).toEqual(['second.pdb','third.pdb']);
+  expect(calls[0].args.openContext.shell).toBe(true);
+  expect(calls[0].args.openContext.sceneId).toBeUndefined();
+  expect(calls[1].args.openContext.shell).toBe(true);
+  expect(calls[1].args.openContext.sceneId).toBe(1);
+  expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='take_initial_paths').length)).toBe(1);
+  expect(errors).toEqual([]);
+});
+
+test('cancelling every Tauri startup file clears the loading status without opening files',async({page})=>{
+  const errors=await openShell(page,{}, {files:true,fileDefaults:true,empty:true,startupPaths:['cancelled.pdb']});
+  const dialog=page.locator('#reference-dialog');
+  await expect(dialog.getByLabel('Object:',{exact:true})).toHaveValue('cancelled');
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.locator('#status-text')).toHaveText('Ready');
+  expect(await page.evaluate(()=>window.__shellCalls.filter(c=>['open_paths','open_initial_paths','open_path_with_renderer_setup'].includes(c.command)))).toEqual([]);
+  expect(errors).toEqual([]);
+});
 
 test('Tauri file opens show options for each file and preserve automatic representations',async({page},testInfo)=>{
   const errors=await openShell(page,{}, {files:true,fileDefaults:true});
