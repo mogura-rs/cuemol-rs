@@ -906,10 +906,12 @@ In all three frontends, Rendering > Image rendering opens the preview controls
 with the still-image size preset. Rendering > Movie rendering selects movie
 mode and its size preset. Window > Rendering Window reopens the existing
 controls without resetting the mode, size, target, history or movie preferences.
-The current native frontends still host these controls inside the main window;
-a separate OS window remains pending. The Image tab sets size, physical units,
-DPI and transparency. The
-Render tab contains independent supersampling, lighting, AO quality, GI lighting
+Native egui opens these controls in a separate OS window. Closing it retains
+its image history, framing, mode and settings, and an active render continues in
+the background. Reopening reuses the same window; its position and dimensions
+are saved separately from the main window. Tauri currently keeps its controls
+inside the main window. The Image tab sets size, physical units, DPI and
+transparency. The Render tab contains independent supersampling, lighting, AO quality, GI lighting
 and shadow choices, with grouped advanced controls. NPR offers raytracing or AO;
 its Detail tab edits hatch layers and tone specifications. Selecting a quality
 step changes its own settings, while manual edits are reflected as Custom.
@@ -928,8 +930,9 @@ up to 64 layers are supported. Opening Detail does not clamp saved values to the
 controls' input ranges, and changing away from NPR returns to the Render tab.
 
 The native egui and Tauri windows also offer POV-Ray, including radiosity, lighting, shadows,
-stereo, clipping and post-blending. The POV-Ray menu opens this same window.
-It uses the executable and include directory selected in Settings > Tools,
+stereo, clipping and post-blending. Select POV-Ray from the rendering backend
+control. It uses the executable and include directory selected in the Tools
+preferences under Edit > Options,
 falling back to the bundled executable. Missing tools appear beside the disabled
 Start button. The browser can edit and save these settings, but POV-Ray execution
 requires the native application. Shared image commands also use a scene's selected

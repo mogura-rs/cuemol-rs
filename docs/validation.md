@@ -1,5 +1,54 @@
 # Validation evidence
 
+## Native egui Rendering as a separate OS window
+
+The native egui frontend now creates one independently decorated Rendering
+window. It shares the existing graphics device, queue and application model;
+it does not create another molecule snapshot or application/API server. Its
+own egui context and renderer keep input, preview textures and focus separate
+from the molecular viewport. Closing the window hides it and flushes pending
+settings without cancelling the worker. Reopening retains image history,
+framing, mode and settings. Window geometry is saved independently.
+
+The rendering controls previously reused the generic tool-dialog slot, so
+opening another tool hid them. Rendering now has independent visibility. An
+initial full-window layout exceeded the viewport by its frame margins; the
+controls now use a central panel. A regression covers wide and narrow resizes.
+Still-render elapsed time uses the native worker clock even while its window
+is hidden and no egui frame clock advances.
+
+Validation:
+
+- Native GUI: 239 passed, including independent tool visibility, settings flush
+  and worker survival after close. The subsequent close-redraw adjustment also
+  passes its focused regression and native build.
+- Shared UI: 76 passed, including resize bounds and worker elapsed time.
+- Browser Rendering: all 25 cases passed before the native-only layout branch
+  was replaced. The final rebuilt browser passes five focused cases covering
+  reopen, PNG/DPI output and target-scoped keyboard history on WebGL/WebGPU.
+- Actual Linux X11 windows: independent movement, settings entry, still output,
+  native PNG save, matching clipboard pixels, Main Window focus, concurrent tool
+  display and close/reopen through both the OS and Ctrl-W have passed. The
+  saved PNG retains 80 × 60 pixels and 150 DPI; clipboard encoding differs but
+  decoded pixels match. With Rendering hidden, a 64 × 48 movie progressed from
+  7 saved frames to all 31 while a concurrent scene rename and the main camera
+  remained intact. A longer job stopped after 465 of 1801 frames and stayed
+  stopped. Closing the OS title-bar button hides only Rendering; saving the
+  scene and closing Main exits successfully with the hidden child retained.
+  The final config keeps independent main and Rendering dimensions/positions.
+
+Evidence is in `.cache/current-audit/native-render-window-wm.log` and
+`.cache/current-native-render-window/`, including the saved image and screenshots.
+Initial harness failures were corrected for reparented X11 coordinates,
+menu-focus timing, nonexistent tool names, a missing custom output folder and
+clipboard byte comparison. The successful checks above use actual OS input;
+they do not infer window behavior from a source contract.
+
+The Linux run used a window manager for decorated-window checks. macOS and
+Windows window-manager integration remains unverified for this change. Tauri
+still hosts Rendering inside its main window and needs its own OS-window
+integration. The previous menu section records the earlier in-window state.
+
 ## Current application menu and Rendering reopen behavior
 
 The current reference removed the old New Window, hardware-stereo placeholder,

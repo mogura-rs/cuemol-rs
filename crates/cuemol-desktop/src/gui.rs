@@ -13,6 +13,8 @@ mod image_export;
 mod movie;
 #[path = "navigation.rs"]
 mod navigation;
+#[path = "gui_render_window.rs"]
+mod render_window;
 #[path = "tritium.rs"]
 mod tritium;
 #[path = "updates.rs"]
@@ -247,6 +249,8 @@ struct NativeRunner {
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     gpu: Option<GpuState>,
+    render_window: Option<render_window::RenderWindow>,
+    render_tick_at: Option<Instant>,
     gpu_init_receiver: Option<mpsc::Receiver<Result<GpuState>>>,
     config_init_receiver: Option<mpsc::Receiver<NativeConfigSource>>,
     event_proxy: EventLoopProxy<()>,
@@ -272,6 +276,8 @@ impl NativeRunner {
             egui_ctx,
             egui_state: None,
             gpu: None,
+            render_window: None,
+            render_tick_at: None,
             gpu_init_receiver: None,
             config_init_receiver: None,
             event_proxy,
@@ -335,6 +341,11 @@ impl ApplicationHandler for NativeRunner {
         let _ = self.guard_gui_callback(event_loop, "user_event", |this, event_loop| {
             this.poll_gpu_init(event_loop);
             this.poll_config_init(event_loop);
+            if let Some(render) = &this.render_window {
+                if render.visible {
+                    render.window.request_redraw();
+                }
+            }
         });
     }
 }
@@ -471,7 +482,9 @@ impl NativeRunner {
         match result {
             Some(Ok(config)) => {
                 self.config_init_receiver = None;
-                self.app = Some(GuiApplication::new_with_config_source(config));
+                let mut app = GuiApplication::new_with_config_source(config);
+                app.native_render_window = true;
+                self.app = Some(app);
                 if let (Some(window), Some(app)) = (&self.window, &self.app) {
                     apply_native_window_geometry(window, load_native_window_geometry(&app.state));
                     window.request_redraw();
@@ -494,6 +507,14 @@ impl NativeRunner {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self
+            .render_window
+            .as_ref()
+            .is_some_and(|render| render.window.id() == window_id)
+        {
+            self.render_window_event(event_loop, event);
+            return;
+        }
         let Some(window) = self.window.as_ref().cloned() else {
             return;
         };
@@ -563,6 +584,9 @@ impl NativeRunner {
         let Some(app) = self.app.as_mut() else {
             return;
         };
+        if matches!(event, WindowEvent::Focused(true)) {
+            app.ray_panel.focused = false;
+        }
         let _ = gpu.device.poll(wgpu::PollType::Poll);
         app.pick_cache = gpu.picking.cache();
         if app.handle_window_event(&event, &mut gpu.camera) {
@@ -641,6 +665,11 @@ impl NativeRunner {
                     Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
                     Err(wgpu::SurfaceError::Timeout) => {}
                     Err(_) => {}
+                }
+                if let Some(render) = &self.render_window {
+                    if render.visible {
+                        render.window.request_redraw();
+                    }
                 }
                 if self.egui_ctx.has_requested_repaint() || gpu.effects_pending {
                     needs_redraw = true;
@@ -824,6 +853,7 @@ impl NativeRunner {
             }
             app.file_drop_batch = None;
         }
+        self.sync_render_window(event_loop);
         if self.should_exit_now() {
             event_loop.exit();
         }
@@ -1166,6 +1196,7 @@ struct NativeFileReaderOptions<'a> {
 
 #[derive(Debug)]
 struct NativeRenderWorker {
+    started_at: Instant,
     cancel: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -1351,6 +1382,10 @@ struct GuiApplication {
     umbreon_denoise: UmbreonDenoiseMode,
     ray_size: [u32; 2],
     ray_panel: cuemol_ui::RenderPanel,
+    render_visible: bool,
+    native_render_window: bool,
+    render_focus_requested: bool,
+    main_focus_requested: bool,
     ray_movie_job: Option<cuemol_command::movie::MovieJob>,
     ray_movie_preview_at: Option<Instant>,
     ray_cancel: Option<Arc<AtomicBool>>,
@@ -4623,6 +4658,10 @@ impl GuiApplication {
             umbreon_denoise: UmbreonDenoiseMode::default(),
             ray_size: [1200, 900],
             ray_panel: cuemol_ui::RenderPanel::default(),
+            render_visible: false,
+            native_render_window: false,
+            render_focus_requested: false,
+            main_focus_requested: false,
             ray_movie_job: None,
             ray_movie_preview_at: None,
             ray_cancel: None,
@@ -5037,7 +5076,9 @@ impl GuiApplication {
         self.poll_animation_render(camera);
         self.poll_apbs_calculation(camera);
         self.poll_pov_render();
-        self.poll_native_render(ctx);
+        if !self.native_render_window {
+            self.poll_native_render(ctx);
+        }
         self.poll_image_export(ctx);
         self.pixels_per_point = ctx.pixels_per_point();
         cuemol_ui::shell::theme(ctx, self.light_theme);
@@ -5104,8 +5145,8 @@ impl GuiApplication {
             || self.animation_render_job.is_some()
             || self.apbs_job.is_some()
             || self.pov_render_job.is_some()
-            || self.ray_job.is_some()
-            || self.ray_movie_job.is_some()
+            || (!self.native_render_window
+                && (self.ray_job.is_some() || self.ray_movie_job.is_some()))
         {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
@@ -5618,6 +5659,7 @@ impl GuiApplication {
                 ui.menu_button("Window", |ui| {
                     if ui.button("Main Window").clicked() {
                         self.ray_panel.focused = false;
+                        self.main_focus_requested = true;
                         ui.close();
                     }
                     if ui.button("Rendering Window").clicked() {
@@ -14777,7 +14819,8 @@ impl GuiApplication {
         if self.export_path.is_empty() || !self.export_path.ends_with(".png") {
             self.export_path = "render.png".into();
         }
-        self.tool_dialog = Some("Native rendering".into());
+        self.render_visible = true;
+        self.render_focus_requested = true;
     }
 
     #[cfg(test)]
@@ -14868,48 +14911,51 @@ impl GuiApplication {
     fn native_render_dialog(&mut self, ctx: &egui::Context, camera: &CameraController) {
         let mut current = camera.to_qsys_camera("__current");
         let now = ctx.input(|i| i.time);
-        self.flush_native_render_settings(
-            &mut current,
-            now,
-            self.tool_dialog.as_deref() != Some("Native rendering"),
-        );
-        if self.tool_dialog.as_deref() != Some("Native rendering") {
+        self.flush_native_render_settings(&mut current, now, !self.render_visible);
+        if !self.render_visible {
             return;
         }
         self.sync_native_render_settings();
         let mut open = true;
         let movie_before = self.ray_panel.movie.clone();
-        let action = self.ray_panel.show(
+        let show = if self.native_render_window {
+            cuemol_ui::RenderPanel::show_in_window
+        } else {
+            cuemol_ui::RenderPanel::show
+        };
+        let controls = cuemol_ui::RenderControls {
+            movie_error: None,
+            can_start: self.ray_panel.targets.current().is_some(),
+            pov_error: if self.ray_panel.editor.backend() == "povray" {
+                cuemol_command::pov::availability(&self.state).err()
+            } else {
+                None
+            },
+            view_size: if self.state.active_view_summary().map(|view| view.uid.get())
+                != self.ray_panel.targets.view()
+            {
+                self.ray_panel
+                    .targets
+                    .current()
+                    .map(|target| target.size)
+                    .unwrap_or(self.ray_size)
+            } else {
+                self.viewport_rect
+                    .map(|rect| {
+                        [
+                            rect.width().round().max(1.) as u32,
+                            rect.height().round().max(1.) as u32,
+                        ]
+                    })
+                    .unwrap_or(self.ray_size)
+            },
+        };
+        let action = show(
+            &mut self.ray_panel,
             ctx,
             &mut open,
             self.ray_job.is_some() || self.ray_movie_job.is_some(),
-            cuemol_ui::RenderControls {
-                movie_error: None,
-                can_start: self.ray_panel.targets.current().is_some(),
-                pov_error: if self.ray_panel.editor.backend() == "povray" {
-                    cuemol_command::pov::availability(&self.state).err()
-                } else {
-                    None
-                },
-                view_size: if self.state.active_view_summary().map(|view| view.uid.get())
-                    != self.ray_panel.targets.view()
-                {
-                    self.ray_panel
-                        .targets
-                        .current()
-                        .map(|target| target.size)
-                        .unwrap_or(self.ray_size)
-                } else {
-                    self.viewport_rect
-                        .map(|rect| {
-                            [
-                                rect.width().round().max(1.) as u32,
-                                rect.height().round().max(1.) as u32,
-                            ]
-                        })
-                        .unwrap_or(self.ray_size)
-                },
-            },
+            controls,
         );
         self.ray_size = self.ray_panel.editor.pixels();
         if movie_before != self.ray_panel.movie {
@@ -15078,6 +15124,7 @@ impl GuiApplication {
                             );
                         });
                         self.ray_worker = Some(NativeRenderWorker {
+                            started_at: Instant::now(),
                             cancel,
                             thread: Some(thread),
                         });
@@ -15107,9 +15154,16 @@ impl GuiApplication {
             cuemol_ui::RenderAction::None => {}
         }
         if !open {
-            self.tool_dialog = None;
-            self.persist_native_movie_options();
+            self.close_native_render(camera);
         }
+    }
+
+    fn close_native_render(&mut self, camera: &CameraController) {
+        self.flush_native_render_settings(&mut camera.to_qsys_camera("__current"), 0., true);
+        self.render_visible = false;
+        self.ray_panel.focused = false;
+        self.render_focus_requested = false;
+        self.persist_native_movie_options();
     }
 
     fn poll_native_render(&mut self, ctx: &egui::Context) {
@@ -15130,7 +15184,13 @@ impl GuiApplication {
             }
             Err(mpsc::TryRecvError::Disconnected) => Err("Render worker disconnected".into()),
             Ok(Err(error)) => Err(error),
-            Ok(Ok(value)) => self.ray_panel.result(ctx, &value),
+            Ok(Ok(value)) => self.ray_panel.result_with_elapsed(
+                ctx,
+                &value,
+                self.ray_worker
+                    .as_ref()
+                    .map(|worker| worker.started_at.elapsed().as_secs_f64()),
+            ),
         };
         self.ray_cancel = None;
         self.ray_progress = None;
@@ -18378,7 +18438,9 @@ impl GuiApplication {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
-        self.native_render_dialog(ctx, camera);
+        if !self.native_render_window {
+            self.native_render_dialog(ctx, camera);
+        }
         self.about_dialog(ctx);
         self.options_dialog(ctx);
         self.object_props_dialog(ctx);
@@ -23993,9 +24055,6 @@ impl GuiApplication {
         };
         if title == cuemol_ui::apbs::TITLE {
             self.apbs_dialog(ctx);
-            return;
-        }
-        if title == "Native rendering" {
             return;
         }
         if title == "Molecular superposition" {
@@ -30559,6 +30618,8 @@ impl GpuBootstrap {
 }
 
 struct GpuState {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -30638,6 +30699,8 @@ impl GpuState {
         let effects = ViewportEffects::new(&device, &queue, config.format);
         let labels = cuemol_desktop_core::labels::LabelRenderer::new(&device, config.format);
         Ok(Self {
+            instance,
+            adapter,
             surface,
             device,
             queue,
@@ -31339,6 +31402,7 @@ mod tests {
             worker_finished.store(true, Ordering::Relaxed);
         });
         app.ray_worker = Some(NativeRenderWorker {
+            started_at: Instant::now(),
             cancel: cancel.clone(),
             thread: Some(thread),
         });
@@ -31351,7 +31415,7 @@ mod tests {
         let mut app = GuiApplication::new();
         app.state.new_scene("pov", true);
         app.open_pov_render_tool();
-        assert_eq!(app.tool_dialog.as_deref(), Some("Native rendering"));
+        assert!(app.render_visible);
         assert_eq!(app.ray_panel.editor.backend(), "povray");
         let mut camera = cuemol_qsys::Camera::new();
         assert!(app.flush_native_render_settings(&mut camera, 1., true));
@@ -32914,7 +32978,7 @@ mod tests {
         harness.get_by_label("Rendering Window").click();
         harness.run();
         drop(harness);
-        assert_eq!(app.tool_dialog.as_deref(), Some("Native rendering"));
+        assert!(app.render_visible);
         assert!(app.ray_panel.movie_mode);
         assert_eq!(app.ray_panel.editor.pixels(), [80, 60]);
         assert_eq!(app.ray_panel.movie.fps, 12.5);

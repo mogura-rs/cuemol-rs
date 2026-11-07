@@ -145,6 +145,15 @@ impl RenderPanel {
     }
 
     pub fn result(&mut self, ctx: &Context, value: &Value) -> Result<(), String> {
+        self.result_with_elapsed(ctx, value, None)
+    }
+
+    pub fn result_with_elapsed(
+        &mut self,
+        ctx: &Context,
+        value: &Value,
+        elapsed_seconds: Option<f64>,
+    ) -> Result<(), String> {
         let png: Arc<[u8]> = base64::engine::general_purpose::STANDARD
             .decode(value["_image"].as_str().ok_or("Render returned no image")?)
             .map_err(|e| e.to_string())?
@@ -153,9 +162,10 @@ impl RenderPanel {
             .map_err(|e| e.to_string())?
             .into_rgba8();
         let size = [image.width(), image.height()];
-        let elapsed = self
-            .started
-            .map(|start| (ctx.input(|i| i.time) - start).max(0.));
+        let elapsed = elapsed_seconds.or_else(|| {
+            self.started
+                .map(|start| (ctx.input(|i| i.time) - start).max(0.))
+        });
         self.history.push(
             png.clone(),
             self.pending_source.clone().unwrap_or_default(),
@@ -252,6 +262,27 @@ impl RenderPanel {
         running: bool,
         controls: RenderControls,
     ) -> RenderAction {
+        self.show_inner(ctx, open, running, controls, false)
+    }
+
+    pub fn show_in_window(
+        &mut self,
+        ctx: &Context,
+        open: &mut bool,
+        running: bool,
+        controls: RenderControls,
+    ) -> RenderAction {
+        self.show_inner(ctx, open, running, controls, true)
+    }
+
+    fn show_inner(
+        &mut self,
+        ctx: &Context,
+        open: &mut bool,
+        running: bool,
+        controls: RenderControls,
+        full_window: bool,
+    ) -> RenderAction {
         self.rects.clear();
         self.movie_action = RenderAction::None;
         let mut action = RenderAction::None;
@@ -260,72 +291,81 @@ impl RenderPanel {
             (available.x - 40.).min(1000.),
             (available.y - 80.).min(700.),
         );
-        let window = egui::Window::new("Rendering")
-            .id(egui::Id::new("render-window"))
-            .open(open)
-            .collapsible(false)
-            .default_size(size)
-            .default_pos(ctx.content_rect().center() - size * 0.5)
-            .max_size(available - egui::vec2(24., 40.))
-            .min_size(egui::vec2(320., 360.))
-            .show(ctx, |ui| {
-                let height = ui.available_height().max(300.);
-                if ui.available_width() >= 650. {
-                    let left_width = ui.available_width() - 304.;
-                    ui.horizontal_top(|ui| {
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(left_width, height),
-                            egui::Layout::top_down(egui::Align::LEFT),
-                            |ui| {
-                                action = self.preview(
-                                    ui,
-                                    (height - self.controls_height).max(80.),
-                                    running,
-                                );
-                                let top = ui.cursor().top();
-                                let run = self.actions(ui, running, &controls);
-                                let measured =
-                                    ui.cursor().top() - top + ui.spacing().item_spacing.y;
-                                if (self.controls_height - measured).abs() > 0.5 {
-                                    self.controls_height = measured;
-                                    ctx.request_repaint();
-                                }
-                                if run != RenderAction::None {
-                                    action = run;
-                                }
-                            },
-                        );
-                        ui.separator();
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(288., height),
-                            egui::Layout::top_down(egui::Align::LEFT),
-                            |ui| {
-                                self.settings(ui, running, &controls);
-                            },
-                        );
-                    });
-                } else {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        action = self.preview(ui, 240., running);
-                        let run = self.actions(ui, running, &controls);
-                        if run != RenderAction::None {
-                            action = run;
-                        }
-                        self.settings(ui, running, &controls);
-                    });
-                }
-            });
+        let contents = |ui: &mut egui::Ui| {
+            let height = ui.available_height().max(300.);
+            if ui.available_width() >= 650. {
+                let left_width = ui.available_width() - if full_window { 310. } else { 304. };
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(left_width, height),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            action =
+                                self.preview(ui, (height - self.controls_height).max(80.), running);
+                            let top = ui.cursor().top();
+                            let run = self.actions(ui, running, &controls);
+                            let measured = ui.cursor().top() - top + ui.spacing().item_spacing.y;
+                            if (self.controls_height - measured).abs() > 0.5 {
+                                self.controls_height = measured;
+                                ctx.request_repaint();
+                            }
+                            if run != RenderAction::None {
+                                action = run;
+                            }
+                        },
+                    );
+                    ui.separator();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(288., height),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            self.settings(ui, running, &controls);
+                        },
+                    );
+                });
+            } else {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    action = self.preview(ui, 240., running);
+                    let run = self.actions(ui, running, &controls);
+                    if run != RenderAction::None {
+                        action = run;
+                    }
+                    self.settings(ui, running, &controls);
+                });
+            }
+        };
+        let window = if full_window {
+            Some(
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(8.))
+                    .show(ctx, contents)
+                    .response,
+            )
+        } else {
+            egui::Window::new("Rendering")
+                .id(egui::Id::new("render-window"))
+                .open(open)
+                .collapsible(false)
+                .default_size(size)
+                .default_pos(ctx.content_rect().center() - size * 0.5)
+                .max_size(available - egui::vec2(24., 40.))
+                .min_size(egui::vec2(320., 360.))
+                .show(ctx, contents)
+                .map(|window| window.response)
+        };
         if let Some(window) = window {
             if std::mem::take(&mut self.focus_requested) {
-                ctx.move_to_top(window.response.layer_id);
+                if !full_window {
+                    ctx.move_to_top(window.layer_id);
+                }
                 ctx.request_repaint();
             }
-            self.record("Rendering window", &window.response);
+            self.record("Rendering window", &window);
             if ctx.input(|input| input.pointer.any_pressed()) {
                 if let Some(position) = ctx.pointer_latest_pos() {
                     let layer = ctx.layer_id_at(position);
                     if layer.is_none_or(|layer| layer.order <= egui::Order::Middle) {
-                        self.focused = layer == Some(window.response.layer_id);
+                        self.focused = layer == Some(window.layer_id);
                     }
                 }
             }
@@ -1404,6 +1444,58 @@ mod tests {
                 assert_eq!(panel.editor.values, before, "{path}");
             }
         }
+    }
+
+    #[test]
+    fn separate_window_resizes_without_moving_controls_outside_its_viewport() {
+        let ctx = Context::default();
+        let mut panel = RenderPanel::default();
+        for size in [
+            egui::vec2(1000., 700.),
+            egui::vec2(600., 480.),
+            egui::vec2(480., 400.),
+        ] {
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            for _ in 0..4 {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        panel.show_in_window(
+                            ctx,
+                            &mut true,
+                            false,
+                            RenderControls {
+                                can_start: true,
+                                pov_error: None,
+                                movie_error: None,
+                                view_size: [640, 480],
+                            },
+                        );
+                    },
+                );
+            }
+            let [x, y, width, height] = panel.rects["Rendering window"];
+            assert!(
+                x >= -1. && y >= -1. && x + width <= size.x + 1. && y + height <= size.y + 1.,
+                "window {:?} exceeds {size:?}",
+                panel.rects["Rendering window"]
+            );
+        }
+    }
+
+    #[test]
+    fn background_render_uses_worker_time_when_window_frames_have_stopped() {
+        let ctx = Context::default();
+        let mut panel = RenderPanel::default();
+        panel.begin(&ctx, RenderSource::default());
+        panel
+            .result_with_elapsed(&ctx, &rendered([0, 0, 0, 255], [8, 6]), Some(2.75))
+            .unwrap();
+        assert_eq!(panel.history.current().unwrap().elapsed_seconds, Some(2.75));
+        assert!(panel.message.contains("2.8 s"));
     }
 
     #[test]

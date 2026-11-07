@@ -276,7 +276,7 @@ mod tests {
         let ctx = egui::Context::default();
         app.start_native_movie(&ctx, &camera, false, false);
         assert!(app.ray_movie_job.is_some(), "{}", app.ray_panel.message);
-        app.tool_dialog = None;
+        app.close_native_render(&CameraController::default());
         app.state.new_scene("Edit during movie", true);
         let edited = app.state.clone();
         finish(&mut app, &ctx);
@@ -336,7 +336,7 @@ mod tests {
         assert_eq!(app.ray_panel.editor.number("umbreon.aoDistance"), 4.);
         app.ray_panel.editor.set_size([800, 600], None);
         app.ray_panel.editor.edited(1.);
-        app.tool_dialog = None;
+        app.close_native_render(&CameraController::default());
         app.open_native_render();
         assert!(app.ray_panel.movie_mode);
         assert_eq!(app.ray_panel.editor.pixels(), [800, 600]);
