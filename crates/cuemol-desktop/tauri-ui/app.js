@@ -5100,6 +5100,10 @@ function showPngExportOptions(initialWidth, initialHeight) {
       pixelHeight = retainAspect.checked
         ? Math.max(1, Math.round(pixelWidth / aspect))
         : requestedHeight;
+      if (pixelWidth > 8192 || pixelHeight > 8192 || pixelWidth * pixelHeight > 32000000) {
+        pixelSize.textContent = "Image size must be at most 8192 pixels per side and 32 million pixels.";
+        return;
+      }
       finish({
         width: pixelWidth,
         height: pixelHeight,
@@ -16405,22 +16409,56 @@ async function exportGeometry(format) {
   await mutateWithoutViewport("export_scene_geometry", {path, format}, renderStatusAndLog);
 }
 
-async function exportPng() {
-  const options = await showPngExportOptions(
-    viewportDimensions().width,
-    viewportDimensions().height,
-  );
-  if (!options) return;
-  const path = await dialog?.save?.({
-    defaultPath: "cuemol.png",
-    filters: [{ name: "PNG image", extensions: ["png"] }],
+let imageExportActive = false;
+
+async function exportPng(kind = "png") {
+  if (imageExportActive) return;
+  imageExportActive = true;
+  let session;
+  const request = (operation, args = {}) => invoke("image_export_request", {
+    operation, args: {id: session?.id, ...args},
   });
-  if (!path) return;
-  await mutateWithoutViewport(
-    "export_png",
-    { path, ...options },
-    renderStatusAndLog,
-  );
+  try {
+    session = await request("begin");
+    const path = await dialog?.save?.({
+      defaultPath: "cuemol.png",
+      filters: [{ name: "PNG image", extensions: ["png"] }],
+    });
+    if (!path) return;
+    const options = await showPngExportOptions(session.width, session.height);
+    if (!options) return;
+    await request("start", {path, kind, ...options});
+    streamProgressTitle.textContent = kind === "umbreon" ? "Export Umbreon image" : "Export PNG image";
+    streamProgressReadout.textContent = "Rendering image…";
+    streamProgressCancel.disabled = false;
+    const cancel = () => {
+      streamProgressCancel.disabled = true;
+      streamProgressReadout.textContent = "Canceling…";
+      void request("cancel").catch(showError);
+    };
+    const onCancel = (event) => { event.preventDefault(); cancel(); };
+    streamProgressCancel.onclick = cancel;
+    streamProgressDialog.addEventListener("cancel", onCancel);
+    try {
+      if (!streamProgressDialog.open) streamProgressDialog.showModal();
+      for (;;) {
+        const progress = await request("poll");
+        if (progress.completed) {
+          if (progress.error) throw new Error(progress.error);
+          await mutateWithoutViewport("get_snapshot", {}, renderStatusAndLog);
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    } finally {
+      streamProgressCancel.onclick = null;
+      streamProgressDialog.removeEventListener("cancel", onCancel);
+      if (streamProgressDialog.open) streamProgressDialog.close();
+    }
+  } finally {
+    if (session) await request("release").catch(() => {});
+    imageExportActive = false;
+  }
 }
 
 async function handleAction(action, depth = 0) {
@@ -16449,6 +16487,9 @@ async function handleAction(action, depth = 0) {
       break;
     case "export":
       await exportPng();
+      break;
+    case "export-umbreon":
+      await exportPng("umbreon");
       break;
     case "export-pov":
     case "export-stl":
@@ -16588,7 +16629,7 @@ document.querySelectorAll("[data-action]").forEach((element) => {
   element.addEventListener("click", () => {
     closeMenus();
     const depth = Number(element.dataset.depth || 0);
-    handleAction(element.dataset.action, Number.isFinite(depth) ? depth : 0);
+    handleAction(element.dataset.action, Number.isFinite(depth) ? depth : 0).catch(showError);
   });
 });
 

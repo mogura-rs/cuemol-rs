@@ -1,5 +1,32 @@
 # Validation evidence
 
+## Tauri image-export workflow
+
+Tauri previously opened PNG options before the save picker, stored the live
+camera during export and rendered synchronously on the model thread. Its image
+export now captures a scene/view and camera without editing either. The native
+save picker precedes the options form. Separate PNG and Umbreon entries use the
+shared prepared worker and atomic file replacement; they ignore the saved
+backend while retaining the selected renderer's quality settings. Options
+cancellation, worker cancellation, expired sessions and deleted targets preserve
+the scene and existing output. The model continues handling other operations
+while the worker runs. The legacy `export_png` IPC also waits for the same worker.
+
+All 210 Tauri model tests pass with six explicit ignores, together with all 68
+shell contracts and all 88 Tauri browser operation tests. The new checks cover
+captured-camera output after switching scenes, failed writes, cancellation,
+session release, save-picker ordering, dimensions, alpha and explicit backend
+selection. A save-error test exposed an unhandled menu promise; menu failures now
+open the existing error dialog. The Linux WebKit application build also passes.
+
+A real Linux WebKit window passes OS mouse/keyboard checks with GTK save
+pickers. Both formats produce distinct 64-by-48 RGBA images with 150-DPI metadata
+and transparent backgrounds while the saved backend is POV-Ray. Cancelling the
+picker, options or running worker preserves the scene, saved cameras, history
+and existing output bytes. The configured form and final window screenshots
+were inspected. These checks cover Linux; the other native platforms still need
+current window verification.
+
 ## Native image-export workflow
 
 The native export options previously stored the live camera before opening the
@@ -26,7 +53,7 @@ pixels and the final window screenshot were inspected. The test environment
 needed GTK4 schemas compiled for its isolated Zenity fallback; this was a test
 environment repair, not an application change.
 
-The Tauri and browser interactive save/options workflows still need integration.
+The browser interactive save/options workflow still needs integration.
 The shared image target, encoder and options form are available for that work.
 
 ## Prepared PNG and Umbreon image exports

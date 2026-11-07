@@ -41,6 +41,8 @@ mod agent;
 mod console;
 #[path = "tauri_history.rs"]
 mod history;
+#[path = "tauri_image_export.rs"]
+mod image_export;
 #[path = "tauri_inspector.rs"]
 mod inspector;
 #[path = "tauri_mcp.rs"]
@@ -1644,6 +1646,7 @@ struct AppModel {
     pov_render_job: Option<TauriPovRenderJob>,
     pov_render_result: Option<TauriPovRenderResult>,
     rendering: rendering::Rendering,
+    image_exports: image_export::ImageExports,
     animation_render_job: Option<TauriAnimationRenderJob>,
     log_lines: Vec<String>,
     status: String,
@@ -1924,6 +1927,7 @@ impl AppModel {
             pov_render_job: None,
             pov_render_result: None,
             rendering: Default::default(),
+            image_exports: Default::default(),
             animation_render_job: None,
             remote_revision: 0,
             numeric_preview: None,
@@ -7721,6 +7725,10 @@ impl AppModel {
 }
 
 enum ModelRequest {
+    ImageExport {
+        operation: String,
+        args: serde_json::Value,
+    },
     Rendering {
         operation: String,
         args: serde_json::Value,
@@ -8349,13 +8357,6 @@ enum ModelRequest {
     },
     SaveView(String),
     LoadView(String),
-    ExportPng {
-        path: String,
-        width: u32,
-        height: u32,
-        resolution_dpi: f64,
-        transparent: bool,
-    },
 }
 
 enum ModelResponse {
@@ -13335,30 +13336,7 @@ fn handle_model_request(
             model.status = format!("Loaded view: {path}");
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::ExportPng {
-            path,
-            width,
-            height,
-            resolution_dpi,
-            transparent,
-        } => {
-            model.persist_camera()?;
-            model
-                .desktop
-                .export_active_scene_png_with_options(
-                    &path,
-                    crate::GuiPngExportOptions {
-                        width: width.max(1),
-                        height: height.max(1),
-                        resolution_dpi,
-                        transparent,
-                    },
-                    &model.selection,
-                )
-                .map_err(|error| error.to_string())?;
-            model.status = format!("Exported image: {path}");
-            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
-        }
+        ModelRequest::ImageExport { operation, args } => Ok(ModelResponse::Inspector(model.image_export_request(&operation, &args)?)),
     }
 }
 
@@ -13382,6 +13360,7 @@ fn spawn_model(initial_paths: Vec<PathBuf>, app: tauri::AppHandle) -> ManagedSta
             let mut api = cuemol_command::transport::GuiApiServer::default();
             let mut protocol = cuemol_command::Protocol::without_history();
             loop {
+                model.poll_image_export();
                 if model.rendering_pending() {
                     model.poll_rendering();
                 }
@@ -13440,6 +13419,7 @@ fn spawn_model(initial_paths: Vec<PathBuf>, app: tauri::AppHandle) -> ManagedSta
                     let _ = app.emit("cuemol-model-changed", ());
                 }
                 let envelope = if model.rendering_pending()
+                    || model.image_exports.pending()
                     || model.remote_console.is_some()
                     || model.updates.pending_startup()
                     || model
@@ -13497,9 +13477,15 @@ fn request_model(
     state: &State<'_, ManagedState>,
     request: ModelRequest,
 ) -> Result<ModelResponse, String> {
+    request_model_via(&state.sender, request)
+}
+
+fn request_model_via(
+    model_sender: &mpsc::Sender<ModelEnvelope>,
+    request: ModelRequest,
+) -> Result<ModelResponse, String> {
     let (sender, receiver) = mpsc::channel();
-    state
-        .sender
+    model_sender
         .send(ModelEnvelope {
             request,
             response: sender,
@@ -16712,7 +16698,26 @@ fn load_view(path: String, state: State<'_, ManagedState>) -> Result<AppSnapshot
 }
 
 #[tauri::command]
-fn export_png(
+fn image_export_request(
+    operation: String,
+    args: serde_json::Value,
+    state: State<'_, ManagedState>,
+) -> Result<serde_json::Value, String> {
+    image_export_response(request_model(
+        &state,
+        ModelRequest::ImageExport { operation, args },
+    )?)
+}
+
+fn image_export_response(response: ModelResponse) -> Result<serde_json::Value, String> {
+    match response {
+        ModelResponse::Inspector(value) => Ok(value),
+        _ => Err("Unexpected image export response".into()),
+    }
+}
+
+#[tauri::command]
+async fn export_png(
     path: String,
     width: u32,
     height: u32,
@@ -16720,16 +16725,30 @@ fn export_png(
     transparent: bool,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
-    snapshot_response(request_model(
-        &state,
-        ModelRequest::ExportPng {
-            path,
-            width,
-            height,
-            resolution_dpi,
-            transparent,
-        },
-    )?)
+    let sender = state.sender.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let request = |operation: &str, args| {
+            image_export_response(request_model_via(&sender, ModelRequest::ImageExport {
+                operation: operation.into(), args,
+            })?)
+        };
+        let session = request("begin", serde_json::json!({}))?;
+        let result = (|| {
+            request("start", serde_json::json!({"id":session["id"], "kind":"png",
+                "path":path,"width":width,"height":height,"resolutionDpi":resolution_dpi,"transparent":transparent}))?;
+            loop {
+                let progress = request("poll", session.clone())?;
+                if progress["completed"] == true {
+                    if let Some(error) = progress["error"].as_str() { return Err(error.to_string()); }
+                    if progress["cancelled"] == true { return Err("Image export cancelled".into()); }
+                    return snapshot_response(request_model_via(&sender, ModelRequest::GetSnapshot)?);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        })();
+        let _ = request("release", session);
+        result
+    }).await.map_err(|e| format!("Image export task failed: {e}"))?
 }
 
 fn backup_scene_file(path: &Path) -> Result<(), String> {
@@ -17124,6 +17143,7 @@ pub fn run() -> Result<(), tauri::Error> {
             save_view,
             load_view,
             export_png,
+            image_export_request,
         ])
         .build(tauri::generate_context!())?;
     application.run(|app, event| {
@@ -17515,6 +17535,7 @@ mod tests {
             pov_render_job: None,
             pov_render_result: None,
             rendering: Default::default(),
+            image_exports: Default::default(),
             animation_render_job: None,
             remote_revision: 0,
             numeric_preview: None,

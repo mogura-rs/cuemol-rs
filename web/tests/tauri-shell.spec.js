@@ -656,6 +656,19 @@ async function openShell(page, storage = {}, options = {}) {
         target.visible = args.visible;
         return structuredClone(snapshot);
       }
+      if (command === 'image_export_request') {
+        const {operation,args:input} = args;
+        if (operation === 'begin') return {id:String(++window.__imageId || (window.__imageId=1)),width:800,height:600};
+        if (operation === 'start') { window.__imageStarted=true; window.__imageCancelled=false; return {running:true}; }
+        if (operation === 'cancel') { window.__imageCancelled=true; return {}; }
+        if (operation === 'release') return {};
+        if (operation === 'poll') {
+          const completed=!window.__holdImage || window.__imageCancelled;
+          snapshot.status=window.__imageCancelled?'Image export cancelled':'Exported image: cuemol.png';
+          return {completed,running:!completed,cancelled:!!window.__imageCancelled,error:window.__imageError||null};
+        }
+        throw Error('Unknown image export operation');
+      }
       if (command === 'export_scene_geometry') return structuredClone(snapshot);
       throw new Error(`Unexpected IPC: ${command}`);
     }}};
@@ -671,6 +684,8 @@ async function openShell(page, storage = {}, options = {}) {
       return window.__morphPaths||null;
     },save:async options=>{
       window.__saveDialogOptions=options;
+      window.__optionsVisibleAtSave=document.querySelector('#reference-dialog')?.open || false;
+      if(window.__holdSave)return new Promise(resolve=>window.__resolveSave=resolve);
       return window.__cancelSave ? null : options.defaultPath;
     }};
   }, {storage, options});
@@ -3148,19 +3163,86 @@ test('Tauri APBS gates missing tools and cancels a detached pending start by req
 
 test('Tauri geometry export fixes the format and preserves the scene on picker cancellation', async ({page}) => {
   const errors = await openShell(page);
-  for (const [format, label] of [['stl','StereoLithography'],['mqo','Metasequoia object'],['pov','POV-Ray SDL']]) {
+  for (const [format, label, menu] of [['stl','StereoLithography','STL…'],['mqo','Metasequoia object','Metasequoia (MQO)…'],['pov','POV-Ray SDL','POV-Ray SDL…']]) {
     await page.locator('summary').filter({hasText:/^Rendering$/}).click();
-    await page.getByRole('button', {name:'Export geometry',exact:true}).hover();
-    await page.getByRole('button', {name:label,exact:true}).click();
+    await page.getByRole('button', {name:'Export scene',exact:true}).hover();
+    await page.getByRole('button', {name:menu,exact:true}).click();
     await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'export_scene_geometry').at(-1)?.args)).toEqual({path:`Test scene.${format}`,format});
     expect(await page.evaluate(() => window.__saveDialogOptions)).toEqual({defaultPath:`Test scene.${format}`,filters:[{name:label,extensions:[format]}]});
   }
   const before = await page.evaluate(() => window.__shellCalls.filter(call => call.command === 'export_scene_geometry').length);
   await page.evaluate(() => { window.__cancelSave = true; });
   await page.locator('summary').filter({hasText:/^Rendering$/}).click();
-  await page.getByRole('button', {name:'Export geometry',exact:true}).hover();
-  await page.getByRole('button', {name:'StereoLithography',exact:true}).click();
+  await page.getByRole('button', {name:'Export scene',exact:true}).hover();
+  await page.getByRole('button', {name:'STL…',exact:true}).click();
   await expect(page.locator('#status-text')).toHaveText('Ready');
   expect(await page.evaluate(() => window.__shellCalls.filter(call => call.command === 'export_scene_geometry').length)).toBe(before);
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri image export chooses the path before options and releases every cancelled session', async ({page}) => {
+  const errors = await openShell(page);
+  const calls = operation => page.evaluate(operation => window.__shellCalls.filter(c => c.command==='image_export_request' && c.args.operation===operation), operation);
+  await page.evaluate(()=>{window.__cancelSave=true;void exportPng();});
+  await expect.poll(async()=>(await calls('release')).length).toBe(1);
+  expect(await calls('start')).toHaveLength(0);
+  await expect(page.locator('#reference-dialog')).toBeHidden();
+  await page.evaluate(()=>{window.__cancelSave=false;window.__holdSave=true;void exportPng('umbreon');});
+  await expect.poll(()=>page.evaluate(()=>typeof window.__resolveSave)).toBe('function');
+  expect(await page.evaluate(()=>window.__optionsVisibleAtSave)).toBe(false);
+  await expect(page.locator('#reference-dialog')).toBeHidden();
+  await page.evaluate(()=>{window.__holdSave=false;window.__resolveSave('target.png');});
+  const options=page.locator('#reference-dialog');
+  await expect(options).toBeVisible();
+  await expect(options.getByLabel('Resolution (DPI)',{exact:true})).toHaveValue('150');
+  await expect(options.getByLabel('Retain aspect ratio',{exact:true})).toBeChecked();
+  await expect(options.getByLabel('Height',{exact:true})).toBeDisabled();
+  await options.getByRole('button',{name:'Cancel',exact:true}).click();
+  await expect.poll(async()=>(await calls('release')).length).toBe(2);
+  expect(await calls('start')).toHaveLength(0);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri image export validates dimensions, fixes the backend, and cancels its worker', async ({page}) => {
+  const errors=await openShell(page);
+  const dialog=page.locator('#reference-dialog');
+  const starts=()=>page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='image_export_request'&&c.args.operation==='start'));
+  for(const [kind,label] of [['png','PNG image…'],['umbreon','Umbreon ray-traced image…']]) {
+    await page.locator('summary').filter({hasText:/^Rendering$/}).click();
+    await page.getByRole('button',{name:'Export scene',exact:true}).hover();
+    await page.getByRole('button',{name:label,exact:true}).click();
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel('Retain aspect ratio',{exact:true}).uncheck();
+    await dialog.getByLabel('Width',{exact:true}).fill('9000');
+    await dialog.getByLabel('Height',{exact:true}).fill('48');
+    await dialog.getByRole('button',{name:'OK',exact:true}).click();
+    await expect(dialog).toContainText('at most 8192');
+    await dialog.getByLabel('Width',{exact:true}).fill('64');
+    await dialog.getByLabel('Transparent PNG',{exact:true}).check();
+    await page.evaluate(()=>{window.__holdImage=true;});
+    await dialog.getByRole('button',{name:'OK',exact:true}).click();
+    const progress=page.locator('#stream-progress-dialog');
+    await expect(progress).toBeVisible();
+    const start=(await starts()).at(-1).args.args;
+    expect(start).toMatchObject({kind,path:'cuemol.png',width:64,height:48,resolutionDpi:150,transparent:true});
+    if(kind==='png') {
+      await progress.getByRole('button',{name:'Cancel',exact:true}).click();
+      await expect(page.locator('#status-text')).toHaveText('Image export cancelled');
+    } else {
+      await page.evaluate(()=>{window.__holdImage=false;});
+      await expect(page.locator('#status-text')).toHaveText('Exported image: cuemol.png');
+    }
+    await expect(progress).toBeHidden();
+    await expect.poll(()=>page.evaluate(()=>imageExportActive)).toBe(false);
+  }
+  await page.evaluate(()=>{window.__imageError='output is not writable';});
+  await page.locator('summary').filter({hasText:/^Rendering$/}).click();
+  await page.getByRole('button',{name:'Export scene',exact:true}).hover();
+  await page.getByRole('button',{name:'PNG image…',exact:true}).click();
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>imageExportActive)).toBe(false);
+  await expect(page.locator('#error-alert-dialog')).toContainText('output is not writable');
   expect(errors).toEqual([]);
 });

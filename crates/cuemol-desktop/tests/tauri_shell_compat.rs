@@ -305,8 +305,8 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         );
     }
     for item in [
-        "POV-Ray rendering",
-        "Animation rendering",
+        "Umbreon ray-traced image…",
+        "Movie rendering…",
         "Molecular superposition",
         "Mol bond editor",
         "Interaction",
@@ -1351,8 +1351,8 @@ fn png_export_matches_the_reference_options_dialog() {
     assert_eq!(JS.matches("await showPngExportOptions(").count(), 1);
     assert!(CSS.contains(".reference-dialog.png-options-dialog"));
     assert!(CSS.contains("width: min(360px, calc(100vw - 48px))"));
-    assert!(TAURI_APP_RS.contains("export_active_scene_png_with_options"));
-    assert!(TAURI_APP_RS.contains("GuiPngExportOptions"));
+    assert!(TAURI_APP_RS.contains("fn image_export_request("));
+    assert!(include_str!("../src/tauri_image_export.rs").contains("PreparedImageExport::capture"));
 }
 
 #[test]

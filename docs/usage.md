@@ -863,7 +863,7 @@ the mock Inspector retain separate values; only Reset clears a modified flag.
 
 ### Scene geometry export
 
-Native egui uses Rendering > Export scene; Tauri and browser currently use
+Native egui and Tauri use Rendering > Export scene; the browser currently uses
 Rendering > Export geometry. These menus write the visible scene as binary STL,
 Metasequoia MQO or POV-Ray SDL. These exports use the live camera and scene
 color proofing without changing the scene or its Undo history. The selected
@@ -875,7 +875,7 @@ with its geometry included; POV-Ray's standard include library is still needed
 to render it. STL and MQO downloads use the same shared serializers as the native
 application.
 
-For native egui image output, choose Rendering > Export scene > PNG image or
+For native egui and Tauri image output, choose Rendering > Export scene > PNG image or
 Umbreon ray-traced image. Select the destination first, then set the dimensions,
 unit, DPI and transparency in PNG options. Both start from the viewport size,
 150 DPI and a locked aspect ratio. PNG uses wgpu; Umbreon uses the scene's
@@ -896,7 +896,7 @@ AO and 32-sample antialiasing; raytracing settings belong to the Rendering windo
 ### Image rendering
 
 In the native egui, browser and Tauri frontends, open Render to preview an image
-before saving it. Tauri also exposes Rendering > Image Rendering. The Image tab sets size, physical units, DPI and transparency. The
+before saving it. Tauri also exposes Rendering > Image rendering. The Image tab sets size, physical units, DPI and transparency. The
 Render tab contains independent supersampling, lighting, AO quality, GI lighting
 and shadow choices, with grouped advanced controls. NPR offers raytracing or AO;
 its Detail tab edits hatch layers and tone specifications. Selecting a quality
