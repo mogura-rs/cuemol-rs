@@ -23,6 +23,7 @@ impl RenderPanel {
     }
 
     pub fn restore_movie_options(&mut self) {
+        self.editor = RenderEditor::default();
         let movie = self
             .history
             .current()

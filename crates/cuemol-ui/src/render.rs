@@ -1206,6 +1206,42 @@ mod tests {
     }
 
     #[test]
+    fn still_history_restores_physical_units_after_movie_display_conversion() {
+        let ctx = Context::default();
+        let mut panel = RenderPanel::default();
+        let stored = json!({"unit":"in", "width":2, "height":1, "dpi":150})
+            .as_object()
+            .unwrap()
+            .clone();
+        panel.editor.sync(Some(1), &stored);
+        panel.begin(
+            &ctx,
+            RenderSource {
+                scene_name: "Still".into(),
+                settings: stored.clone(),
+            },
+        );
+        panel
+            .result(&ctx, &rendered([0, 0, 0, 255], [300, 150]))
+            .unwrap();
+        panel.movie_mode = true;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| panel.movie_image_controls(ui));
+        });
+        assert_eq!(panel.editor.text("unit"), "px");
+        assert_eq!(panel.editor.pixels(), [300, 150]);
+        assert!(!panel.editor.pending());
+        panel.restore_movie_options();
+        panel.editor.sync(Some(1), &stored);
+        assert!(!panel.movie_mode);
+        assert_eq!(panel.editor.text("unit"), "in");
+        assert_eq!(panel.editor.number("width"), 2.);
+        assert_eq!(panel.editor.number("height"), 1.);
+        assert_eq!(panel.editor.number("dpi"), 150.);
+        assert_eq!(panel.editor.pixels(), [300, 150]);
+    }
+
+    #[test]
     fn zoom_stays_at_pointer_and_pan_is_bounded() {
         let mut framing = ImageFraming::default();
         framing.viewport = egui::vec2(200., 100.);

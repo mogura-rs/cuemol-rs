@@ -293,6 +293,7 @@ impl App {
                     "set_render_settings",
                     json!({"settings": source.settings_argument(), "sceneId":self.render_panel.targets.scene()}),
                 ) {
+                    self.render_panel.restore_movie_options();
                     self.open_render();
                 } else {
                     self.render_panel.message = self.message.clone();

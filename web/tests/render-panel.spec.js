@@ -64,6 +64,24 @@ test('Render preview uses saved dimensions and saves the displayed transparent P
   expect(errors).toEqual([]);
 });
 
+test('Still history restores its mode and physical size after movie mode', async ({page}) => {
+  await open(page);
+  await call(page, 'set_render_settings', {settings:'unit=in; width=2; height=1; dpi=24'});
+  await click(page, 'Start Render');
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toContain('Rendered 48 × 24');
+  const image = await save(page);
+  await click(page, 'Render mode Movie');
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().ui.rects['Movie frame rate']?.length)).toBe(4);
+  await click(page, 'Use render settings');
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().ui.rects['Render DPI']?.length)).toBe(4);
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().ui.rects['Movie frame rate'])).toBeUndefined();
+  const settings = await call(page, 'execute_script', {source:"var s=scene.getAppData('render'); print(s.unit+':'+s.width+':'+s.height+':'+s.dpi);"});
+  expect(JSON.parse(settings.message).log).toBe('in:2:1:24\n');
+  await click(page, 'Start Render');
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toContain('Rendered 48 × 24');
+  expect((await save(page)).equals(image)).toBe(true);
+});
+
 test('Render Stop cancels work and preserves the last completed preview',async({page})=>{
   await open(page);await click(page,'Start Render');
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Rendered 64 × 48');

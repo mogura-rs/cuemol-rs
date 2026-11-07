@@ -1,5 +1,20 @@
 # Validation evidence
 
+## Restore still-image history after movie mode
+
+The shared Rendering panel now reloads its editor when applying history. A
+movie display can convert physical dimensions to pixels without changing the
+stored scene settings; the previous cache check then kept those converted values
+when restoring the same still-image settings. A regression first reproduced
+`px` remaining in place of `in`, then passed with the editor reload.
+
+The browser also restores the result's Still/Movie mode before reopening the
+editor. Its new interaction check first failed because Movie controls remained
+visible after applying still-image history. The repaired flow restores inches,
+width, height and DPI, and renders the same PNG bytes. All five shared render
+panel checks, 12 focused native checks and all 17 browser Rendering tests pass;
+the WASM build passes.
+
 ## Tauri movie integration in the Rendering window
 
 Tauri now routes Animation rendering into the same modeless Rendering window as
