@@ -1,5 +1,48 @@
 # Validation evidence
 
+## Prepared PNG and Umbreon image exports
+
+The image-export audit found that the browser's PNG action selected the saved
+raytracing backend. A saved POV-Ray choice could therefore prevent a PNG download.
+Native PNG exports also omitted scene color proofing and projected labels.
+PNG jobs now capture the requested scene, live camera, proofed geometry, viewport
+effects and labels without editing scene state. Native file export and browser
+downloads use the same wgpu readback and PNG encoder. Browser readback waits
+asynchronously and polls independently of idle viewport updates. Small browser
+readbacks batch several samples within an 8-MiB buffer instead of synchronizing
+with the GPU after every sample. Larger frames retain one readback frame. The 32-sample
+accumulator uses 16-bit channels instead of 32-bit channels; its maximum sum is
+8160, so the rounding and output bytes are unchanged.
+
+The prepared Umbreon export explicitly selects its renderer and uses the live
+projection, requested dimensions, DPI and transparency. It retains the scene's
+Umbreon quality settings without changing the stored backend or output settings.
+Shared tests cover this behavior, inactive-scene capture, immutable geometry,
+target labels, invalid dimensions and cancellation before GPU creation.
+
+An explicit Metal test checks real PNG output, visible labels, transparent
+background and 150-DPI metadata. Nine existing GPU appearance, effects, stereo
+and volume tests pass. All 234 native GUI tests and 206 Tauri model tests pass;
+the Tauri suite retains six explicitly ignored integration cases. WebGL and
+WebGPU tests download real PNG files, verify pixels and metadata, and compare
+identical bytes after changing the saved raytracing backend. Scene and camera
+state remain unchanged. The optimized WASM build passes.
+
+Both browser backends produce byte-identical 96-by-64 PNGs before and after
+readback batching. Odd-width 513-by-384 outputs also preserve full opacity and
+transparent backgrounds, including the final incomplete readback batch. The two
+browser cases complete in 17.7 seconds with three exports each. Three fresh
+Chromium processes using software WebGL measure the 96-by-64 export at
+2.08 to 2.17 seconds, including command delivery and download. The earlier
+unbatched diagnostic took 36.79 seconds in one process; it is a single diagnostic
+sample, not a platform-wide benchmark.
+
+These checks cover image preparation and output. The common save/options
+workflow, explicit image-export menu choices and native dialog cancellation
+audit remain open. Image sizes are validated against the 32-megapixel limit and
+the active GPU's texture/buffer limits; this path does not yet tile oversized
+GPU exports.
+
 ## Scene geometry exports and completed browser baseline
 
 The shell audit found that STL/MQO implementations were not reachable through

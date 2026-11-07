@@ -46,8 +46,8 @@ pub mod transport;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod update;
 pub use commands::{
-    call_tool, hatch_params, hatch_settings, prepare_render, render_target, rendering_params,
-    rendering_settings, view_json, PreparedRender,
+    call_tool, hatch_params, hatch_settings, prepare_render, prepare_umbreon_export, render_target,
+    rendering_params, rendering_settings, view_json, PreparedRender,
 };
 pub use properties::{is_view_property_write, prepare_property_edit};
 pub use protocol::{

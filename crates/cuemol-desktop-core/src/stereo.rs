@@ -17,15 +17,29 @@ pub fn labels(
     swap: bool,
     max: usize,
 ) -> Vec<GuiAtomLabel> {
+    let Some(scene_uid) = state.active_scene() else {
+        return Vec::new();
+    };
+    scene_labels(state, scene_uid, camera, size, swap, max)
+}
+
+pub fn scene_labels(
+    state: &DesktopAppState,
+    scene_uid: cuemol_core::Uid,
+    camera: &Camera,
+    size: [f32; 2],
+    swap: bool,
+    max: usize,
+) -> Vec<GuiAtomLabel> {
     let mut labels = Vec::new();
     for eye in cuemol_qsys::stereo::viewports(camera, size.map(f64::from), swap) {
         let mvp = projection::camera_mvp(&eye.camera, eye.aspect());
         let [x, y, width, height] = eye.rect.map(|v| v as f32);
         labels.extend(
             state
-                .active_name_labels(mvp, width, height, max)
+                .name_labels(scene_uid, mvp, width, height, max)
                 .into_iter()
-                .chain(state.active_atom_intr_labels(mvp, width, height, max))
+                .chain(state.atom_intr_labels(scene_uid, mvp, width, height, max))
                 .map(|mut label| {
                     label.x += x;
                     label.y += y;

@@ -874,6 +874,14 @@ with its geometry included; POV-Ray's standard include library is still needed
 to render it. STL and MQO downloads use the same shared serializers as the native
 application.
 
+Browser Save PNG and `export_scene` with `format: "png"` use the GPU scene
+renderer, independently of the Rendering window's saved backend. PNG export
+supports pixel width/height, DPI and transparency and includes scene color
+proofing and labels. The command accepts `width`, `height`, `dpi` and
+`transparent` fields. Image size must fit the active GPU's limits and must not
+exceed 8192 pixels per side or 32 megapixels. PNG scene exports use the scene's
+AO and 32-sample antialiasing; raytracing settings belong to the Rendering window.
+
 ### Image rendering
 
 In the native egui, browser and Tauri frontends, open Render to preview an image

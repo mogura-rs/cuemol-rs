@@ -131,6 +131,8 @@ mod pov_labels;
 mod prepared_io;
 pub use prepared_io::PreparedFile;
 #[cfg(feature = "offscreen")]
+pub mod image_export;
+#[cfg(feature = "offscreen")]
 pub mod offscreen;
 mod trajectory_io;
 #[cfg(feature = "offscreen")]
@@ -1645,6 +1647,30 @@ pub struct GuiPngExportOptions {
     pub height: u32,
     pub resolution_dpi: f64,
     pub transparent: bool,
+}
+
+impl GuiPngExportOptions {
+    pub fn validate(&self) -> Result<()> {
+        if self.width == 0 || self.height == 0 {
+            return Err(CueMolError::invalid_argument(
+                "PNG dimensions must be positive",
+            ));
+        }
+        if self.width > 8192
+            || self.height > 8192
+            || u64::from(self.width) * u64::from(self.height) > 32_000_000
+        {
+            return Err(CueMolError::invalid_argument(
+                "Image size must be at most 8192 pixels per side and 32 megapixels",
+            ));
+        }
+        if !self.resolution_dpi.is_finite() || self.resolution_dpi <= 0. {
+            return Err(CueMolError::invalid_argument(
+                "PNG resolution must be positive",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16085,16 +16111,7 @@ impl DesktopAppState {
         options: GuiPngExportOptions,
         selection_text: &str,
     ) -> Result<()> {
-        if options.width == 0 || options.height == 0 {
-            return Err(CueMolError::invalid_argument(
-                "PNG dimensions must be positive",
-            ));
-        }
-        if !options.resolution_dpi.is_finite() || options.resolution_dpi <= 0.0 {
-            return Err(CueMolError::invalid_argument(
-                "PNG resolution must be positive",
-            ));
-        }
+        options.validate()?;
         let scene_uid = self
             .active_scene
             .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
@@ -16157,37 +16174,34 @@ impl DesktopAppState {
             )
         }
         .unwrap_or_else(|| auto_frame_camera(&snapshot));
-        let background = scene_background_color(scene, &self.scene_styles(scene))?;
-        let camera = cuemol_qsys::stereo::with_eye_order(
-            &camera,
-            self.active_scene == Some(scene_uid) && self.active_view_options().swap_stereo_eyes,
-        );
-        let rgba = if exporter.use_depth() {
-            crate::offscreen::render_snapshot_depth_offscreen(&snapshot, &camera, width, height)
-        } else {
-            crate::offscreen::render_snapshot_camera_with_effects(
-                &snapshot,
-                &camera,
-                width,
-                height,
-                [
-                    background[0] as f64,
-                    background[1] as f64,
-                    background[2] as f64,
-                    if exporter.use_alpha() { 0.0 } else { 1.0 },
-                ],
-                5,
-                crate::effects::ViewportOptions::from_scene(scene),
-            )
-        }
-        .ok_or_else(|| CueMolError::invalid_argument("no GPU adapter for offscreen render"))?;
-        let png = crate::offscreen::encode_png(
-            &rgba,
+        let options = GuiPngExportOptions {
             width,
             height,
-            exporter.use_alpha(),
-            exporter.resolution_dpi(),
-        );
+            resolution_dpi: exporter.resolution_dpi(),
+            transparent: exporter.use_alpha(),
+        };
+        options.validate()?;
+        let swap =
+            self.active_scene == Some(scene_uid) && self.active_view_options().swap_stereo_eyes;
+        let png = if exporter.use_depth() {
+            let camera = cuemol_qsys::stereo::with_eye_order(&camera, swap);
+            let rgba = crate::offscreen::render_snapshot_depth_offscreen(
+                &snapshot, &camera, width, height,
+            )
+            .ok_or_else(|| CueMolError::invalid_argument("no GPU adapter for offscreen render"))?;
+            crate::offscreen::encode_png(
+                &rgba,
+                width,
+                height,
+                options.transparent,
+                options.resolution_dpi,
+            )
+        } else {
+            crate::image_export::PreparedPngExport::capture_snapshot(
+                self, scene_uid, &camera, options, snapshot, swap,
+            )?
+            .run(None)?
+        };
         fs::write(path, png)?;
         exporter.write();
         Ok(())

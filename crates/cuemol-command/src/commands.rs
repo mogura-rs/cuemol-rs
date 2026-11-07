@@ -549,6 +549,35 @@ pub fn prepare_render(
     name: &str,
     args: &Value,
 ) -> Result<PreparedRender> {
+    prepare_render_inner(state, camera, name, args, None)
+}
+
+pub fn prepare_umbreon_export(
+    state: &DesktopAppState,
+    camera: &Camera,
+    target: &Value,
+    options: cuemol_desktop_core::GuiPngExportOptions,
+) -> Result<PreparedRender> {
+    options.validate()?;
+    let mut args = target.clone();
+    if !args.is_object() {
+        return Err(CueMolError::invalid_argument(
+            "image export target must be an object",
+        ));
+    }
+    args["width"] = json!(options.width);
+    args["height"] = json!(options.height);
+    args["style"] = json!("umbreon");
+    prepare_render_inner(state, camera, "export_umbreon", &args, Some(options))
+}
+
+fn prepare_render_inner(
+    state: &DesktopAppState,
+    camera: &Camera,
+    name: &str,
+    args: &Value,
+    image_export: Option<cuemol_desktop_core::GuiPngExportOptions>,
+) -> Result<PreparedRender> {
     let (scene_uid, view_uid, camera) = render_target(state, camera, args)?;
     let settings = crate::properties::scene_render_settings(state, scene_uid)?;
     let size = |key: &str, default: usize| -> Result<usize> {
@@ -603,11 +632,15 @@ pub fn prepare_render(
     } else {
         None
     };
-    let dpi = settings
-        .get("dpi")
-        .and_then(Value::as_f64)
-        .unwrap_or(600.)
-        .clamp(1., 4800.);
+    let dpi = image_export
+        .map(|options| options.resolution_dpi)
+        .unwrap_or_else(|| {
+            settings
+                .get("dpi")
+                .and_then(Value::as_f64)
+                .unwrap_or(600.)
+                .clamp(1., 4800.)
+        });
     if args["style"].is_null()
         && settings
             .get("backend")
@@ -643,7 +676,12 @@ pub fn prepare_render(
         .and_then(Value::as_str)
         .map(|v| v == "perspective")
         .unwrap_or(camera.is_perspective());
-    if name != "render_image"
+    if let Some(options) = image_export {
+        params.perspective = camera.is_perspective();
+        params.transparent_background = options.transparent;
+    }
+    if image_export.is_none()
+        && name != "render_image"
         && !settings.get("backend").is_some_and(|v| v == "umbreon")
         && settings.get("useGI").is_none()
         && settings.get("umbreon.useGI").is_none()
@@ -989,6 +1027,39 @@ pub(crate) fn render(
 mod render_target_tests {
     use super::*;
     use cuemol_core::Uid;
+
+    #[test]
+    fn umbreon_image_export_overrides_backend_projection_and_output_without_editing_settings() {
+        let mut state = DesktopAppState::new();
+        state.ensure_active_scene();
+        let mut camera = Camera::new();
+        camera.set_perspective(false);
+        call_tool(&mut state, &mut camera, "set_render_settings", &json!({"settings":"backend=povray; width=200; height=100; dpi=600; projection=perspective; transparent=false; umbreon.useGI=false; umbreon.supersample=1"})).unwrap();
+        let before = state.clone();
+        let options = cuemol_desktop_core::GuiPngExportOptions {
+            width: 32,
+            height: 24,
+            resolution_dpi: 150.,
+            transparent: true,
+        };
+        let render = prepare_umbreon_export(&state, &camera, &json!({}), options).unwrap();
+        let PreparedBackend::Umbreon { params, hatch, .. } = &render.backend else {
+            panic!("exporter must be Umbreon")
+        };
+        assert_eq!((params.width, params.height, render.dpi), (32, 24, 150.));
+        assert!(!params.perspective);
+        assert!(params.transparent_background);
+        assert!(!params.use_gi);
+        assert!(hatch.is_none());
+        let result = render.run().unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(result["_image"].as_str().unwrap())
+            .unwrap();
+        let reader = png::Decoder::new(bytes.as_slice()).read_info().unwrap();
+        assert_eq!(reader.info().color_type, png::ColorType::Rgba);
+        assert_eq!(reader.info().pixel_dims.unwrap().xppu, 5906);
+        assert!(state.same_undo_state(&before));
+    }
 
     #[test]
     fn selected_render_scene_owns_geometry_settings_background_proof_and_camera() {

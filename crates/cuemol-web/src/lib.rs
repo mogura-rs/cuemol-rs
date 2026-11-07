@@ -91,6 +91,7 @@ enum Event {
     Frame(Uid, usize, cuemol_mdtools::TrajectoryFrame, u64),
     Command(u32, String, Value),
     Rendered(cuemol_core::Result<Value>, Option<String>, bool),
+    PngExported(cuemol_core::Result<Vec<u8>>, String),
 }
 fn enqueue(event: Event) {
     EVENTS.with(|events| events.borrow_mut().push_back(event));
@@ -748,9 +749,7 @@ impl App {
                 .or_else(|| path.rsplit_once('.').map(|(_, ext)| ext))
                 .unwrap_or("pov");
             if format.eq_ignore_ascii_case("png") {
-                let mut args = args.clone();
-                args["fileName"] = json!(path);
-                self.render_async("render_image", &args, Some(path.to_owned()), false);
+                self.export_png_async(path, &args);
             } else {
                 self.message = match self.export_scene_download(&path, format) {
                     Ok(()) => format!("Exported {path}"),
@@ -1177,6 +1176,17 @@ impl App {
                     self.last_command = id;
                 }
                 Event::Movie(completion) => self.movie_completion(ctx, completion),
+                Event::PngExported(result, name) => {
+                    self.busy = false;
+                    self.render_cancel = None;
+                    self.message = match result {
+                        Ok(bytes) => match download(&name, &bytes, "image/png") {
+                            Ok(()) => format!("Saved {name}"),
+                            Err(error) => js_error(error),
+                        },
+                        Err(error) => error.to_string(),
+                    };
+                }
                 Event::Rendered(result, name, preview) => {
                     self.busy = false;
                     self.render_cancel = None;
@@ -1361,12 +1371,68 @@ impl App {
         }
     }
     fn export_png(&mut self) {
-        self.render_async(
-            "get_screenshot",
-            &json!({"width":self.render_size[0],"height":self.render_size[1]}),
-            Some("cuemol.png".into()),
-            false,
-        );
+        self.export_png_async("cuemol.png".into(), &json!({}));
+    }
+    fn export_png_async(&mut self, name: String, args: &Value) {
+        if self.busy || self.movie.running {
+            self.message = "Wait for the current operation to finish.".into();
+            return;
+        }
+        let prepare = || -> cuemol_core::Result<_> {
+            let dimension = |key: &str, default: u32| -> cuemol_core::Result<u32> {
+                if args[key].is_null() {
+                    return Ok(default);
+                }
+                args[key]
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| {
+                        cuemol_core::CueMolError::invalid_argument(format!(
+                            "{key} must be a positive integer"
+                        ))
+                    })
+            };
+            let options = cuemol_desktop_core::GuiPngExportOptions {
+                width: dimension("width", self.render_size[0])?,
+                height: dimension("height", self.render_size[1])?,
+                resolution_dpi: args["dpi"].as_f64().unwrap_or(150.),
+                transparent: args["transparent"].as_bool().unwrap_or(false),
+            };
+            let (scene, view, camera) =
+                cuemol_command::render_target(&self.state, &self.camera, args)?;
+            let swap = self
+                .state
+                .command_manager()
+                .view(view)
+                .is_some_and(|view| view.swap_stereo_eyes());
+            cuemol_desktop_core::image_export::PreparedPngExport::capture(
+                &self.state,
+                scene,
+                &camera,
+                options,
+                "",
+                swap,
+            )
+        };
+        match prepare() {
+            Ok(job) => {
+                self.busy = true;
+                self.message = "Exporting PNG…".into();
+                let cancel = Arc::new(AtomicBool::new(false));
+                self.render_cancel = Some(cancel.clone());
+                let gpu = self.gpu.clone();
+                let name = name
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or("scene.png")
+                    .to_owned();
+                spawn_local(async move {
+                    let result = job.run_async(&gpu.device, &gpu.queue, Some(&cancel)).await;
+                    enqueue(Event::PngExported(result, name));
+                });
+            }
+            Err(error) => self.message = error.to_string(),
+        }
     }
     fn viewport(&mut self, ui: &mut egui::Ui) {
         let size = ui.available_size();

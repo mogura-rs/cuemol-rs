@@ -49,10 +49,44 @@ pub(crate) fn draw_interactive(
     size: [u32; 2],
     background: [f64; 4],
     level: i32,
+    effects: Effects<'_>,
+    labels: Option<(&mut crate::labels::LabelRenderer, &[crate::GuiAtomLabel])>,
+    interaction: Option<Interaction<'_>>,
+) -> Option<Vec<u8>> {
+    pollster::block_on(draw_async(
+        renderer,
+        device,
+        queue,
+        snapshot,
+        camera,
+        size,
+        background,
+        level,
+        effects,
+        labels,
+        interaction,
+        None,
+    ))
+}
+
+pub(crate) async fn draw_async(
+    renderer: &mut ViewportRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    size: [u32; 2],
+    background: [f64; 4],
+    level: i32,
     mut effects: Effects<'_>,
     mut labels: Option<(&mut crate::labels::LabelRenderer, &[crate::GuiAtomLabel])>,
     mut interaction: Option<Interaction<'_>>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Option<Vec<u8>> {
+    let cancelled = || cancel.is_some_and(|v| v.load(std::sync::atomic::Ordering::Relaxed));
+    if cancelled() {
+        return None;
+    }
     let [width, height] = size.map(|n| n.max(1));
     let swap = match &effects {
         Effects::Live(_, options) | Effects::Export(_, options) => options.swap_stereo_eyes,
@@ -96,7 +130,7 @@ pub(crate) fn draw_interactive(
                 let eye_labels = labels
                     .as_mut()
                     .map(|(renderer, _)| (&mut **renderer, eye_labels.as_slice()));
-                let eye_image = draw_interactive(
+                let eye_image = Box::pin(draw_async(
                     renderer,
                     device,
                     queue,
@@ -108,7 +142,9 @@ pub(crate) fn draw_interactive(
                     eye_effects,
                     eye_labels,
                     None,
-                )?;
+                    cancel,
+                ))
+                .await?;
                 for y in 0..height as usize {
                     let start = (y * width as usize + x as usize) * 4;
                     image[start..start + eye_width as usize * 4].copy_from_slice(
@@ -150,9 +186,23 @@ pub(crate) fn draw_interactive(
     let depth_view = depth.create_view(&Default::default());
     let padded = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
         * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let level = level.clamp(0, 5);
+    let live = matches!(effects, Effects::Live(..));
+    let count = if live { 33 } else { jitter_sample_count(level) };
+    let frame_bytes = u64::from(padded) * u64::from(height);
+    #[cfg(target_arch = "wasm32")]
+    let batch = if live {
+        1
+    } else {
+        // Avoid a browser GPU synchronization for every small AA sample.
+        ((8 * 1024 * 1024_u64).min(device.limits().max_buffer_size) / frame_bytes)
+            .clamp(1, count as u64) as usize
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let batch = 1;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("viewport-export-readback"),
-        size: u64::from(padded) * u64::from(height),
+        size: frame_bytes * batch as u64,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -180,15 +230,15 @@ pub(crate) fn draw_interactive(
             pixels_per_point,
         );
     }
-    let level = level.clamp(0, 5);
-    let live = matches!(effects, Effects::Live(..));
-    let count = if live { 33 } else { jitter_sample_count(level) };
     let mut sum = if live {
         Vec::new()
     } else {
-        vec![0_u32; width as usize * height as usize * 4]
+        vec![0_u16; width as usize * height as usize * 4]
     };
     for index in 0..count {
+        if cancelled() {
+            return None;
+        }
         let mut uniform = camera_uniform;
         if !live {
             uniform.view_proj = crate::offscreen::jittered_mvp(
@@ -314,7 +364,7 @@ pub(crate) fn draw_interactive(
             wgpu::TexelCopyBufferInfo {
                 buffer: &readback,
                 layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
+                    offset: frame_bytes * (index % batch) as u64,
                     bytes_per_row: Some(padded),
                     rows_per_image: Some(height),
                 },
@@ -325,18 +375,63 @@ pub(crate) fn draw_interactive(
         if let Some(input) = &mut interaction {
             input.picker.start_readback();
         }
+        if !live && index + 1 < count && (index + 1) % batch != 0 {
+            continue;
+        }
         let slice = readback.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let completion =
+            std::sync::Arc::new(std::sync::Mutex::new((None, None::<std::task::Waker>)));
+        let callback = completion.clone();
         slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
+            let waker = {
+                let mut state = callback.lock().unwrap();
+                state.0 = Some(result);
+                state.1.take()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
         });
+        #[cfg(not(target_arch = "wasm32"))]
         device
             .poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
             })
             .ok()?;
-        receiver.recv().ok()?.ok()?;
+        std::future::poll_fn(|cx| {
+            // WebGPU completes through its promise; WebGL dispatches callbacks in poll.
+            #[cfg(target_arch = "wasm32")]
+            if device.poll(wgpu::PollType::Poll).is_err() {
+                return std::task::Poll::Ready(None);
+            }
+            let mut state = completion.lock().unwrap();
+            if let Some(result) = state.0.take() {
+                std::task::Poll::Ready(result.ok())
+            } else {
+                state.1 = Some(cx.waker().clone());
+                #[cfg(target_arch = "wasm32")]
+                {
+                    use wasm_bindgen::JsCast;
+                    let waker = cx.waker().clone();
+                    let callback = wasm_bindgen::closure::Closure::once(move || waker.wake());
+                    let scheduled = web_sys::window().and_then(|window| {
+                        window
+                            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                                callback.as_ref().unchecked_ref(),
+                                4,
+                            )
+                            .ok()
+                    });
+                    if scheduled.is_none() {
+                        return std::task::Poll::Ready(None);
+                    }
+                    callback.forget();
+                }
+                std::task::Poll::Pending
+            }
+        })
+        .await?;
         let mapped = slice.get_mapped_range();
         if live {
             let rgba = mapped
@@ -347,23 +442,28 @@ pub(crate) fn draw_interactive(
             readback.unmap();
             return Some(rgba);
         }
-        for (output, row) in sum
-            .chunks_exact_mut(width as usize * 4)
-            .zip(mapped.chunks_exact(padded as usize))
+        for frame in mapped
+            .chunks_exact(frame_bytes as usize)
+            .take(index % batch + 1)
         {
-            for (sum, value) in output.iter_mut().zip(row) {
-                *sum += u32::from(*value);
+            for (output, row) in sum
+                .chunks_exact_mut(width as usize * 4)
+                .zip(frame.chunks_exact(padded as usize))
+            {
+                for (sum, value) in output.iter_mut().zip(row) {
+                    *sum += u16::from(*value);
+                }
             }
         }
         drop(mapped);
         readback.unmap();
     }
-    if live {
+    if live || cancelled() {
         return None;
     }
     Some(
         sum.into_iter()
-            .map(|value| ((value + count as u32 / 2) / count as u32) as u8)
+            .map(|value| ((value + count as u16 / 2) / count as u16) as u8)
             .collect(),
     )
 }

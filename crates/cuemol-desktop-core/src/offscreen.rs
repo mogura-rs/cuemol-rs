@@ -800,7 +800,7 @@ async fn render_impl(
 
 /// Request a wgpu device + queue. Returns `None` when no GPU adapter is present
 /// (e.g. a headless CI box), so callers/tests self-skip.
-async fn create_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+pub(crate) async fn create_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
