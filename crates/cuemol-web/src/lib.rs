@@ -4,6 +4,7 @@ mod camera;
 mod clipboard;
 mod console;
 mod history;
+mod image_export;
 mod input;
 mod loading;
 mod morph;
@@ -48,6 +49,7 @@ thread_local! {
     static STATUS: RefCell<String> = RefCell::new(r#"{"busy":true,"scene":{"sceneId":0,"objects":[]}}"#.to_string());
 }
 enum Event {
+    ImageExport(image_export::Completion),
     RecentFiles(Vec<recent::RecentFile>),
     FilePickerError(String),
     Movie(movie::Completion),
@@ -368,6 +370,7 @@ struct App {
     last_command: u32,
     render_cancel: Option<Arc<AtomicBool>>,
     movie: movie::Movie,
+    image_export: image_export::ImageExport,
     playing: bool,
     fps: f32,
     next_frame: f64,
@@ -593,6 +596,7 @@ impl App {
             last_command: 0,
             render_cancel: None,
             movie: movie::Movie::default(),
+            image_export: Default::default(),
             playing: false,
             fps: 24.0,
             next_frame: 0.0,
@@ -714,6 +718,7 @@ impl App {
             return;
         }
         if name == "cancel_render" {
+            self.cancel_image_export();
             self.cancel_movie();
             if let Some(cancel) = &self.render_cancel {
                 cancel.store(true, Ordering::Relaxed);
@@ -1175,6 +1180,7 @@ impl App {
                     self.call(&name, args);
                     self.last_command = id;
                 }
+                Event::ImageExport(completion) => self.image_export_completion(completion),
                 Event::Movie(completion) => self.movie_completion(ctx, completion),
                 Event::PngExported(result, name) => {
                     self.busy = false;
@@ -1369,9 +1375,6 @@ impl App {
                 }
             }
         }
-    }
-    fn export_png(&mut self) {
-        self.export_png_async("cuemol.png".into(), &json!({}));
     }
     fn export_png_async(&mut self, name: String, args: &Value) {
         if self.busy || self.movie.running {
@@ -1682,6 +1685,7 @@ impl eframe::App for App {
             self.navigation.set_tool(tool);
         }
         if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.cancel_image_export();
             self.cancel_load();
             self.navigation.cancel();
             self.input.cancel();
@@ -1732,6 +1736,7 @@ impl eframe::App for App {
         self.secondary_ui(ctx);
         self.morph_ui(ctx);
         self.molecule_edit_ui(ctx);
+        self.image_export_ui(ctx);
         self.timeline_ui(ctx);
         self.rebuild();
         egui::CentralPanel::default()
@@ -1765,6 +1770,6 @@ impl eframe::App for App {
                 [rect.min.x, rect.min.y, rect.width(), rect.height()]
             })
             .collect();
-        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"recentFiles":self.recent_files,"geometryRevision":self.renderer.revision(),"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.trajectory_info().map_or(self.frame,|(_,_,frame)|frame),"busy":self.busy,"loading":self.source_active,"rendering":{"running":self.movie.running || self.render_cancel.is_some(),"movieMode":self.render_panel.movie_mode,"settings":self.render_panel.editor.snapshot(),"movieOptions":self.render_panel.movie,"historyCount":self.render_panel.history.len(),"current":self.render_panel.history.current(),"frame":self.render_panel.history.frame(),"message":self.render_panel.message,"progress":self.movie.progress},"lastCommand":self.last_command,"agent":self.agent.status(),"ui":{"keyboardInput":ctx.wants_keyboard_input(),"clipboardScope":format!("{:?}",self.clipboard_focus.scope),"modal":self.pending_close.is_some() || self.source_options.is_some(),"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
+        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"recentFiles":self.recent_files,"imageExport":self.image_export.status(),"geometryRevision":self.renderer.revision(),"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.trajectory_info().map_or(self.frame,|(_,_,frame)|frame),"busy":self.busy,"loading":self.source_active,"rendering":{"running":self.movie.running || self.render_cancel.is_some(),"movieMode":self.render_panel.movie_mode,"settings":self.render_panel.editor.snapshot(),"movieOptions":self.render_panel.movie,"historyCount":self.render_panel.history.len(),"current":self.render_panel.history.current(),"frame":self.render_panel.history.frame(),"message":self.render_panel.message,"progress":self.movie.progress},"lastCommand":self.last_command,"agent":self.agent.status(),"ui":{"keyboardInput":ctx.wants_keyboard_input(),"clipboardScope":format!("{:?}",self.clipboard_focus.scope),"modal":self.pending_close.is_some() || self.source_options.is_some() || self.image_export.active(),"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
     }
 }

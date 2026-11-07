@@ -553,24 +553,31 @@ impl App {
                     });
                     self.record_ui_rect("View menu", &view_menu.response);
                     let rendering_menu = ui.menu_button("Rendering", |ui| {
-                        let response = ui.button("Render image…");
+                        let response = ui.button("Image rendering…");
                         self.record_ui_rect("Render image", &response);
                         if response.clicked() {
                             self.request_render(false);
                             ui.close();
                         }
-                        let response = ui.button("Animation rendering…");
+                        let response = ui.button("Movie rendering…");
                         self.record_ui_rect("Animation rendering", &response);
                         if response.clicked() {
                             self.request_render(true);
                             ui.close();
                         }
-                        if ui.button("Save PNG").clicked() {
-                            self.export_png();
-                            ui.close();
-                        }
-                        let submenu = ui.menu_button("Export geometry", |ui| {
-                            for (label, format) in [("POV-Ray SDL", "pov"), ("StereoLithography", "stl"), ("Metasequoia object", "mqo")] {
+                        let submenu = ui.menu_button("Export scene", |ui| {
+                            for (label, kind, key) in [
+                                ("PNG image…", cuemol_command::image_export::ImageExportKind::Png, "png"),
+                                ("Umbreon ray-traced image…", cuemol_command::image_export::ImageExportKind::Umbreon, "umbreon"),
+                            ] {
+                                let response = ui.button(label);
+                                self.record_ui_rect(&format!("Export {key}"), &response);
+                                if response.clicked() {
+                                    self.choose_image_export(kind);
+                                    ui.close();
+                                }
+                            }
+                            for (label, format) in [("POV-Ray SDL…", "pov"), ("STL…", "stl"), ("Metasequoia (MQO)…", "mqo")] {
                                 let response = ui.button(label);
                                 self.record_ui_rect(&format!("Export {format}"), &response);
                                 if response.clicked() {
@@ -579,7 +586,7 @@ impl App {
                                 }
                             }
                         });
-                        self.record_ui_rect("Export geometry", &submenu.response);
+                        self.record_ui_rect("Export scene", &submenu.response);
                     });
                     self.record_ui_rect("Rendering menu", &rendering_menu.response);
                     let tools_menu = ui.menu_button("Tools", |ui| {

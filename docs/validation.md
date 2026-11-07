@@ -1,5 +1,35 @@
 # Validation evidence
 
+## Browser image-export workflow
+
+The browser's immediate Save PNG action has been replaced with explicit PNG and
+Umbreon entries under Rendering > Export scene. Both capture the selected
+scene/view and live camera before requesting a destination, then show the same
+options form as native egui. Native save handles remain separate from scene
+state and are released on every exit. A writable stream is opened only after
+rendering succeeds; failed or cancelled writes abort their staged bytes. Without
+File System Access, confirmation produces a normal PNG download. PNG and
+Umbreon jobs return encoded bytes directly, without an intermediate base64
+string. Geometry export remains in the same submenu.
+
+Eight browser cases pass on the rebuilt artifact: both WebGL/WebGPU image
+workflows, fallback and failure paths, staged-write cancellation, existing GPU
+PNG regressions and geometry downloads. They compare captured-camera PNG bytes
+after moving the live view, verify alpha/DPI, reject deleted targets and preserve
+existing output on cancellation or permission errors. The native GUI suite
+passes 237 cases, shared UI passes 74 cases, and distribution helpers pass all
+12 cases with the new browser asset included. All 32 existing still-render and
+movie cases also pass after the shared asynchronous frame/PNG encoder change.
+
+A real headed Linux Chromium session passes with its native save picker and no
+picker replacement. Both entries save distinct 64-by-48 RGBA images with
+150-DPI metadata. Picker, options and worker cancellation preserve scene/history
+and do not add image data to reserved files. The OPFS checks above also verify
+preservation of nonempty existing files. File System Access can reserve an empty
+new file at selection time; the application does not write image data before
+confirmation. Configured-options and final screenshots were inspected. These
+checks cover Chromium on Linux; other browser/OS combinations remain unverified.
+
 ## Tauri image-export workflow
 
 Tauri previously opened PNG options before the save picker, stored the live
@@ -53,8 +83,8 @@ pixels and the final window screenshot were inspected. The test environment
 needed GTK4 schemas compiled for its isolated Zenity fallback; this was a test
 environment repair, not an application change.
 
-The browser interactive save/options workflow still needs integration.
-The shared image target, encoder and options form are available for that work.
+The browser workflow now uses the shared image target and options form; its
+verification is recorded above.
 
 ## Prepared PNG and Umbreon image exports
 

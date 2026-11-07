@@ -74,6 +74,7 @@ pub struct ImageExportEditor {
     pub unit: Unit,
     pub retain_aspect: bool,
     pub transparent: bool,
+    pub rects: std::collections::BTreeMap<String, [f32; 4]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +96,7 @@ impl ImageExportEditor {
             unit: Unit::Pixel,
             retain_aspect: true,
             transparent: false,
+            rects: Default::default(),
         }
     }
 
@@ -107,7 +109,16 @@ impl ImageExportEditor {
         }
     }
 
+    fn record(&mut self, name: &str, response: &egui::Response) {
+        let rect = response.rect;
+        self.rects.insert(
+            format!("Image export {name}"),
+            [rect.min.x, rect.min.y, rect.width(), rect.height()],
+        );
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, file_name: &str) -> Action {
+        self.rects.clear();
         let mut open = true;
         let mut action = Action::None;
         egui::Window::new("PNG options")
@@ -122,40 +133,44 @@ impl ImageExportEditor {
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
                         ui.label("Resolution (DPI):");
-                        egui::ComboBox::from_id_salt("png_export_dpi")
+                        let response = egui::ComboBox::from_id_salt("png_export_dpi")
                             .selected_text(self.resolution_dpi.to_string())
                             .show_ui(ui, |ui| {
                                 for dpi in [72, 150, 300, 600] {
-                                    ui.selectable_value(
+                                    let response = ui.selectable_value(
                                         &mut self.resolution_dpi,
                                         dpi,
                                         dpi.to_string(),
                                     );
+                                    self.record(&format!("DPI {dpi}"), &response);
                                 }
                             });
+                        self.record("DPI", &response.response);
                         ui.end_row();
 
                         ui.label("Unit:");
-                        egui::ComboBox::from_id_salt("png_export_unit")
+                        let response = egui::ComboBox::from_id_salt("png_export_unit")
                             .selected_text(self.unit.label())
                             .show_ui(ui, |ui| {
                                 for unit in Unit::ALL {
-                                    ui.selectable_value(&mut self.unit, unit, unit.label());
+                                    let response =
+                                        ui.selectable_value(&mut self.unit, unit, unit.label());
+                                    self.record(&format!("Unit {}", unit.label()), &response);
                                 }
                             });
+                        self.record("Unit", &response.response);
                         ui.end_row();
 
                         ui.label("Width:");
                         let mut width =
                             png_pixels_to_unit(self.width, self.unit, self.resolution_dpi);
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut width)
-                                    .range(0.01..=100_000.0)
-                                    .speed(if self.unit == Unit::Pixel { 1.0 } else { 0.1 }),
-                            )
-                            .changed()
-                        {
+                        let response = ui.add(
+                            egui::DragValue::new(&mut width)
+                                .range(0.01..=100_000.0)
+                                .speed(if self.unit == Unit::Pixel { 1.0 } else { 0.1 }),
+                        );
+                        self.record("Width", &response);
+                        if response.changed() {
                             self.width =
                                 png_unit_to_pixels(width, self.unit, self.resolution_dpi).max(1);
                             if self.retain_aspect {
@@ -168,23 +183,23 @@ impl ImageExportEditor {
                         ui.label("Height:");
                         let mut height =
                             png_pixels_to_unit(self.height, self.unit, self.resolution_dpi);
-                        if ui
-                            .add_enabled(
-                                !self.retain_aspect,
-                                egui::DragValue::new(&mut height)
-                                    .range(0.01..=100_000.0)
-                                    .speed(if self.unit == Unit::Pixel { 1.0 } else { 0.1 }),
-                            )
-                            .changed()
-                        {
+                        let response = ui.add_enabled(
+                            !self.retain_aspect,
+                            egui::DragValue::new(&mut height)
+                                .range(0.01..=100_000.0)
+                                .speed(if self.unit == Unit::Pixel { 1.0 } else { 0.1 }),
+                        );
+                        self.record("Height", &response);
+                        if response.changed() {
                             self.height =
                                 png_unit_to_pixels(height, self.unit, self.resolution_dpi).max(1);
                         }
                         ui.end_row();
 
                         ui.label("Retain aspect ratio:");
-                        if ui.checkbox(&mut self.retain_aspect, "").changed() && self.retain_aspect
-                        {
+                        let response = ui.checkbox(&mut self.retain_aspect, "");
+                        self.record("Aspect", &response);
+                        if response.changed() && self.retain_aspect {
                             self.height =
                                 (f64::from(self.width) / self.aspect).round().max(1.0) as u32;
                         }
@@ -193,7 +208,8 @@ impl ImageExportEditor {
                 ui.separator();
                 ui.strong("Output");
                 ui.label(format!("Pixel size: {} x {}", self.width, self.height));
-                ui.checkbox(&mut self.transparent, "Transparent PNG");
+                let response = ui.checkbox(&mut self.transparent, "Transparent PNG");
+                self.record("Transparent", &response);
                 ui.weak(file_name);
                 ui.separator();
                 let error = self.options().validate().err();
@@ -201,13 +217,14 @@ impl ImageExportEditor {
                     ui.colored_label(ui.visuals().error_fg_color, error.to_string());
                 }
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(error.is_none(), egui::Button::new("OK"))
-                        .clicked()
-                    {
+                    let response = ui.add_enabled(error.is_none(), egui::Button::new("OK"));
+                    self.record("OK", &response);
+                    if response.clicked() {
                         action = Action::Accept;
                     }
-                    if ui.button("Cancel").clicked() {
+                    let response = ui.button("Cancel");
+                    self.record("Cancel", &response);
+                    if response.clicked() {
                         action = Action::Cancel;
                     }
                 });

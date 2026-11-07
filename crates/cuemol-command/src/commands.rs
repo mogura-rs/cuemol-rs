@@ -986,6 +986,25 @@ impl PreparedRender {
         self,
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<Value> {
+        let frame = self.render_frame_async(cancel).await?;
+        self.encode(frame)
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub async fn run_png_async_with_cancel(
+        self,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Vec<u8>> {
+        let frame = self.render_frame_async(cancel).await?;
+        self.encode_png(&frame)
+    }
+    #[cfg(target_arch = "wasm32")]
+    async fn render_frame_async(
+        &self,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<cuemol_render::UmbreonFrame> {
+        if cancel.is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Err(CueMolError::invalid_argument("Render cancelled"));
+        }
         let PreparedBackend::Umbreon {
             snapshot,
             camera,
@@ -1002,7 +1021,10 @@ impl PreparedRender {
             cancel,
         )
         .await?;
-        self.encode(frame)
+        if cancel.is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Err(CueMolError::invalid_argument("Render cancelled"));
+        }
+        Ok(frame)
     }
     fn encode_png(&self, frame: &cuemol_render::UmbreonFrame) -> Result<Vec<u8>> {
         let width = frame.width;

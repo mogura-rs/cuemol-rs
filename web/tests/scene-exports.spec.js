@@ -21,7 +21,7 @@ for (const renderer of ['webgl', 'webgpu']) {
     for (const format of ['stl','mqo','pov']) {
       const pending = page.waitForEvent('download');
       await click(page, 'Rendering menu');
-      await click(page, 'Export geometry');
+      await click(page, 'Export scene');
       await click(page, `Export ${format}`);
       const downloaded = await pending;
       expect(downloaded.suggestedFilename()).toBe(`scene.${format}`);
