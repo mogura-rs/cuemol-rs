@@ -168,3 +168,77 @@ fn animated_renderer_properties_and_visibility_do_not_leak_to_live_objects() {
         .is_visible());
     assert!(state.same_undo_state(&before));
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+#[ignore = "Requires an available rendering adapter"]
+fn movie_job_writes_bounded_frames_with_shared_settings_and_preserves_live_edits() {
+    use cuemol_command::movie::{MovieEvent, MovieJob, MovieOptions};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    let (mut state, mut camera) = animated_scene();
+    state.open_bytes("ligand.pdb", b"HETATM    1  C1  LIG A   1       1.000   0.000   0.000  1.00 10.00           C  \nEND\n").unwrap();
+    let scene = state.active_scene().unwrap();
+    let mut animation = state.scene_animation(scene).unwrap().unwrap();
+    animation.set_length(cuemol_core::time_from_seconds(0.09));
+    state.set_scene_animation(scene, Some(&animation)).unwrap();
+    call_tool(&mut state, &mut camera, "set_render_settings", &json!({"settings":"width=3; height=4; unit=cm; dpi=300; backend=umbreon; umbreon.useGI=false; umbreon.aoEnabled=false; umbreon.supersample=1"})).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let mut options = MovieOptions::default();
+    options.set_custom(directory.path().to_string_lossy().into_owned());
+    options.make_movie = false;
+    let marker = directory.path().join("movie_frm_0000.png");
+    std::fs::write(&marker, b"old output").unwrap();
+    assert!(MovieJob::start(
+        &state,
+        &camera,
+        &json!({}),
+        options.clone(),
+        [32, 24],
+        false,
+        Arc::new(|| {})
+    )
+    .is_err());
+    assert_eq!(std::fs::read(&marker).unwrap(), b"old output");
+    let mut job = MovieJob::start(
+        &state,
+        &camera,
+        &json!({}),
+        options,
+        [32, 24],
+        true,
+        Arc::new(|| {}),
+    )
+    .unwrap();
+    state.new_scene("Live edits", true);
+    camera.set_zoom(91.);
+    let edited = state.clone();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut indices = Vec::new();
+    let outcome = loop {
+        match job.poll() {
+            Some(MovieEvent::Frame { index, path }) => {
+                indices.push(index);
+                assert_eq!(image::image_dimensions(path).unwrap(), (32, 24));
+            }
+            Some(MovieEvent::Finished(outcome)) => break outcome,
+            None => {}
+        }
+        assert!(Instant::now() < deadline, "Movie render timed out");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(indices, [0, 1, 2]);
+    assert_eq!(outcome.movie.frame_count, 3);
+    assert_eq!(outcome.size, [32, 24]);
+    assert_eq!(outcome.source.settings["unit"], "px");
+    assert_eq!(outcome.source.settings["width"], 32);
+    assert_eq!(outcome.source.settings["height"], 24);
+    assert!(state.same_undo_state(&edited));
+    assert_eq!(camera.zoom(), 91.);
+    assert!(!directory.path().join("movie_frm_0003.png").exists());
+    drop(job);
+    assert!(marker.exists());
+}

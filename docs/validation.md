@@ -1,5 +1,41 @@
 # Validation evidence
 
+## Shared movie output and sequential rendering
+
+The command layer now owns movie preferences, frame-file operations, managed
+output sessions, a sequential movie job and movie metadata in render history.
+The new job uses the same typed preparation as still rendering, writes one frame
+at a time through a temporary file, and keeps one isolated scene. It retains
+completed frames after errors or cancellation. Encoding replaces an existing
+movie only after FFmpeg succeeds and produces a nonempty output; a failed
+re-encode leaves the previous movie intact. A directory/base-name lock prevents
+concurrent jobs or cleanup from changing the same output. Logs remain bounded.
+
+Temporary sessions survive application shutdown. A session lock protects live
+instances. The next session creation sweeps owned inactive folders: frames older
+than one day, movies older than 30 days, and movie sessions beyond the newest
+ten. Unknown content, symbolic links and custom output directories are skipped.
+Movie preferences omit the temporary path and retain custom-folder choices.
+History stores one preview per result and reads only the selected movie frame;
+clearing history leaves movie output files in place.
+
+Shared command tests pass 92 cases with four explicit external/GPU checks
+excluded. All six movie-scene tests also pass when the rendering check is enabled,
+including three numbered PNGs at exact pixel dimensions and concurrent live
+edits. The FFmpeg check passes explicitly for all seven supported formats;
+ffprobe verifies the resulting dimensions and three decoded frames for each.
+Failure/cancellation tests check previous-output preservation, actual encoder
+process exit, output locks and temporary-file cleanup. Native animation tests
+pass 26 cases and Tauri passes 24 with one existing GPU check excluded. Three
+file-helper tests moved from the desktop suite into the shared command suite.
+
+The previous native and Tauri frame-count functions rounded fractional end
+frames, while `AnimMgr::setup_render` floors the end frame. Both now use the
+shared reference-compatible calculation, with fractional-time regressions.
+The existing movie windows consume the shared file helpers and frame-count fix;
+the new preferences, job and movie history still need connection to the unified
+Rendering window. Browser movie execution remains separate pending work.
+
 ## Movie state isolation
 
 Native egui and Tauri now capture one shared `MovieScene` for each render job.

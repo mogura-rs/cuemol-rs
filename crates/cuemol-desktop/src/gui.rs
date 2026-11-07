@@ -30599,10 +30599,7 @@ fn new_native_animation_motion(kind: AnimKind, name: String, reference: String) 
 }
 
 fn animation_render_frame_count(duration: f64, fps: u32, duplicate_last_frame: bool) -> u32 {
-    let intervals = (duration * f64::from(fps.max(1)))
-        .round()
-        .clamp(1.0, f64::from(u32::MAX - 1)) as u32;
-    intervals + u32::from(duplicate_last_frame)
+    cuemol_command::movie::frame_count(duration, f64::from(fps), duplicate_last_frame).unwrap_or(0)
 }
 
 fn sanitize_animation_base_name(value: &str) -> String {
@@ -32459,6 +32456,8 @@ mod tests {
         assert!((1..=8).contains(&default_animation_render_concurrency()));
         assert_eq!(animation_render_frame_count(2.0, 30, false), 60);
         assert_eq!(animation_render_frame_count(2.0, 30, true), 61);
+        assert_eq!(animation_render_frame_count(0.09, 30, false), 2);
+        assert_eq!(animation_render_frame_count(0.09, 30, true), 3);
         assert_eq!(
             sanitize_animation_base_name("  demo frame/1  "),
             "demo_frame_1"

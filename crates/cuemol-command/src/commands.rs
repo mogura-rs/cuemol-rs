@@ -858,6 +858,11 @@ impl PreparedRender {
         self.output = None;
         self
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn to_file(mut self, path: &std::path::Path) -> Self {
+        self.output = Some(path.to_string_lossy().into_owned());
+        self
+    }
     pub fn with_dpi(mut self, dpi: f64) -> Self {
         self.dpi = dpi.clamp(1., 4800.);
         self

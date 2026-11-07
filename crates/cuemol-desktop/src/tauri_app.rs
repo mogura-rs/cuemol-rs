@@ -6500,8 +6500,11 @@ impl AppModel {
             }
         }
         let total = animation_seconds(animation.length());
-        let intervals = (total * input.frame_rate).round().max(1.0) as u32;
-        let frame_count = intervals.saturating_add(u32::from(input.duplicate_last_frame));
+        let frame_count = cuemol_command::movie::frame_count(
+            total,
+            input.frame_rate,
+            input.duplicate_last_frame,
+        )?;
         if frame_count > 9_999 {
             return Err("animation rendering is limited to 9999 frames".to_string());
         }
@@ -27980,6 +27983,10 @@ mod tests {
         assert_eq!(model.animation_render_frame_count(&input).unwrap(), 60);
         input.duplicate_last_frame = true;
         assert_eq!(model.animation_render_frame_count(&input).unwrap(), 61);
+        input.frame_rate = 1.4;
+        assert_eq!(model.animation_render_frame_count(&input).unwrap(), 3);
+        input.duplicate_last_frame = false;
+        assert_eq!(model.animation_render_frame_count(&input).unwrap(), 2);
         input.base_name = "../frame".to_string();
         assert!(model.animation_render_frame_count(&input).is_err());
     }

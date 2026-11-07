@@ -1,3 +1,25 @@
+mod options;
+pub use options::{base_name, frame_count, MovieOptions, FORMATS};
+#[cfg(not(target_arch = "wasm32"))]
+pub mod files;
+#[cfg(not(target_arch = "wasm32"))]
+mod job;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod sessions;
+#[cfg(not(target_arch = "wasm32"))]
+pub use job::{MovieEvent, MovieJob, MovieOutcome};
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MovieResult {
+    pub output_dir: String,
+    pub base_name: String,
+    pub frame_count: u32,
+    pub fps: f64,
+    pub movie_path: Option<String>,
+    pub options: MovieOptions,
+}
+
 use cuemol_core::{time_from_seconds, time_to_seconds, CueMolError, Result, Uid};
 use cuemol_desktop_core::DesktopAppState;
 use cuemol_qsys::Camera;
@@ -76,6 +98,30 @@ impl MovieScene {
     }
     pub fn duration(&self) -> f64 {
         self.duration
+    }
+
+    pub fn source(&self) -> Result<crate::render_history::RenderSource> {
+        crate::render_history::RenderSource::capture_scene(&self.state, self.scene)
+    }
+
+    pub fn prepare_frame(
+        &mut self,
+        index: u32,
+        fps: f64,
+        size: [u32; 2],
+    ) -> Result<crate::PreparedRender> {
+        if !fps.is_finite() || fps <= 0. {
+            return Err(CueMolError::invalid_argument("Frame rate must be positive"));
+        }
+        self.seek(f64::from(index) / fps)?;
+        crate::prepare_render(
+            &self.state,
+            &self.camera,
+            "get_screenshot",
+            &serde_json::json!({
+                "width":size[0], "height":size[1], "sceneId":self.scene.get(), "viewId":self.view.get(),
+            }),
+        )
     }
 
     pub fn seek(&mut self, seconds: f64) -> Result<()> {

@@ -57,6 +57,8 @@ pub struct RenderRecord {
     pub source: RenderSource,
     pub size: [u32; 2],
     pub elapsed_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub movie: Option<crate::movie::MovieResult>,
 }
 
 impl RenderRecord {
@@ -95,10 +97,22 @@ struct Entry {
     record: RenderRecord,
     image: ImageStorage,
     bytes: usize,
+    frame: Option<u32>,
 }
 
 impl Entry {
     fn read(&self) -> Result<Arc<[u8]>, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((movie, frame)) = self.record.movie.as_ref().zip(self.frame) {
+            let path = crate::movie::files::frame_path(
+                std::path::Path::new(&movie.output_dir),
+                &movie.base_name,
+                frame,
+            )?;
+            return std::fs::read(path)
+                .map(Arc::from)
+                .map_err(|e| format!("Movie frame is no longer available: {e}"));
+        }
         match &self.image {
             ImageStorage::Memory(bytes) => Ok(bytes.clone()),
             #[cfg(not(target_arch = "wasm32"))]
@@ -203,9 +217,11 @@ impl RenderHistory {
                 source,
                 size,
                 elapsed_seconds,
+                movie: None,
             },
             image,
             bytes,
+            frame: None,
         });
         self.next_id = self.next_id.wrapping_add(1);
         self.bytes = self.bytes.saturating_add(bytes);
@@ -218,6 +234,62 @@ impl RenderHistory {
         }
         self.selected = Some(self.entries.len() - 1);
         Ok(())
+    }
+
+    pub fn push_movie(
+        &mut self,
+        png: Arc<[u8]>,
+        source: RenderSource,
+        size: [u32; 2],
+        elapsed_seconds: Option<f64>,
+        movie: crate::movie::MovieResult,
+    ) -> Result<(), String> {
+        if movie.frame_count == 0 {
+            return Err("Movie has no rendered frames".into());
+        }
+        self.push(png, source, size, elapsed_seconds)?;
+        self.entries.back_mut().unwrap().record.movie = Some(movie);
+        Ok(())
+    }
+
+    pub fn frame(&self) -> Option<u32> {
+        let entry = self.entries.get(self.selected?)?;
+        entry
+            .record
+            .movie
+            .as_ref()
+            .map(|movie| entry.frame.unwrap_or(movie.frame_count - 1))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn select_frame_with<T>(
+        &mut self,
+        index: u32,
+        validate: impl FnOnce(&[u8]) -> Result<T, String>,
+    ) -> Result<(Arc<[u8]>, T), String> {
+        let entry = self
+            .selected
+            .and_then(|index| self.entries.get_mut(index))
+            .ok_or("No movie is selected")?;
+        let movie = entry
+            .record
+            .movie
+            .as_ref()
+            .ok_or("Selected render is not a movie")?;
+        if index >= movie.frame_count {
+            return Err("Movie frame is outside the rendered range".into());
+        }
+        let path = crate::movie::files::frame_path(
+            std::path::Path::new(&movie.output_dir),
+            &movie.base_name,
+            index,
+        )?;
+        let png: Arc<[u8]> = std::fs::read(path)
+            .map_err(|e| format!("Movie frame is no longer available: {e}"))?
+            .into();
+        let decoded = validate(&png)?;
+        entry.frame = Some(index);
+        Ok((png, decoded))
     }
 
     pub fn image(&self, index: usize) -> Result<Arc<[u8]>, String> {
@@ -339,5 +411,48 @@ mod tests {
         let second_dir = second.directory.as_ref().unwrap().path().to_owned();
         drop(second);
         assert!(!second_dir.exists());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn movie_history_reads_one_frame_and_never_owns_the_movie_output_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("movie_frm_0000.png");
+        std::fs::write(&first, b"first frame").unwrap();
+        std::fs::write(directory.path().join("movie_frm_0001.png"), b"last frame").unwrap();
+        let mut options = crate::movie::MovieOptions::default();
+        options.set_custom(directory.path().to_string_lossy().into_owned());
+        let movie = crate::movie::MovieResult {
+            output_dir: options.output_dir.clone(),
+            base_name: "movie".into(),
+            frame_count: 2,
+            fps: 30.,
+            movie_path: None,
+            options,
+        };
+        let mut history = RenderHistory::default();
+        history
+            .push_movie(
+                Arc::from(&b"last frame"[..]),
+                source("movie"),
+                [32, 24],
+                Some(1.),
+                movie,
+            )
+            .unwrap();
+        assert_eq!(history.frame(), Some(1));
+        assert_eq!(&*history.image(0).unwrap(), b"last frame");
+        let (png, ()) = history.select_frame_with(0, |_| Ok(())).unwrap();
+        assert_eq!(&*png, b"first frame");
+        assert_eq!(history.frame(), Some(0));
+        assert!(history
+            .select_frame_with(1, |_| Err::<(), _>("decode failed".into()))
+            .is_err());
+        assert_eq!(history.frame(), Some(0));
+        assert!(history.select_frame_with(2, |_| Ok(())).is_err());
+        assert_eq!(&*history.image(0).unwrap(), b"first frame");
+        history.clear();
+        assert_eq!(std::fs::read(first).unwrap(), b"first frame");
+        assert!(directory.path().join("movie_frm_0001.png").exists());
     }
 }
