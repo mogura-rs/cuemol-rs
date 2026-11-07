@@ -1984,7 +1984,9 @@ enum AnimationTaskOutput {
 #[derive(Debug)]
 struct AnimationRenderJob {
     settings: AnimationRenderSettings,
-    restore: Option<AnimationRenderRestore>,
+    scene: Option<cuemol_command::movie::MovieScene>,
+    display: cuemol_command::movie::MovieDisplay,
+    denoise: UmbreonDenoiseMode,
     total_frames: u32,
     next_frame: u32,
     completed_frames: u32,
@@ -1996,11 +1998,10 @@ struct AnimationRenderJob {
     encoding_started: bool,
 }
 
-#[derive(Debug)]
-struct AnimationRenderRestore {
-    state: DesktopAppState,
-    camera: CameraController,
-    elapsed: f32,
+impl Drop for AnimationRenderJob {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -12069,10 +12070,6 @@ impl GuiApplication {
         if self.animation_render_job.is_some() {
             return;
         }
-        if let Err(error) = self.restore_animation_playback(camera, false) {
-            self.set_animation_render_error(error);
-            return;
-        }
         let Ok(animation) = self.active_animation_manager() else {
             self.set_animation_render_error("No animation in active scene");
             return;
@@ -12126,13 +12123,24 @@ impl GuiApplication {
             "Starting {} frames at {}x{} / {} fps",
             total_frames, settings.width, settings.height, settings.fps
         ));
-        let restore = self.capture_animation_render_restore(camera);
+        let scene = match cuemol_command::movie::MovieScene::capture(
+            &self.state,
+            &camera.to_qsys_camera("__current"),
+            &serde_json::json!({}),
+        ) {
+            Ok(scene) => scene,
+            Err(error) => {
+                self.set_animation_render_error(error.to_string());
+                return;
+            }
+        };
+        let display = self.animation_movie_display(camera);
         let worker_capacity = settings.concurrency as usize;
-        self.animation_elapsed = 0.0;
-        self.animation_playing = false;
         self.animation_render_job = Some(AnimationRenderJob {
             settings,
-            restore: Some(restore),
+            scene: Some(scene),
+            display,
+            denoise: self.umbreon_denoise,
             total_frames,
             next_frame: 0,
             completed_frames: 0,
@@ -12183,7 +12191,9 @@ impl GuiApplication {
             .collect();
         let mut job = AnimationRenderJob {
             settings: settings.clone(),
-            restore: None,
+            scene: None,
+            display: Default::default(),
+            denoise: UmbreonDenoiseMode::None,
             total_frames,
             next_frame: total_frames,
             completed_frames: total_frames,
@@ -12210,14 +12220,31 @@ impl GuiApplication {
         }
     }
 
-    fn capture_animation_render_restore(
+    fn animation_movie_display(
         &self,
         camera: &CameraController,
-    ) -> AnimationRenderRestore {
-        AnimationRenderRestore {
-            state: self.state.clone(),
-            camera: camera.clone(),
-            elapsed: self.animation_elapsed,
+    ) -> cuemol_command::movie::MovieDisplay {
+        cuemol_command::movie::MovieDisplay {
+            selection: self.selection_text.clone(),
+            unit_cell: self.show_unit_cell,
+            symmetry_mates: self.show_symm_mates,
+            density_contour: self.show_density_contour,
+            density_level: self.density_level,
+            hydrogen_bonds: self.show_hbonds,
+            color_proofing: self.color_proofing,
+            extra_meshes: [
+                self.show_density_solid
+                    .then(|| self.density_solid_mesh.clone())
+                    .flatten(),
+                self.show_surface
+                    .then(|| self.surface_mesh.clone())
+                    .flatten(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+            background: self.background.rgba_f32(),
+            swap_stereo_eyes: camera.swap_stereo_eyes,
         }
     }
 
@@ -12359,56 +12386,36 @@ impl GuiApplication {
     fn schedule_animation_frame(
         &mut self,
         job: &mut AnimationRenderJob,
-        camera: &mut CameraController,
+        _camera: &mut CameraController,
     ) -> std::result::Result<(), String> {
         let index = job.next_frame;
         let elapsed = f64::from(index) / f64::from(job.settings.fps);
-        let scene_uid = self
-            .state
-            .active_scene()
-            .ok_or_else(|| "no active scene".to_string())?;
-        let view_uid = self
-            .state
-            .active_view_summary()
-            .map(|view| view.uid)
-            .ok_or_else(|| "no active view".to_string())?;
-        let animation = self.active_animation_manager()?;
-        if animation.startcam().is_empty() {
-            let restore = job
-                .restore
-                .as_ref()
-                .ok_or_else(|| "animation render restore state is missing".to_string())?;
-            self.state
-                .set_active_view_camera(&restore.camera.to_qsys_camera("__current"))
-                .map_err(|error| error.to_string())?;
-        }
-        let animated_camera = self
-            .state
-            .apply_scene_animation_time(scene_uid, time_from_seconds(elapsed), view_uid)
-            .map_err(|error| error.to_string())?;
-        camera.apply_qsys_camera(&animated_camera);
-        self.animation_elapsed = elapsed as f32;
-        self.rebuild_snapshot();
-        let mut frame_camera = camera.clone();
-        frame_camera.perspective = job.settings.perspective;
-        let qsys_camera = cuemol_qsys::stereo::with_eye_order(
-            &frame_camera.to_qsys_camera("__animation_render"),
-            job.settings.backend == "Umbreon" && frame_camera.swap_stereo_eyes,
+        let scene = job
+            .scene
+            .as_mut()
+            .ok_or("animation render scene is missing")?;
+        scene.seek(elapsed).map_err(|error| error.to_string())?;
+        let mut camera = scene.camera().clone();
+        camera.set_perspective(job.settings.perspective);
+        let camera = cuemol_qsys::stereo::with_eye_order(
+            &camera,
+            job.settings.backend == "Umbreon" && job.display.swap_stereo_eyes,
         );
-        let labels = animation_frame_labels(&self.state, &job.settings, &qsys_camera);
-        let snapshot = self.snapshot.clone();
-        let background = self.background.rgba_f32();
+        let labels = animation_frame_labels(scene.state(), &job.settings, &camera);
+        let snapshot = scene
+            .snapshot(&job.display)
+            .map_err(|error| error.to_string())?;
         let receiver = spawn_animation_frame_task(AnimationFrameTask {
             settings: job.settings.clone(),
             index,
             total_frames: job.total_frames,
             snapshot,
-            camera: qsys_camera,
+            camera,
             labels,
-            background,
+            background: job.display.background,
             progress: Arc::clone(&job.progress),
             cancel: Arc::clone(&job.cancel),
-            denoise: self.umbreon_denoise,
+            denoise: job.denoise,
         });
         job.next_frame += 1;
         job.frame_receivers.push(receiver);
@@ -12417,20 +12424,11 @@ impl GuiApplication {
 
     fn finish_animation_render(
         &mut self,
-        job: AnimationRenderJob,
-        camera: &mut CameraController,
+        _job: AnimationRenderJob,
+        _camera: &mut CameraController,
         status: &str,
         failed: bool,
     ) {
-        if let Some(restore) = job.restore {
-            self.state = restore.state;
-            *camera = restore.camera;
-            self.animation_elapsed = restore.elapsed;
-            self.animation_playing = false;
-            self.animation_start_camera = None;
-            self.animation_started_from_ui = false;
-            self.rebuild_snapshot();
-        }
         self.refresh_animation_render_outputs();
         if failed {
             self.set_animation_render_error(status);
@@ -32541,22 +32539,34 @@ mod tests {
     }
 
     #[test]
-    fn animation_render_cancel_and_restore_are_scoped_to_animation_state() {
+    fn animation_render_completion_preserves_concurrent_edits() {
         let mut app = GuiApplication::new();
         let initial_camera = CameraController {
             target: Vec3::new(1.0, 2.0, 3.0),
             ..Default::default()
         };
         let mut camera = initial_camera.clone();
+        app.add_animation_motion(AnimKind::Spin, &mut camera)
+            .unwrap();
+        let movie_scene = cuemol_command::movie::MovieScene::capture(
+            &app.state,
+            &camera.to_qsys_camera("movie"),
+            &serde_json::json!({}),
+        )
+        .unwrap();
         app.animation_elapsed = 1.25;
-        let restore = app.capture_animation_render_restore(&camera);
 
         app.background = SceneBackground::Black;
         app.animation_elapsed = 9.0;
         camera.rotate_by(20.0, -10.0);
+        let edited_camera = camera.clone();
+        app.state.new_scene("Edited during rendering", true);
+        let edited_state = app.state.clone();
         let job = AnimationRenderJob {
             settings: AnimationRenderSettings::default(),
-            restore: Some(restore),
+            scene: Some(movie_scene),
+            display: Default::default(),
+            denoise: UmbreonDenoiseMode::None,
             total_frames: 1,
             next_frame: 1,
             completed_frames: 1,
@@ -32569,11 +32579,12 @@ mod tests {
         };
         app.finish_animation_render(job, &mut camera, "done", false);
         assert_eq!(app.background, SceneBackground::Black);
-        assert_eq!(app.animation_elapsed, 1.25);
-        assert!(camera.target.abs_diff_eq(initial_camera.target, 1.0e-6));
+        assert_eq!(app.animation_elapsed, 9.0);
+        assert!(app.state.same_undo_state(&edited_state));
+        assert!(camera.target.abs_diff_eq(edited_camera.target, 1.0e-6));
         assert!(camera
             .orientation
-            .abs_diff_eq(initial_camera.orientation, 1.0e-6));
+            .abs_diff_eq(edited_camera.orientation, 1.0e-6));
 
         let cancel = Arc::new(AtomicBool::new(true));
         let task = AnimationFrameTask {
@@ -32616,7 +32627,7 @@ mod tests {
         app.start_animation_movie_reencode();
 
         let mut job = app.animation_render_job.take().expect("movie encode job");
-        assert!(job.restore.is_none());
+        assert!(job.scene.is_none());
         assert_eq!(job.total_frames, 2);
         assert_eq!(job.completed_frames, 2);
         assert_eq!(job.frame_paths.len(), 2);
@@ -32642,7 +32653,9 @@ mod tests {
                 make_movie: true,
                 ..Default::default()
             },
-            restore: None,
+            scene: None,
+            display: Default::default(),
+            denoise: UmbreonDenoiseMode::None,
             total_frames: 1,
             next_frame: 1,
             completed_frames: 1,
@@ -32665,7 +32678,9 @@ mod tests {
         let mut camera = CameraController::default();
         let job = AnimationRenderJob {
             settings: AnimationRenderSettings::default(),
-            restore: None,
+            scene: None,
+            display: Default::default(),
+            denoise: UmbreonDenoiseMode::None,
             total_frames: 1,
             next_frame: 1,
             completed_frames: 0,
@@ -32781,7 +32796,15 @@ mod tests {
         };
 
         app.start_animation_render(&mut camera);
+        app.state.new_scene("Edited after starting a movie", true);
+        let edited = app.state.clone();
+        camera.rotate_by(17., 23.);
+        let edited_camera = camera.to_qsys_camera("edited");
+        let revision = app.snapshot_revision;
         app.poll_animation_render(&mut camera);
+        assert!(app.state.same_undo_state(&edited));
+        assert_eq!(camera.to_qsys_camera("edited"), edited_camera);
+        assert_eq!(app.snapshot_revision, revision);
         let job = app.animation_render_job.as_ref().expect("render job");
         assert_eq!(job.next_frame, 3);
         assert_eq!(job.frame_receivers.len(), 3);
@@ -32793,8 +32816,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(app.animation_render_job.is_none(), "workers did not cancel");
+        assert!(app.state.same_undo_state(&edited));
+        assert_eq!(camera.to_qsys_camera("edited"), edited_camera);
         for index in 0..10 {
-            let path = std::env::temp_dir().join(format!("{base_name}_{index:04}.png"));
+            let path = std::env::temp_dir().join(format!("{base_name}_frm_{index:04}.png"));
             if path.is_file() {
                 fs::remove_file(path).expect("remove rendered PNG");
             }

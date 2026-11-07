@@ -20,6 +20,7 @@ mod pov_render;
 pub use file_commands::scene_save_options;
 mod view_commands;
 pub use downloads::{advance_fetch, load_fetched, prepare_fetch, FetchPlan};
+pub mod movie;
 pub mod navigation;
 mod nodes;
 mod object_export;

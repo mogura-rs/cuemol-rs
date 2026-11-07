@@ -1439,7 +1439,7 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
     assert!(dialog.contains("setInterval(poll, 150)"));
     assert!(dialog.contains("if (running) event.preventDefault()"));
     assert!(TAURI_APP_RS.contains("struct TauriAnimationRenderJob"));
-    assert!(TAURI_APP_RS.contains("restore: AppModelUndo"));
+    assert!(TAURI_APP_RS.contains("scene: Option<cuemol_command::movie::MovieScene>"));
     assert!(TAURI_APP_RS.contains("spawn_tauri_animation_frame(task)"));
     assert!(TAURI_APP_RS.contains("spawn_tauri_animation_movie(task)"));
     assert!(TAURI_APP_RS.contains("run_pov_process_with_poll"));

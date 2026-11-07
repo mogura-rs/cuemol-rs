@@ -1,5 +1,31 @@
 # Validation evidence
 
+## Movie state isolation
+
+Native egui and Tauri now capture one shared `MovieScene` for each render job.
+Frame preparation advances that private state without changing the active view,
+live animation clock or current scene. Missing start cameras fall back to the
+captured target camera inside the private state. Display choices and background
+are captured once, and Tauri uses the requested scene's background even when
+another scene is active. Completion, cancellation, frame failure and encoder
+failure no longer restore an application-wide snapshot. Dropping a job signals
+all of its remaining workers to stop.
+
+Five shared regressions pass for inactive targets, valid and missing start cameras,
+live playback, renderer property/visibility changes and subsequent edits. The
+affected native suite passes 29 tests, including real PNG output, bounded workers
+and concurrent edits during cancellation. Tauri passes 27 affected tests with
+one GPU check excluded from the normal run. That GPU test also passes explicitly
+with Metal access and writes two numbered PNG frames. Its initial sandboxed run
+had no GPU adapter. Model tests cover frame success/failure, target preparation,
+re-encoding cancellation and preservation of edits. Movie controls and output
+history still need integration with the shared Rendering window; this change
+fixes live-state safety in the existing movie paths.
+
+The old movie test expected an application snapshot to be restored. That assertion
+hid the loss of edits made while rendering. The behavioral tests and source
+contract now require an isolated movie scene instead.
+
 ## Tauri shared Rendering window
 
 Tauri now presents Image, Render and NPR Detail tabs over the shared typed editor,

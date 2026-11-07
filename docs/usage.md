@@ -899,6 +899,12 @@ Its modeless Rendering window retains history when closed, and its target select
 waits for the new scene settings before accepting edits. Animation rendering still
 uses a separate window.
 
+Native animation renders capture the target scene and display settings at Start.
+Rendering does not move the live camera or animation timeline, and edits made
+while frames render remain after completion, cancellation or an error. Each job
+uses its captured scene for every frame. Re-encoding existing frames also leaves
+the current scene untouched.
+
 Umbreon is implemented in Rust and uses a BVH for primary, shadow, AO, and GI
 rays. Its script exporter applies typed scene render settings, including physical
 image size, DPI, lighting, adaptive antialiasing, reduced-resolution AO and NPR

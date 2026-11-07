@@ -1695,7 +1695,8 @@ struct TauriPovRenderResult {
 
 struct TauriAnimationRenderJob {
     input: AnimationRenderInput,
-    restore: AppModelUndo,
+    scene: Option<cuemol_command::movie::MovieScene>,
+    display: cuemol_command::movie::MovieDisplay,
     cancel: Arc<AtomicBool>,
     progress: Arc<AtomicU32>,
     total_frames: u32,
@@ -1704,6 +1705,52 @@ struct TauriAnimationRenderJob {
     frame_receivers: Vec<mpsc::Receiver<Result<TauriAnimationTaskOutput, String>>>,
     movie_receiver: Option<mpsc::Receiver<Result<TauriAnimationTaskOutput, String>>>,
     encoding_started: bool,
+}
+
+impl Drop for TauriAnimationRenderJob {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+impl TauriAnimationRenderJob {
+    fn prepare_frame(&mut self) -> Result<TauriAnimationFrameTask, String> {
+        let input = &self.input;
+        let scene = self
+            .scene
+            .as_mut()
+            .ok_or("animation render scene is missing")?;
+        scene
+            .seek(f64::from(self.next_frame) / input.frame_rate)
+            .map_err(|error| error.to_string())?;
+        let snapshot = scene
+            .snapshot(&self.display)
+            .map_err(|error| error.to_string())?;
+        let mut camera = scene.camera().clone();
+        camera.set_perspective(input.perspective);
+        let labels = collect_scene_pov_labels(
+            scene.state(),
+            Uid::new(input.scene_uid),
+            &camera,
+            input.width,
+            input.height,
+            input.backend == "povray" && input.pov_labels,
+        );
+        Ok(TauriAnimationFrameTask {
+            input: input.clone(),
+            index: self.next_frame,
+            total_frames: self.total_frames,
+            snapshot,
+            camera: cuemol_qsys::stereo::with_eye_order(
+                &camera,
+                input.backend == "umbreon" && self.display.swap_stereo_eyes,
+            ),
+            labels,
+            background: self.display.background,
+            cancel: Arc::clone(&self.cancel),
+            progress: Arc::clone(&self.progress),
+        })
+    }
 }
 
 struct TauriAnimationFrameTask {
@@ -6461,102 +6508,40 @@ impl AppModel {
         Ok(frame_count)
     }
 
-    fn begin_animation_render(&mut self, input: &AnimationRenderInput) -> Result<(), String> {
-        fs::create_dir_all(Path::new(input.output_dir.trim()))
-            .map_err(|error| error.to_string())?;
-        let scene_uid = Uid::new(input.scene_uid);
-        if self.desktop.active_scene() != Some(scene_uid) {
-            if !self.desktop.set_active_scene(Some(scene_uid)) {
-                return Err(format!("scene {} was not found", input.scene_uid));
-            }
-            self.camera = self
-                .desktop
-                .active_scene_saved_camera()
-                .or_else(|| self.desktop.active_view_camera())
-                .unwrap_or_default();
-            self.sync_active_scene_properties();
-        }
-        self.camera.set_perspective(input.perspective);
-        self.animation_elapsed = 0.0;
-        self.animation_playing = true;
-        self.animation_start_camera = Some(self.camera.clone());
-        self.invalidate_snapshot(false);
-        Ok(())
-    }
-
-    fn prepare_animation_frame_task(
-        &mut self,
-        input: &AnimationRenderInput,
-        index: u32,
-        total_frames: u32,
-        cancel: Arc<AtomicBool>,
-        progress: Arc<AtomicU32>,
-    ) -> Result<TauriAnimationFrameTask, String> {
-        let total = self.animation_duration();
-        let target = (f64::from(index) / input.frame_rate).min(total);
-        self.apply_active_animation_time(target)?;
-        self.animation_elapsed = target;
-        let mut snapshot = self
+    fn animation_movie_display(
+        &self,
+        scene_uid: Uid,
+    ) -> Result<cuemol_command::movie::MovieDisplay, String> {
+        let scene = self
             .desktop
-            .active_render_snapshot(&self.selection)
-            .map_err(|error| error.to_string())?;
-        self.desktop.append_crystal_geometry(
-            &mut snapshot,
-            self.show_unit_cell,
-            self.show_symmetry_mates,
-        );
-        self.desktop.append_density_geometry(
-            &mut snapshot,
-            self.density_level,
-            self.show_density_contour,
-        );
-        if self.color_proofing {
-            let scene = self
-                .desktop
-                .active_scene()
-                .and_then(|uid| self.desktop.scene_manager().scene(uid));
-            let profile = scene
-                .and_then(|scene| scene.scene_attribute("icc_filename"))
-                .unwrap_or("");
-            let intent = scene
-                .and_then(|scene| scene.scene_attribute("icc_intent"))
-                .and_then(icc_intent_index)
-                .unwrap_or(0);
-            if self
-                .desktop
-                .apply_color_proof_with(&mut snapshot, profile, intent)
-                .is_err()
-            {
-                cuemol_render::apply_generic_color_proof(&mut snapshot);
-            }
-        }
-        let background = background_rgba(&self.background)?;
-        let labels = collect_scene_pov_labels(
-            &self.desktop,
-            Uid::new(input.scene_uid),
-            &self.camera,
-            input.width,
-            input.height,
-            input.backend == "povray" && input.pov_labels,
-        );
-        Ok(TauriAnimationFrameTask {
-            input: input.clone(),
-            index,
-            total_frames,
-            snapshot,
-            camera: cuemol_qsys::stereo::with_eye_order(
-                &self.camera,
-                input.backend == "umbreon" && self.swap_stereo_eyes,
-            ),
-            labels,
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or("render scene is missing")?;
+        let active = self.desktop.active_scene() == Some(scene_uid);
+        let background = background_rgba(if active {
+            &self.background
+        } else {
+            scene.scene_attribute("bgcolor").unwrap_or("black")
+        })?;
+        Ok(cuemol_command::movie::MovieDisplay {
+            selection: self.selection.clone(),
+            unit_cell: self.show_unit_cell,
+            symmetry_mates: self.show_symmetry_mates,
+            density_contour: self.show_density_contour,
+            density_level: self.density_level,
+            color_proofing: if active {
+                self.color_proofing
+            } else {
+                scene_attr_bool(scene.scene_attribute("use_colproof"), false)
+            },
             background: [
                 background[0] as f32,
                 background[1] as f32,
                 background[2] as f32,
-                1.0,
+                1.,
             ],
-            cancel,
-            progress,
+            swap_stereo_eyes: self.swap_stereo_eyes,
+            ..Default::default()
         })
     }
 
@@ -13013,18 +12998,18 @@ fn handle_model_request(
             if model.animation_render_job.is_some() {
                 return Err("an animation rendering job is already running".to_string());
             }
-            model.restore_animation_playback(false)?;
             let total_frames = model.animation_render_frame_count(&input)?;
-            let restore = model.capture_undo();
-            if let Err(error) = model.begin_animation_render(&input) {
-                model.restore_undo(restore)?;
-                return Err(error);
-            }
+            let scene = cuemol_command::movie::MovieScene::capture(
+                &model.desktop, &model.camera, &serde_json::json!({"sceneId":input.scene_uid}),
+            ).map_err(|error| error.to_string())?;
+            let display = model.animation_movie_display(Uid::new(input.scene_uid))?;
+            fs::create_dir_all(Path::new(input.output_dir.trim())).map_err(|error| error.to_string())?;
             let cancel = Arc::new(AtomicBool::new(false));
             let progress = Arc::new(AtomicU32::new(0));
             model.animation_render_job = Some(TauriAnimationRenderJob {
                 input,
-                restore,
+                scene: Some(scene),
+                display,
                 cancel,
                 progress,
                 total_frames,
@@ -13059,7 +13044,8 @@ fn handle_model_request(
             let progress = Arc::new(AtomicU32::new(950_000));
             model.animation_render_job = Some(TauriAnimationRenderJob {
                 input,
-                restore: model.capture_undo(),
+                scene: None,
+                display: Default::default(),
                 cancel: Arc::new(AtomicBool::new(false)),
                 progress,
                 total_frames,
@@ -13118,7 +13104,6 @@ fn handle_model_request(
             job.frame_receivers = pending_receivers;
             if let Some(error) = failure {
                 job.cancel.store(true, Ordering::Relaxed);
-                model.restore_undo(job.restore)?;
                 model.status = error.clone();
                 return Ok(ModelResponse::Message(format!("error:{error}")));
             }
@@ -13130,7 +13115,6 @@ fn handle_model_request(
                     }
                     Err(mpsc::TryRecvError::Disconnected) => {
                         let error = "Animation movie worker disconnected".to_string();
-                        model.restore_undo(job.restore)?;
                         model.status = error.clone();
                         return Ok(ModelResponse::Message(format!("error:{error}")));
                     }
@@ -13140,7 +13124,6 @@ fn handle_model_request(
                         } else {
                             error
                         };
-                        model.restore_undo(job.restore)?;
                         model.status = error.clone();
                         return Ok(ModelResponse::Message(format!("error:{error}")));
                     }
@@ -13152,13 +13135,11 @@ fn handle_model_request(
                             model.log_lines.push(format!("Animation> {log}"));
                         }
                         let frame_count = job.completed_frames;
-                        model.restore_undo(job.restore)?;
                         model.status = format!("Animation movie rendered: {frame_count} frame(s)");
                         return Ok(ModelResponse::Message(format!("complete:{frame_count}")));
                     }
                     Ok(Ok(TauriAnimationTaskOutput::Frame { .. })) => {
                         let error = "Animation movie worker returned a frame".to_string();
-                        model.restore_undo(job.restore)?;
                         model.status = error.clone();
                         return Ok(ModelResponse::Message(format!("error:{error}")));
                     }
@@ -13166,7 +13147,6 @@ fn handle_model_request(
             }
             if job.cancel.load(Ordering::Relaxed) {
                 if job.frame_receivers.is_empty() && job.movie_receiver.is_none() {
-                    model.restore_undo(job.restore)?;
                     let message = "Animation rendering cancelled".to_string();
                     model.status = message.clone();
                     return Ok(ModelResponse::Message(format!("error:{message}")));
@@ -13178,18 +13158,10 @@ fn handle_model_request(
             while job.next_frame < job.total_frames
                 && job.frame_receivers.len() < job.input.concurrency as usize
             {
-                let frame_index = job.next_frame;
-                let task = match model.prepare_animation_frame_task(
-                    &job.input,
-                    frame_index,
-                    job.total_frames,
-                    Arc::clone(&job.cancel),
-                    Arc::clone(&job.progress),
-                ) {
+                let task = match job.prepare_frame() {
                     Ok(task) => task,
                     Err(error) => {
                         job.cancel.store(true, Ordering::Relaxed);
-                        model.restore_undo(job.restore)?;
                         model.status = error.clone();
                         return Ok(ModelResponse::Message(format!("error:{error}")));
                     }
@@ -13198,7 +13170,6 @@ fn handle_model_request(
                     Ok(receiver) => receiver,
                     Err(error) => {
                         job.cancel.store(true, Ordering::Relaxed);
-                        model.restore_undo(job.restore)?;
                         model.status = error.clone();
                         return Ok(ModelResponse::Message(format!("error:{error}")));
                     }
@@ -13244,7 +13215,6 @@ fn handle_model_request(
                         return Ok(ModelResponse::Message(response));
                     }
                     Err(error) => {
-                        model.restore_undo(job.restore)?;
                         model.status = error.clone();
                         return Ok(ModelResponse::Message(format!("error:{error}")));
                     }
@@ -13255,7 +13225,6 @@ fn handle_model_request(
                 let frame_count = job.completed_frames;
                 let output_pattern = Path::new(&job.input.output_dir)
                     .join(format!("{}_frm_%04d.png", job.input.base_name.trim()));
-                model.restore_undo(job.restore)?;
                 model.status = format!("Animation rendered: {frame_count} frame(s)");
                 model.log_lines.push(format!(
                     "Animation frames: {}",
@@ -27912,6 +27881,8 @@ mod tests {
             response,
             ModelResponse::Message(ref value) if value == "running:2:2:950000:movie"
         ));
+        model.desktop.new_scene("Edit while encoding", true);
+        let edited = model.desktop.clone();
         handle_model_request(&mut model, ModelRequest::CancelAnimationRender).unwrap();
         let response = handle_model_request(&mut model, ModelRequest::PollAnimationRender).unwrap();
         assert!(matches!(
@@ -27919,6 +27890,7 @@ mod tests {
             ModelResponse::Message(ref value)
                 if value == "error:Animation rendering cancelled"
         ));
+        assert!(model.desktop.same_undo_state(&edited));
         fs::remove_dir_all(output_dir).unwrap();
     }
 
@@ -28013,7 +27985,7 @@ mod tests {
     }
 
     #[test]
-    fn animation_render_cancel_restores_live_state_before_first_frame() {
+    fn animation_render_cancel_preserves_live_state_and_concurrent_edits() {
         let output_dir = std::env::temp_dir().join(format!(
             "cuemol-tauri-animation-cancel-{}",
             std::process::id()
@@ -28049,8 +28021,11 @@ mod tests {
             bitrate_kbps: 10_240,
         };
         handle_model_request(&mut model, ModelRequest::StartAnimationRender(input)).unwrap();
-        assert_eq!(model.animation_elapsed, 0.0);
-        assert!(!model.camera.is_perspective());
+        assert_eq!(model.animation_elapsed, 0.5);
+        assert!(model.camera.is_perspective());
+        model.desktop.new_scene("Edited during rendering", true);
+        model.camera.set_zoom(37.);
+        let edited = model.desktop.clone();
         handle_model_request(&mut model, ModelRequest::CancelAnimationRender).unwrap();
         let response = handle_model_request(&mut model, ModelRequest::PollAnimationRender).unwrap();
         assert!(matches!(
@@ -28059,10 +28034,70 @@ mod tests {
                 if state == "error:Animation rendering cancelled"
         ));
         assert!(model.animation_render_job.is_none());
+        assert!(model.desktop.same_undo_state(&edited));
+        assert_eq!(model.camera.zoom(), 37.);
         assert_eq!(model.animation_elapsed, 0.5);
         assert_eq!(model.camera.center(), Vector4::new3(3.0, 4.0, 5.0));
         assert!(model.camera.is_perspective());
         let _ = std::fs::remove_dir(output_dir);
+    }
+
+    #[test]
+    fn animation_frames_use_captured_target_and_keep_edits_on_success_or_failure() {
+        for failed in [false, true] {
+            let output = tempfile::tempdir().unwrap();
+            let mut model = model_without_gpu();
+            add_test_animation(&mut model, AnimKind::Spin, 1.0);
+            let scene = model.desktop.active_scene().unwrap();
+            model.camera.set_zoom(87.);
+            model.desktop.set_active_view_camera(&model.camera).unwrap();
+            model
+                .desktop
+                .scene_manager_mut()
+                .scene_mut(scene)
+                .unwrap()
+                .set_scene_attribute("bgcolor", "white");
+            let mut input = animation_test_input(scene.get(), output.path());
+            input.backend = "umbreon".into();
+            input.perspective = false;
+            model.desktop.new_scene("Active other scene", true);
+            model.background = "red".into();
+            model.camera.set_zoom(11.);
+            let before = model.desktop.clone();
+            handle_model_request(&mut model, ModelRequest::StartAnimationRender(input)).unwrap();
+            assert!(model.desktop.same_undo_state(&before));
+            let mut job = model.animation_render_job.take().unwrap();
+            let frame = job.prepare_frame().unwrap();
+            assert_eq!(frame.background, [1., 1., 1., 1.]);
+            assert!(!frame.camera.is_perspective());
+            assert!(model.desktop.same_undo_state(&before));
+            model.desktop.new_scene("Edited while worker runs", true);
+            model.camera.set_zoom(29.);
+            let edited = model.desktop.clone();
+            let (sender, receiver) = mpsc::channel();
+            sender
+                .send(if failed {
+                    Err("frame failed".into())
+                } else {
+                    Ok(TauriAnimationTaskOutput::Frame {
+                        index: 0,
+                        path: output.path().join("movie_frm_0000.png"),
+                        log: String::new(),
+                    })
+                })
+                .unwrap();
+            job.next_frame = 1;
+            job.total_frames = 1;
+            job.frame_receivers.push(receiver);
+            model.animation_render_job = Some(job);
+            let response =
+                handle_model_request(&mut model, ModelRequest::PollAnimationRender).unwrap();
+            assert!(matches!(response, ModelResponse::Message(ref result)
+                if result == if failed { "error:frame failed" } else { "complete:1" }));
+            assert!(model.animation_render_job.is_none());
+            assert!(model.desktop.same_undo_state(&edited));
+            assert_eq!(model.camera.zoom(), 29.);
+        }
     }
 
     #[test]
