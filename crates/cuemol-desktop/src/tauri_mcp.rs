@@ -168,13 +168,17 @@ pub(super) fn poll(
             );
             match prepared {
                 Ok(prepared) => {
-                    std::thread::spawn(move || {
-                        let response = tool_response(
-                            request.message["id"].clone(),
-                            prepared.run().map_err(|error| error.to_string()),
-                        );
-                        let _ = request.reply.send(Some(response));
-                    });
+                    model
+                        .render_tasks
+                        .spawn(Arc::new(AtomicBool::new(false)), move |cancel| {
+                            let response = tool_response(
+                                request.message["id"].clone(),
+                                prepared
+                                    .run_with_cancel(&cancel)
+                                    .map_err(|error| error.to_string()),
+                            );
+                            let _ = request.reply.send(Some(response));
+                        });
                 }
                 Err(error) => {
                     let _ = request.reply.send(Some(tool_response(

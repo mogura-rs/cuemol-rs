@@ -1650,6 +1650,7 @@ struct AppModel {
     pov_render_job: Option<TauriPovRenderJob>,
     pov_render_result: Option<TauriPovRenderResult>,
     rendering: rendering::Rendering,
+    render_tasks: crate::background_tasks::BackgroundTasks,
     image_exports: image_export::ImageExports,
     animation_render_job: Option<TauriAnimationRenderJob>,
     log_lines: Vec<String>,
@@ -1676,6 +1677,12 @@ struct TauriApbsJob {
     agent_cancel: Option<Arc<AtomicBool>>,
 }
 
+impl Drop for TauriApbsJob {
+    fn drop(&mut self) {
+        cuemol_command::external::cancel_workers(&self.cancel, [&self.receiver]);
+    }
+}
+
 impl TauriApbsJob {
     fn reply(&mut self, outcome: Result<serde_json::Value, String>) {
         if let Some(reply) = self.agent_reply.take() {
@@ -1696,6 +1703,15 @@ struct TauriPovRenderJob {
     cancel: Arc<AtomicBool>,
     work_dir: PathBuf,
     labels: Vec<GuiAtomLabel>,
+}
+
+impl Drop for TauriPovRenderJob {
+    fn drop(&mut self) {
+        cuemol_command::external::cancel_workers(&self.cancel, [&self.receiver]);
+        if !self.work_dir.as_os_str().is_empty() {
+            let _ = fs::remove_dir_all(&self.work_dir);
+        }
+    }
 }
 
 struct TauriPovRenderResult {
@@ -1719,7 +1735,10 @@ struct TauriAnimationRenderJob {
 
 impl Drop for TauriAnimationRenderJob {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        cuemol_command::external::cancel_workers(
+            &self.cancel,
+            self.frame_receivers.iter().chain(&self.movie_receiver),
+        );
     }
 }
 
@@ -1931,6 +1950,7 @@ impl AppModel {
             pov_render_job: None,
             pov_render_result: None,
             rendering: Default::default(),
+            render_tasks: Default::default(),
             image_exports: Default::default(),
             animation_render_job: None,
             remote_revision: 0,
@@ -12851,7 +12871,7 @@ fn handle_model_request(
             Ok(ModelResponse::Message("running".to_string()))
         }
         ModelRequest::PollPovRender => {
-            let Some(job) = model.pov_render_job.take() else {
+            let Some(mut job) = model.pov_render_job.take() else {
                 return Ok(ModelResponse::Message("idle".to_string()));
             };
             match job.receiver.try_recv() {
@@ -12860,21 +12880,21 @@ fn handle_model_request(
                     Ok(ModelResponse::Message("running".to_string()))
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    let _ = fs::remove_dir_all(job.work_dir);
+                    let _ = fs::remove_dir_all(&job.work_dir);
                     model.status = "POV-Ray worker disconnected".to_string();
                     Ok(ModelResponse::Message(
                         "error:POV-Ray worker disconnected".to_string(),
                     ))
                 }
                 Ok(Err(error)) => {
-                    let _ = fs::remove_dir_all(job.work_dir);
+                    let _ = fs::remove_dir_all(&job.work_dir);
                     model.status = error.clone();
                     Ok(ModelResponse::Message(format!("error:{error}")))
                 }
                 Ok(Ok(output)) => {
                     if !job.labels.is_empty() {
                         if let Err(error) = overlay_pov_labels(&output.output_path, &job.labels) {
-                            let _ = fs::remove_dir_all(job.work_dir);
+                            let _ = fs::remove_dir_all(&job.work_dir);
                             model.status = error.clone();
                             return Ok(ModelResponse::Message(format!("error:{error}")));
                         }
@@ -12882,7 +12902,7 @@ fn handle_model_request(
                     let image = match fs::read(&output.output_path) {
                         Ok(image) => image,
                         Err(error) => {
-                            let _ = fs::remove_dir_all(job.work_dir);
+                            let _ = fs::remove_dir_all(&job.work_dir);
                             return Err(format!("failed to read POV-Ray result: {error}"));
                         }
                     };
@@ -12897,7 +12917,7 @@ fn handle_model_request(
                     }
                     let data_uri = format!("data:image/png;base64,{}", base64_encode(&image));
                     model.pov_render_result = Some(TauriPovRenderResult {
-                        work_dir: job.work_dir,
+                        work_dir: std::mem::take(&mut job.work_dir),
                         image_path: output.output_path,
                     });
                     model.status = "POV-Ray rendering complete".to_string();
@@ -13369,6 +13389,7 @@ fn spawn_model(initial_paths: Vec<PathBuf>, app: tauri::AppHandle) -> ManagedSta
             let mut api = cuemol_command::transport::GuiApiServer::default();
             let mut protocol = cuemol_command::Protocol::without_history();
             loop {
+                model.render_tasks.reap();
                 model.poll_image_export();
                 if model.rendering_pending() {
                     model.poll_rendering();
@@ -13461,6 +13482,7 @@ fn spawn_model(initial_paths: Vec<PathBuf>, app: tauri::AppHandle) -> ManagedSta
                         job.cancel.store(true, Ordering::Relaxed);
                     }
                     api.stop();
+                    drop(model);
                     let _ = envelope
                         .response
                         .send(Ok(ModelResponse::Message("Stopped".into())));
@@ -17186,7 +17208,7 @@ pub fn run() -> Result<(), tauri::Error> {
                     })
                     .is_ok()
                 {
-                    let _ = finished.recv_timeout(std::time::Duration::from_secs(2));
+                    let _ = finished.recv_timeout(std::time::Duration::from_secs(15));
                 }
             }
         }
@@ -17563,6 +17585,7 @@ mod tests {
             pov_render_job: None,
             pov_render_result: None,
             rendering: Default::default(),
+            render_tasks: Default::default(),
             image_exports: Default::default(),
             animation_render_job: None,
             remote_revision: 0,

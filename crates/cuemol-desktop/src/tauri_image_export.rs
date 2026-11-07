@@ -22,7 +22,7 @@ struct Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        cuemol_command::external::cancel_workers(&self.cancel, &self.receiver);
     }
 }
 

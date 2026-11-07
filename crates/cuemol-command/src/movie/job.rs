@@ -244,7 +244,6 @@ impl MovieJob {
         let wake = self.wake.clone();
         let (send, receive) = mpsc::channel();
         std::thread::spawn(move || {
-            let _lease = lease;
             let result = frame
                 .to_file(temporary.path())
                 .run_with_cancel(&cancel)
@@ -256,6 +255,7 @@ impl MovieJob {
                     temporary.persist(&path).map_err(|e| e.to_string())?;
                     Ok(path)
                 });
+            drop(lease);
             let _ = send.send(result);
             wake();
         });
@@ -286,8 +286,8 @@ impl MovieJob {
         let wake = self.wake.clone();
         let (send, receive) = mpsc::channel();
         std::thread::spawn(move || {
-            let _lease = lease;
             let result = encode(&executable, &directory, &path, args, &cancel);
+            drop(lease);
             let _ = send.send(result);
             wake();
         });
@@ -371,7 +371,12 @@ impl MovieJob {
 
 impl Drop for MovieJob {
     fn drop(&mut self) {
-        self.cancel();
+        crate::external::cancel_workers(
+            &self.cancel,
+            self.worker.iter().map(|worker| match worker {
+                Worker::Frame(receiver) | Worker::Encode(receiver) => receiver,
+            }),
+        );
     }
 }
 
@@ -519,6 +524,66 @@ mod tests {
         fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_exit_after_dropping_movie_job_stops_encoder() {
+        const CHILD_DIRECTORY: &str = "CUEMOL_MOVIE_DROP_TEST_DIRECTORY";
+        if let Some(directory) = std::env::var_os(CHILD_DIRECTORY) {
+            let directory = PathBuf::from(directory);
+            frames(&directory);
+            let encoder = script(
+                &directory,
+                "encoder",
+                "echo $$ > encoder.pid; exec sleep 30",
+            );
+            let mut state = DesktopAppState::new();
+            state.put_config_value("cuemol2.ui.ffmpeg-path", encoder.to_string_lossy());
+            let job = MovieJob::reencode(
+                &state,
+                options(&directory),
+                RenderSource::default(),
+                Arc::new(|| {}),
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !directory.join("encoder.pid").exists() {
+                assert!(Instant::now() < deadline, "encoder did not start");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(job);
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "movie::job::tests::process_exit_after_dropping_movie_job_stops_encoder",
+                "--nocapture",
+            ])
+            .env(CHILD_DIRECTORY, directory.path())
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let pid = fs::read_to_string(directory.path().join("encoder.pid")).unwrap();
+        let alive = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        if alive {
+            let _ = Command::new("kill").args(["-KILL", pid.trim()]).status();
+        }
+        assert!(
+            !alive,
+            "encoder outlived the process that owned the movie job"
+        );
+        assert!(fs::read_dir(directory.path())
+            .unwrap()
+            .all(|entry| !files::is_pending(&entry.unwrap().file_name().to_string_lossy())));
     }
 
     #[cfg(unix)]

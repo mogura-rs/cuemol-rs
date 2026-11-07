@@ -4,8 +4,24 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::Receiver,
+    },
     time::{Duration, Instant},
 };
+
+/// Cancel workers and allow bounded time for child processes and staging files to close.
+pub fn cancel_workers<'a, T: 'a>(
+    cancel: &AtomicBool,
+    receivers: impl IntoIterator<Item = &'a Receiver<T>>,
+) {
+    cancel.store(true, Ordering::Relaxed);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    for receiver in receivers {
+        let _ = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+    }
+}
 
 pub fn resolve(state: &DesktopAppState, tool: &str) -> Result<PathBuf> {
     let key = match tool {

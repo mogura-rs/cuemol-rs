@@ -923,7 +923,10 @@ in the background. Reopening reuses the same window; its position and dimensions
 are saved separately from the main window. Ctrl/Command-W hides Rendering;
 Escape also hides the Tauri window. Ctrl/Command-Q requests application exit
 through the main window and its unsaved-scene confirmation. Both native
-frontends commit pending render settings before that confirmation. The Image tab sets size, physical units, DPI and
+frontends commit pending render settings before that confirmation. When exit is
+accepted, they cancel active image/movie and external-tool workers and wait
+briefly for their cleanup. Completed movie frames and prior output files remain
+available. The Image tab sets size, physical units, DPI and
 transparency. The Render tab contains independent supersampling, lighting, AO quality, GI lighting
 and shadow choices, with grouped advanced controls. NPR offers raytracing or AO;
 its Detail tab edits hatch layers and tone specifications. Selecting a quality

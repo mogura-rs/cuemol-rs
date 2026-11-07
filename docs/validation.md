@@ -1,5 +1,47 @@
 # Validation evidence
 
+## Application shutdown and external workers
+
+An exit regression reproduced an FFmpeg process surviving the process that
+owned its movie job. Setting a cancellation flag alone did not leave time for
+the worker to stop the child and remove staging files. Native and Tauri job
+owners now cancel and wait for completion, with a two-second bound per worker
+group. Movie workers release their output lease before reporting completion.
+APBS, image export and the legacy POV/movie paths use the same shutdown rule;
+successful POV previews retain their work directory until the result is closed.
+
+MCP and Agent image tasks now have an application-owned task collection.
+Completed tasks are reaped without cancelling a shared Agent turn; shutdown
+cancels active tasks and gives them a bounded cleanup interval. A native OS
+exit check also exposed that retaining the event-loop runner skipped its
+application destructor. The application is now dropped before retaining the
+window/GPU runner. Tauri acknowledges model shutdown only after dropping the
+model, and the exit handler allows that cleanup to finish.
+
+Validation:
+
+- Shared command/library: 100 passed with four existing ignored tests. The new
+  subprocess regression failed before the fix and passed afterward, checking
+  both encoder termination and removal of pending outputs.
+- Native GUI/library: 244 passed. Tauri model/library: 214 passed with six
+  existing ignored tests. Shell contracts: 68 passed. The task-collection
+  regression also passed after the native application-drop change.
+- Real Linux native application: an active MCP POV worker stopped after OS
+  Alt-F4, the application exited successfully and the previous image survived.
+- Real Linux Tauri application: File > Quit stopped four concurrent fixture
+  processes for FFmpeg, APBS, legacy POV and MCP POV. Staging/work directories
+  were removed, and previous image/movie files retained their original bytes.
+  These fixtures wait rather than perform scientific calculations.
+- Normal Linux and Apple-silicon native/Tauri builds pass. On the authorized
+  macOS host, an in-process AppKit probe opened and hid Rendering, then invoked
+  the real Quit menu. Both applications exited normally with status zero;
+  the probe did not force successful exit. This extends the earlier menu check
+  to final application shutdown, without claiming physical input coverage.
+
+The cleanup wait is bounded; a non-responsive worker can exceed it. Forced OS
+termination is outside this normal-exit check. Logs and fixture results are in
+`.cache/current-audit/*shutdown*` and `.cache/current-audit/cuemol-worker-*`.
+
 ## macOS application menus
 
 Native egui and Tauri now install the shared CueMol3 application-menu structure

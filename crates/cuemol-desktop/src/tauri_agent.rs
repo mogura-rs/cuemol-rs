@@ -145,7 +145,7 @@ impl AppModel {
                 {
                     Ok(render) => {
                         let cancel = self.agent.operation_cancel();
-                        std::thread::spawn(move || {
+                        self.render_tasks.spawn(cancel, move |cancel| {
                             let result = render
                                 .run_with_cancel(&cancel)
                                 .map_err(|error| error.to_string());

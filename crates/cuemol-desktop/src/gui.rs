@@ -161,6 +161,7 @@ pub fn run_with_paths(paths: Vec<PathBuf>) -> Result<()> {
     let run_result = event_loop.run_app(&mut runner).map_err(gui_error);
     let init_error = runner.init_error.take();
     runner.api.stop();
+    drop(runner.app.take());
     std::mem::forget(runner);
     run_result?;
     init_error.map_or(Ok(()), Err)
@@ -744,12 +745,13 @@ impl NativeRunner {
                 });
                 match prepared {
                     Ok(prepared) => {
-                        std::thread::spawn(move || {
-                            send_native_tool_result(
-                                request,
-                                prepared.run().map_err(|e| e.to_string()),
-                            )
-                        });
+                        app.render_tasks
+                            .spawn(Arc::new(AtomicBool::new(false)), move |cancel| {
+                                send_native_tool_result(
+                                    request,
+                                    prepared.run_with_cancel(&cancel).map_err(|e| e.to_string()),
+                                )
+                            });
                     }
                     Err(error) => send_native_tool_result(request, Err(error)),
                 }
@@ -1227,6 +1229,7 @@ impl Drop for NativeRenderWorker {
 
 struct GuiApplication {
     mcp_listen_port: Option<u16>,
+    render_tasks: crate::background_tasks::BackgroundTasks,
     agent: cuemol_ui::AgentPanel,
     state: DesktopAppState,
     open_path: String,
@@ -1924,7 +1927,10 @@ struct AnimationRenderJob {
 
 impl Drop for AnimationRenderJob {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        cuemol_command::external::cancel_workers(
+            &self.cancel,
+            self.frame_receivers.iter().chain(&self.movie_receiver),
+        );
     }
 }
 
@@ -2080,6 +2086,12 @@ struct NativeApbsJob {
     agent_turn_cancel: Option<Arc<AtomicBool>>,
 }
 
+impl Drop for NativeApbsJob {
+    fn drop(&mut self) {
+        cuemol_command::external::cancel_workers(&self.cancel, [&self.receiver]);
+    }
+}
+
 impl NativeApbsJob {
     fn reply(&mut self, outcome: std::result::Result<serde_json::Value, String>) {
         if let Some(reply) = self.agent_reply.take() {
@@ -2097,6 +2109,15 @@ struct NativePovRenderJob {
     cancel: Arc<AtomicBool>,
     work_dir: PathBuf,
     labels: Vec<GuiAtomLabel>,
+}
+
+impl Drop for NativePovRenderJob {
+    fn drop(&mut self) {
+        cuemol_command::external::cancel_workers(&self.cancel, [&self.receiver]);
+        if !self.work_dir.as_os_str().is_empty() {
+            let _ = fs::remove_dir_all(&self.work_dir);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -4676,6 +4697,7 @@ impl GuiApplication {
             ray_worker: None,
             ray_job: None,
             mcp_listen_port: None,
+            render_tasks: Default::default(),
             pov_render_settings: NativePovRenderSettings::default(),
             pov_render_job: None,
             pov_render_result: None,
@@ -4884,7 +4906,7 @@ impl GuiApplication {
                 }) {
                     Ok(render) => {
                         let cancel = self.agent.operation_cancel();
-                        std::thread::spawn(move || {
+                        self.render_tasks.spawn(cancel, move |cancel| {
                             let result = render.run_with_cancel(&cancel).map_err(|e| e.to_string());
                             let _ = reply.send_blocking(result);
                         });
@@ -4997,6 +5019,7 @@ impl GuiApplication {
     }
 
     fn ui(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        self.render_tasks.reap();
         self.apply_script_view(camera);
         if self.animation_render_job.is_none() {
             if let Some(scene) = self.state.active_scene() {
@@ -15935,23 +15958,23 @@ impl GuiApplication {
     }
 
     fn poll_pov_render(&mut self) {
-        let Some(job) = self.pov_render_job.take() else {
+        let Some(mut job) = self.pov_render_job.take() else {
             return;
         };
         match job.receiver.try_recv() {
             Err(mpsc::TryRecvError::Empty) => self.pov_render_job = Some(job),
             Err(mpsc::TryRecvError::Disconnected) => {
-                let _ = fs::remove_dir_all(job.work_dir);
+                let _ = fs::remove_dir_all(&job.work_dir);
                 self.set_status("POV-Ray worker disconnected");
             }
             Ok(Err(error)) => {
-                let _ = fs::remove_dir_all(job.work_dir);
+                let _ = fs::remove_dir_all(&job.work_dir);
                 self.set_status(error);
             }
             Ok(Ok(output)) => {
                 if !job.labels.is_empty() {
                     if let Err(error) = overlay_animation_labels(&output.output_path, &job.labels) {
-                        let _ = fs::remove_dir_all(job.work_dir);
+                        let _ = fs::remove_dir_all(&job.work_dir);
                         self.set_status(error);
                         return;
                     }
@@ -15966,7 +15989,7 @@ impl GuiApplication {
                     );
                 }
                 self.pov_render_result = Some(NativePovRenderResult {
-                    work_dir: job.work_dir,
+                    work_dir: std::mem::take(&mut job.work_dir),
                     image_path: output.output_path,
                     saved: false,
                 });
