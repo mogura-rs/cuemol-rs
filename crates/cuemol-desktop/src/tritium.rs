@@ -4,7 +4,39 @@ use cuemol_ui::shell::{self, Activity, Icon};
 use serde_json::json;
 
 impl GuiApplication {
+    pub(super) fn cancel_numeric_previews(&mut self, camera: &mut CameraController) {
+        let mut changes = self.inspector.cancel_numeric_edit();
+        changes.extend(self.density_panel.cancel());
+        changes.extend(self.animation_inspector.cancel());
+        for (tool, args) in changes {
+            self.tritium_command(tool, args, camera);
+        }
+    }
+
     pub(super) fn tritium_layout(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        if self
+            .activity
+            .is_some_and(|activity| !activity.enabled(&self.state))
+        {
+            self.activity = Some(Activity::Explorer);
+        }
+        if !self.state.plugin_tab_enabled(self.bottom_tab.config_name()) {
+            self.bottom_tab = BottomTab::Output;
+        }
+        if !self.state.plugin_enabled("mdtools") {
+            self.trajectory_playing = false;
+            self.md_trajectory_draft = None;
+        }
+        if !self.state.plugin_enabled("agent") {
+            self.agent.cancel("AI Agent plugin disabled.");
+            self.agent.visible = false;
+        }
+        if !self
+            .state
+            .console_dialect_enabled(self.console.dialect.label())
+        {
+            self.console.dialect = cuemol_command::console::Dialect::CueMol;
+        }
         self.menu_bar(ctx, camera);
         if self.show_toolbar {
             self.tritium_toolbar(ctx, camera);
@@ -16,7 +48,12 @@ impl GuiApplication {
             self.show_workspace = true;
             self.agent.visible = false;
         }
-        if shell::activity_bar(ctx, &mut self.activity) {
+        if shell::activity_bar_filtered(
+            ctx,
+            &mut self.activity,
+            |activity| activity.enabled(&self.state),
+            |_, _| {},
+        ) {
             self.open_options_dialog();
         }
         if before != self.activity {
@@ -199,6 +236,10 @@ impl GuiApplication {
             .resizable(true)
             .show(ctx, |ui| {
                 shell::header(ui, activity.title());
+                if activity == Activity::Catalog {
+                    cuemol_ui::catalog::show(ui);
+                    return;
+                }
                 if activity == Activity::Agent {
                     if let Some(prompt) = self.agent.show_docked(ui) {
                         let mut view = camera.to_qsys_camera("__current");
@@ -428,15 +469,7 @@ impl GuiApplication {
             };
         }
         if cuemol_command::tool_changes_scene(name) {
-            for (tool, args) in self.inspector.cancel_numeric_edit() {
-                self.tritium_command(tool, args, camera);
-            }
-            for (tool, args) in self.density_panel.cancel() {
-                self.tritium_command(tool, args, camera);
-            }
-            for (tool, args) in self.animation_inspector.cancel() {
-                self.tritium_command(tool, args, camera);
-            }
+            self.cancel_numeric_previews(camera);
         }
         let record_history = cuemol_command::tool_records_history(name)
             && !cuemol_command::is_view_property_write(&self.state, name, &args);
@@ -517,6 +550,9 @@ impl GuiApplication {
                         (BottomTab::Animation, "Animation"),
                         (BottomTab::Trajectory, "MD Trajectory"),
                     ] {
+                        if !self.state.plugin_tab_enabled(tab.config_name()) {
+                            continue;
+                        }
                         if shell::tab(ui, label, self.bottom_tab == tab, compact).clicked() {
                             self.bottom_tab = tab;
                             self.show_bottom_panel = true;
@@ -619,6 +655,59 @@ impl GuiApplication {
 mod tests {
     use super::*;
     use egui_kittest::kittest::Queryable;
+    #[test]
+    fn plugin_options_apply_cancel_and_remove_selected_contributions() {
+        let mut app = GuiApplication::new();
+        let directory = tempfile::tempdir().unwrap();
+        app.config_path = directory.path().join("config.tsv").to_string_lossy().into();
+        let mut camera = CameraController::default();
+        for accept in [false, true] {
+            app.open_options_dialog();
+            app.options_pane = OptionsPane::Plugins;
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1280., 900.))
+                .build(|ctx| app.ui(ctx, &mut camera));
+            harness.run();
+            assert!(harness.query_by_label("MD Trajectory").is_none());
+            assert!(harness.query_by_label("Component Catalog").is_some());
+            harness.get_by_label("MD Tools").click();
+            harness.get_by_label("Component Catalog").click();
+            harness.run();
+            harness
+                .get_by_label(if accept { "OK" } else { "Cancel" })
+                .click();
+            harness.run();
+            assert_eq!(harness.query_by_label("MD Trajectory").is_some(), accept);
+            if accept {
+                harness.get_by_label("Component Catalog").click();
+                harness.run();
+                assert!(harness.query_by_label("Forms").is_some());
+            }
+            drop(harness);
+            assert_eq!(app.state.plugin_enabled("mdtools"), accept);
+        }
+        app.bottom_tab = BottomTab::Trajectory;
+        app.trajectory_playing = true;
+        let old = app.capture_undo();
+        app.undo_stack.push(old);
+        app.state.set_plugin_enabled("mdtools", false).unwrap();
+        app.state.set_plugin_enabled("catalog", false).unwrap();
+        app.undo(&mut camera);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1280., 900.))
+            .build(|ctx| app.ui(ctx, &mut camera));
+        harness.run();
+        assert!(harness.query_by_label("MD Trajectory").is_none());
+        assert!(harness.query_by_label("Component Catalog").is_none());
+        drop(harness);
+        assert_eq!(app.bottom_tab, BottomTab::Output);
+        assert_eq!(app.activity, Some(Activity::Explorer));
+        assert!(!app.trajectory_playing);
+        let mut restored = DesktopAppState::new();
+        restored.load_config_text(&app.state.config_text()).unwrap();
+        assert!(!restored.plugin_enabled("mdtools"));
+    }
+
     #[test]
     fn camera_keyboard_navigation_retains_list_focus_for_rename() {
         let mut app = GuiApplication::new();
@@ -727,6 +816,7 @@ mod tests {
     #[test]
     fn tritium_activity_buttons_switch_and_collapse_the_sidebar() {
         let mut app = GuiApplication::new();
+        app.state.set_plugin_enabled("mdtools", true).unwrap();
         let mut camera = CameraController::default();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(1280., 900.))
@@ -794,6 +884,7 @@ mod tests {
     #[test]
     fn compact_bottom_tabs_remain_clickable_beside_the_inspector() {
         let mut app = GuiApplication::new();
+        app.state.set_plugin_enabled("mdtools", true).unwrap();
         let mut camera = CameraController::default();
         let scene = app.state.active_scene().unwrap();
         let molecule = cuemol_molstr::read_pdb_str(

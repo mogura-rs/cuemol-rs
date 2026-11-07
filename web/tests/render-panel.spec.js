@@ -1,6 +1,6 @@
 import {test, expect} from '@playwright/test';
 import {PNG} from 'pngjs';
-import {load, call} from './support.js';
+import {load, call, enablePlugins} from './support.js';
 
 const molecule = 'HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n';
 async function present(page) {
@@ -144,6 +144,7 @@ test('Render remains usable in a small desktop window',async({page},testInfo)=>{
 
 for (const width of [900,760]) {
 test(`Bottom tabs remain reachable beside the Inspector at ${width}px`,async({page},testInfo)=>{
+  await enablePlugins(page,['mdtools']);
   await page.setViewportSize({width,height:650});
   await page.goto('./?renderer=webgl');
   await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);

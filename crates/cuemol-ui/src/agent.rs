@@ -117,6 +117,10 @@ impl AgentPanel {
         ctx: &Context,
         revision: u64,
     ) {
+        if !state.plugin_enabled("agent") {
+            self.status = "Enable AI Agent in Settings > Plugins first.".into();
+            return;
+        }
         if self.running() {
             return;
         }

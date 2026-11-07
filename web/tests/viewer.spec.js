@@ -2,7 +2,7 @@ import {test,expect} from '@playwright/test';
 import {PNG} from 'pngjs';
 import {gzipSync} from 'node:zlib';
 import {existsSync, readFileSync} from 'node:fs';
-import {load,call} from './support.js';
+import {load,call,enablePlugins} from './support.js';
 const structure=`HETATM    1  C1  LIG A   1      -2.000   0.000   0.000  1.00 10.00           C  
 HETATM    2  O1  LIG A   1       0.000   0.000   0.000  1.00 10.00           O  
 HETATM    3  N1  LIG A   1       1.300   1.000   0.000  1.00 10.00           N  
@@ -543,6 +543,7 @@ async function startAgent(page,prompt) {
   await page.evaluate(prompt=>window.cuemol.agent.start(prompt,{enabled:true,model:'openai:test-model',reasoning:'default',endpoint:`${location.origin}/mock-api`},'mock-browser-key'),prompt);
 }
 test('browser agent streams, downloads structures, sees rendered images, and groups undo',async({page},testInfo)=>{
+  await enablePlugins(page,['agent']);
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   let round=0, imageSeen=false;
   await page.route('**/agent-structure.pdb',route=>route.fulfill({contentType:'text/plain',body:structure}));
@@ -582,6 +583,7 @@ test('browser agent streams, downloads structures, sees rendered images, and gro
 });
 
 test('browser agent cancellation keeps completed edits and rejects late tool calls',async({page})=>{
+  await enablePlugins(page,['agent']);
   await ready(page);await load(page,'ligand.pdb',Buffer.from(structure));
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
   const object=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
@@ -607,6 +609,7 @@ test('browser agent cancellation keeps completed edits and rejects late tool cal
 });
 
 test('browser agent seeks an indexed trajectory and undo restores the previous coordinates',async({page})=>{
+  await enablePlugins(page,['agent']);
   await ready(page);await load(page,'topology.pdb',Buffer.from(structure));
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
   await load(page,'agent.dcd',dcd(5));
@@ -625,6 +628,48 @@ test('browser agent seeks an indexed trajectory and undo restores the previous c
   expect((await page.evaluate(()=>window.cuemol.status())).agent.messages.some(m=>m.role==='Error')).toBe(false);
   expect((await call(page,'undo')).frame).toBe(0);
   expect((await call(page,'redo')).frame).toBe(4);
+});
+
+test('browser agent cancellation rejects a pending indexed frame after a new turn starts',async({page})=>{
+  await enablePlugins(page,['agent']);
+  await ready(page);await load(page,'topology.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  await load(page,'agent.dcd',dcd(5));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Indexed 5 frames');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().busy)).toBe(false);
+  const original=(await call(page,'clear_undo')).scene.objects[0];
+  const object=original.id;
+  await call(page,'set_node_prop',{nodeType:'object',nodeId:object,prop:'name',value:'Undo sentinel'});
+  let round=0;
+  await page.route('**/mock-api/responses',route=>{
+    const output=++round===1?[agentCall('enable_toolsets',{toolsets:['trajectory']},'enable'),agentCall('set_frame',{objId:object,frame:4},'frame')]:[];
+    return route.fulfill({contentType:'text/event-stream',body:agentSse(output)});
+  });
+  await page.evaluate(()=>{
+    const read=Blob.prototype.arrayBuffer;
+    window.frameReleases=[];
+    Blob.prototype.arrayBuffer=function(...args){
+      return new Promise(resolve=>window.frameReleases.push(()=>read.apply(this,args).then(resolve)));
+    };
+    window.releaseFrames=async()=>{
+      Blob.prototype.arrayBuffer=read;
+      await Promise.all(window.frameReleases.map(release=>release()));
+    };
+  });
+  await startAgent(page,'Read frame 4.');
+  await expect.poll(()=>page.evaluate(()=>window.frameReleases.length)).toBeGreaterThan(0);
+  await page.evaluate(()=>{
+    window.cuemol.agent.cancel();
+    window.cuemol.agent.start('Describe the unchanged scene.',{enabled:true,model:'openai:test-model',reasoning:'default',endpoint:`${location.origin}/mock-api`},'mock-browser-key');
+  });
+  await expect.poll(()=>round).toBe(2);
+  await page.evaluate(()=>window.releaseFrames());
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().agent.running)).toBe(false);
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  expect((await page.evaluate(()=>window.cuemol.status())).frame).toBe(0);
+  const undone=await call(page,'undo');
+  expect(undone.scene.objects[0].name).toBe(original.name);
+  expect(undone.frame).toBe(0);
 });
 
 test('Tritium Inspector edits the selected object and toolbar undo restores it',async({page},testInfo)=>{

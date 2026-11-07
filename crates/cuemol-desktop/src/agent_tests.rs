@@ -31,6 +31,7 @@ fn mock(output: Value, finish: bool) -> (String, std::thread::JoinHandle<()>) {
     (endpoint, worker)
 }
 fn start(app: &mut GuiApplication, ctx: &egui::Context, endpoint: String) {
+    app.state.set_plugin_enabled("agent", true).unwrap();
     app.agent.settings = cuemol_agent::Settings {
         enabled: true,
         model: "openai:test-model".into(),
@@ -113,7 +114,7 @@ fn agent_apbs_runs_in_background_and_joins_the_turns_undo_transaction() {
         assert!(Instant::now() < deadline, "{}", app.agent.status());
         app.agent_ui(&ctx, &mut camera);
         saw_background |= app.apbs_job.is_some();
-        app.poll_apbs_calculation();
+        app.poll_apbs_calculation(&mut CameraController::default());
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(saw_background);
@@ -169,7 +170,7 @@ fn external_edit_cancels_agent_apbs_without_importing_late_output() {
     assert!(!app.agent.running());
     while app.apbs_job.is_some() {
         assert!(Instant::now() < deadline);
-        app.poll_apbs_calculation();
+        app.poll_apbs_calculation(&mut CameraController::default());
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(app.state.active_density_map_summaries().is_empty());
@@ -179,4 +180,63 @@ fn external_edit_cancels_agent_apbs_without_importing_late_output() {
     );
     assert!(app.undo_stack.is_empty());
     worker.join().unwrap();
+}
+
+#[test]
+fn ready_apbs_output_is_discarded_after_cancel_or_mcp_disable() {
+    for remote in [false, true] {
+        let mut app = GuiApplication::new();
+        let scene = app.state.ensure_active_scene();
+        let directory = tempfile::tempdir().unwrap();
+        let dx_path = directory.path().join("potential.dx");
+        fs::write(&dx_path, "object 1 class gridpositions counts 1 1 2\norigin 0 0 0\ndelta 1 0 0\ndelta 0 1 0\ndelta 0 0 1\nobject 2 class gridconnections counts 1 1 2\nobject 3 class array type double rank 0 items 2 data follows\n-1 1\n").unwrap();
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(ApbsProcessOutput {
+                work_dir: directory.path().to_owned(),
+                dx_path,
+                log: String::new(),
+            }))
+            .unwrap();
+        let (reply, result) = mpsc::sync_channel(1);
+        app.apbs_job = Some(NativeApbsJob {
+            receiver,
+            cancel: Arc::new(AtomicBool::new(!remote)),
+            potential_name: "cancelled".into(),
+            scene_uid: scene,
+            started: Instant::now(),
+            agent_reply: None,
+            agent_turn_cancel: None,
+            command: remote.then_some(cuemol_command::transport::ApiRequest {
+                message: json!({"id":1}),
+                reply,
+            }),
+        });
+        app.poll_apbs_calculation(&mut CameraController::default());
+        assert!(app.apbs_job.is_none());
+        assert!(app.state.density_map_summaries(scene).is_empty());
+        assert!(app.undo_stack.is_empty());
+        assert!(!directory.path().exists());
+        if remote {
+            assert_eq!(result.recv().unwrap().unwrap()["result"]["isError"], true);
+        }
+    }
+}
+
+#[test]
+fn saved_plugin_choice_overrides_legacy_agent_settings() {
+    let mut app = GuiApplication::new();
+    app.agent.settings.enabled = true;
+    app.state.load_config_text("# cuemol-config-v2\n").unwrap();
+    app.sync_agent_plugin();
+    assert!(app.state.plugin_enabled("agent"));
+    app.state
+        .load_config_text("# cuemol-config-v2\nplugins:agent:enabled\tfalse\n")
+        .unwrap();
+    app.sync_agent_plugin();
+    assert!(!app.agent.settings.enabled);
+    assert!(!app.state.plugin_enabled("agent"));
+    app.state.set_plugin_enabled("agent", true).unwrap();
+    app.sync_agent_plugin();
+    assert!(app.agent.settings.enabled);
 }

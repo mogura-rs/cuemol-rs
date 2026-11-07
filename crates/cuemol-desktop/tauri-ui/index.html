@@ -276,6 +276,7 @@
             <button type="button" class="activity-item" data-activity="view" aria-label="View" aria-pressed="false" title="View" data-icon="view"></button>
             <button type="button" class="activity-item" data-activity="selection" aria-label="Selection" aria-pressed="false" title="Selection" data-icon="selection"></button>
             <button type="button" class="activity-item" data-activity="crystal" aria-label="Crystal" aria-pressed="false" title="Crystal" data-icon="crystal"></button>
+            <button type="button" class="activity-item" data-activity="catalog" aria-label="Component Catalog" title="Component Catalog" data-icon="settings" hidden></button>
             <button type="button" class="activity-item" data-activity="actions" aria-label="Actions" aria-pressed="false" title="Actions" data-icon="actions"></button>
           </div>
           <button type="button" class="activity-item" data-dialog="Options" aria-label="Settings" title="Settings" data-icon="settings"></button>
@@ -405,6 +406,11 @@
 
 
 
+          <section class="action-panel activity-inactive" data-activity-panel="catalog">
+            <details open><summary>Forms</summary><label>Text<input value="Example" /></label><label><input type="checkbox" checked />Enabled</label><label>Number<input type="number" min="0" max="100" value="12" /></label><label>Choice<select><option>First</option><option>Second</option></select></label><button disabled>Disabled</button></details>
+            <details open><summary>Lists</summary><details open><summary>Molecule</summary><div>Renderer</div></details></details>
+            <details open><summary>Properties</summary><label>Name<input value="Example" /></label><label>Color<input type="color" value="#aaddff" /></label><label>Opacity<input type="range" min="0" max="100" value="100" /></label><label>Read only<input value="Molecule" readonly /></label></details>
+          </section>
           <section class="action-panel" data-activity-panel="actions">
             <div class="action-history-pane">
               <h2>History</h2>
@@ -530,7 +536,7 @@
             </div>
           </section>
               </div>
-              <div class="bottom-content active" data-bottom-panel="output">
+              <div class="bottom-content active" data-bottom-panel="console">
                 <div class="console-toolbar">
                   <div role="radiogroup" aria-label="Console language">
                     <button type="button" role="radio" aria-checked="true" data-console-dialect="CueMol">CueMol</button>
@@ -547,6 +553,7 @@
                 <div id="console-completions" role="listbox" aria-label="Command completions" hidden></div>
                 <label class="command-line"><span id="console-prompt">CueMol&gt;</span><textarea id="output-command" rows="2" spellcheck="false" autocorrect="off" autocapitalize="off" aria-label="Console command" autocomplete="off"></textarea></label>
               </div>
+              <div class="bottom-content" data-bottom-panel="output"><pre id="output-history" class="output-log"></pre></div>
               <div class="bottom-content sequence-placeholder" data-bottom-panel="sequence">
                 <div id="sequence-view" class="sequence-view">
                   <p>Residue sequence appears after a molecular object is loaded.</p>
@@ -594,7 +601,8 @@
               </div>
             </div>
             <div class="bottom-tabs" role="tablist">
-              <button class="active" type="button" data-bottom-select="output">Log</button>
+              <button class="active" type="button" data-bottom-select="console">Console</button>
+              <button type="button" data-bottom-select="output">Output</button>
               <button type="button" data-bottom-select="sequence">Sequence</button>
               <button type="button" data-bottom-select="animation">Animation</button>
               <button type="button" data-bottom-select="trajectory">Trajectory</button>

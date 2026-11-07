@@ -117,6 +117,24 @@ pub fn validate_args(name: &str, args: &Value) -> Result<(), String> {
     Ok(())
 }
 
+pub fn tool_response(id: Value, outcome: Result<Value, String>) -> Value {
+    let failed = outcome.is_err();
+    let (payload, image) = match outcome {
+        Ok(mut value) => {
+            let image = value
+                .as_object_mut()
+                .and_then(|value| value.remove("_image"));
+            (json!({"ok":true,"result":value}), image)
+        }
+        Err(error) => (json!({"ok":false,"error":error}), None),
+    };
+    let mut content = vec![json!({"type":"text","text":payload.to_string()})];
+    if let Some(image) = image {
+        content.push(json!({"type":"image","mimeType":"image/png","data":image}));
+    }
+    json!({"jsonrpc":"2.0","id":id,"result":{"content":content,"isError":failed}})
+}
+
 pub struct Protocol {
     record_history: bool,
     initialized: bool,
@@ -135,6 +153,22 @@ impl Protocol {
     }
     pub fn initialized(&self) -> bool {
         self.initialized
+    }
+
+    pub fn is_tool_call(&self, request: &Value) -> bool {
+        self.initialized
+            && request["jsonrpc"] == "2.0"
+            && request["method"] == "tools/call"
+            && request
+                .get("id")
+                .is_some_and(|id| id.is_null() || id.is_string() || id.is_number())
+            && request["params"]["name"].as_str().is_some_and(|name| {
+                validate_args(
+                    name,
+                    request["params"].get("arguments").unwrap_or(&json!({})),
+                )
+                .is_ok()
+            })
     }
 
     pub fn without_history() -> Self {
@@ -200,26 +234,10 @@ impl Protocol {
                     .get("arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
-                match validate_args(name, &args)
-                    .and_then(|()| self.call(name, &args, state, camera))
-                {
-                    Ok(mut value) => {
-                        let image = value
-                            .as_object_mut()
-                            .and_then(|object| object.remove("_image"));
-                        let mut content = vec![
-                            json!({"type":"text","text":json!({"ok":true,"result":value}).to_string()}),
-                        ];
-                        if let Some(image) = image {
-                            content
-                                .push(json!({"type":"image","data":image,"mimeType":"image/png"}));
-                        }
-                        json!({"content":content,"isError":false})
-                    }
-                    Err(error) => {
-                        json!({"content":[{"type":"text","text":json!({"ok":false,"error":error}).to_string()}],"isError":true})
-                    }
-                }
+                return Some(tool_response(
+                    id,
+                    validate_args(name, &args).and_then(|()| self.call(name, &args, state, camera)),
+                ));
             }
             _ => return Some(rpc_error(id, -32601, "Method not found")),
         };

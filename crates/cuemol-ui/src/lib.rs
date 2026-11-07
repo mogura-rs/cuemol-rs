@@ -49,6 +49,8 @@ pub mod style_editor;
 #[cfg(feature = "egui")]
 pub mod actions;
 #[cfg(feature = "egui")]
+pub mod catalog;
+#[cfg(feature = "egui")]
 pub mod console;
 #[cfg(feature = "console-runtime")]
 pub mod console_runtime;

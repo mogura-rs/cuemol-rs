@@ -4559,6 +4559,7 @@ svg { flex: none; }
   background: transparent;
   color: var(--text-secondary);
 }
+.activity-item[hidden] { display: none; }
 .activity-item svg { width: 22px; height: 22px; }
 .activity-item.active { color: var(--text-primary); background: transparent; }
 .activity-item.active::before { content: ""; position: absolute; left: 0; top: 11px; bottom: 11px; width: 2px; background: var(--accent); }

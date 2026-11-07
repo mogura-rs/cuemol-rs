@@ -8,15 +8,17 @@ pub enum Activity {
     Crystal,
     Actions,
     Agent,
+    Catalog,
 }
 impl Activity {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Explorer,
         Self::View,
         Self::Selection,
         Self::Crystal,
         Self::Actions,
         Self::Agent,
+        Self::Catalog,
     ];
     pub fn title(self) -> &'static str {
         match self {
@@ -26,6 +28,7 @@ impl Activity {
             Self::Crystal => "Crystal",
             Self::Actions => "Actions",
             Self::Agent => "AI Agent",
+            Self::Catalog => "Component Catalog",
         }
     }
     pub fn key(self) -> &'static str {
@@ -36,10 +39,18 @@ impl Activity {
             Self::Crystal => "crystal",
             Self::Actions => "actions",
             Self::Agent => "agent",
+            Self::Catalog => "catalog",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|view| view.key() == value)
+    }
+    pub fn enabled(self, state: &cuemol_desktop_core::DesktopAppState) -> bool {
+        match self {
+            Self::Agent => state.plugin_enabled("agent"),
+            Self::Catalog => state.plugin_enabled("catalog"),
+            _ => true,
+        }
     }
     fn icon(self) -> Icon {
         match self {
@@ -49,6 +60,7 @@ impl Activity {
             Self::Crystal => Icon::Crystal,
             Self::Actions => Icon::History,
             Self::Agent => Icon::Agent,
+            Self::Catalog => Icon::Settings,
         }
     }
 }
@@ -215,6 +227,15 @@ pub fn activity_bar(ctx: &Context, active: &mut Option<Activity>) -> bool {
 pub fn activity_bar_observed(
     ctx: &Context,
     active: &mut Option<Activity>,
+    observe: impl FnMut(Activity, Rect),
+) -> bool {
+    activity_bar_filtered(ctx, active, |_| true, observe)
+}
+
+pub fn activity_bar_filtered(
+    ctx: &Context,
+    active: &mut Option<Activity>,
+    enabled: impl Fn(Activity) -> bool,
     mut observe: impl FnMut(Activity, Rect),
 ) -> bool {
     let mut settings = false;
@@ -226,6 +247,9 @@ pub fn activity_bar_observed(
             ui.spacing_mut().item_spacing.y = 0.;
             ui.add_space(4.);
             for view in Activity::ALL {
+                if !enabled(view) {
+                    continue;
+                }
                 let response = icon_button(
                     ui,
                     view.icon(),

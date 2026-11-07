@@ -41,5 +41,6 @@ pub use commands::{
 };
 pub use properties::{is_view_property_write, prepare_property_edit};
 pub use protocol::{
-    tool_changes_scene, tool_is_mutating, tool_records_history, tools_list, validate_args, Protocol,
+    tool_changes_scene, tool_is_mutating, tool_records_history, tool_response, tools_list,
+    validate_args, Protocol,
 };

@@ -29,6 +29,7 @@ enum Pending {
 
 #[derive(Debug)]
 pub struct ConsoleRunner {
+    plugin_dialect: Option<Dialect>,
     submission: Submission,
     pending: Option<Pending>,
     ready: VecDeque<Action>,
@@ -87,6 +88,7 @@ impl ConsoleRunner {
         targets: &[u64],
     ) -> Result<Self, String> {
         Ok(Self {
+            plugin_dialect: None,
             submission: Submission::library(source, macro_name, targets)?,
             pending: None,
             ready: VecDeque::new(),
@@ -102,6 +104,7 @@ impl ConsoleRunner {
 
     pub fn new(source: &str, dialect: Dialect) -> Result<Self, String> {
         Ok(Self {
+            plugin_dialect: Some(dialect),
             submission: Submission::new(source, dialect)?,
             pending: None,
             ready: VecDeque::new(),
@@ -125,6 +128,17 @@ impl ConsoleRunner {
         camera: &mut Camera,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<ConsoleStep, String> {
+        if self
+            .plugin_dialect
+            .is_some_and(|dialect| !state.console_dialect_enabled(dialect.label()))
+        {
+            if let Some(Pending::Render { cancel, .. }) = &self.pending {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            self.pending = None;
+            self.ready.clear();
+            return Err("Console plugin or dialect disabled; remaining commands cancelled.".into());
+        }
         if let Some(pending) = &self.pending {
             match pending {
                 Pending::Download { job, .. } => {
@@ -321,5 +335,38 @@ impl Drop for ConsoleRunner {
         if let Some(Pending::Render { cancel, .. }) = &self.pending {
             cancel.store(true, Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod plugin_tests {
+    use super::*;
+
+    #[test]
+    fn disabling_console_cancels_pending_work_but_keeps_action_library_available() {
+        let mut state = DesktopAppState::new();
+        state.ensure_active_scene();
+        let mut camera = Camera::new();
+        let mut session = Session::default();
+        let mut console = ConsoleRunner::new("get_scene_state", Dialect::CueMol).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (_sender, receiver) = mpsc::channel();
+        console.pending = Some(Pending::Render {
+            receiver,
+            cancel: cancelled.clone(),
+            name: "render_image".into(),
+            args: json!({}),
+            path: None,
+            remember: false,
+        });
+        state.set_plugin_enabled("console", false).unwrap();
+        assert!(console
+            .next(&mut session, &mut state, &mut camera, Arc::new(|| {}))
+            .is_err());
+        assert!(cancelled.load(Ordering::Relaxed));
+        let mut action = ConsoleRunner::library(r#"<cuemol-actions version="1"><action label="Read"><op name="get_scene_state"/></action></cuemol-actions>"#, None, &[]).unwrap();
+        assert!(action
+            .next(&mut session, &mut state, &mut camera, Arc::new(|| {}))
+            .is_ok());
     }
 }

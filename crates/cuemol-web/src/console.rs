@@ -71,6 +71,13 @@ impl App {
     }
 
     fn execute_console_source(&mut self) {
+        if !self
+            .state
+            .console_dialect_enabled(self.console.dialect.label())
+        {
+            self.message = "Console plugin or dialect is disabled.".into();
+            return;
+        }
         self.cancel_console("Console replaced by another submission.");
         let source = std::mem::take(&mut self.console.source);
         if source.trim().is_empty() {

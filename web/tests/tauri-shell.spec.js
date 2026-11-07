@@ -126,6 +126,7 @@ async function openShell(page, storage = {}, options = {}) {
       atomLabelItalic:false,atomLabelBold:false,uiLanguage:'en-US',useHidpi:false,
       mousePreset:'DefaultViewInConf',trackballRadius:0.8,hitPrecision:10,
       momentumScroll:false,multitouchPad:false,emulateRightButton:false,
+      plugins:options.plugins || {},mcpAcceptConnections:true,mcpPort:0,
       gpuPicking:true,hoverInfo:true,hoverHighlight:true,
       shortcuts:[{id:'view-trans-plusx',key:'ArrowRight',ctrl:true,alt:false,shift:false},{id:'view-trans-minusx',key:'ArrowLeft',ctrl:true,alt:false,shift:false}],
     };
@@ -133,7 +134,7 @@ async function openShell(page, storage = {}, options = {}) {
     window.__actionsRunning = false;
     window.__TAURI__ = {core: {invoke: async (command, args) => {
       window.__shellCalls.push({command, args});
-      if (command === 'get_initial_state') return {snapshot, viewport, preferences: options.picking ? structuredClone(preferences) : options.files ? {dropTarget:'new'} : {}, startupPathsPending: false};
+      if (command === 'get_initial_state') return {snapshot, viewport, preferences: options.picking ? structuredClone(preferences) : options.files ? {dropTarget:'new',plugins:preferences.plugins} : {plugins:preferences.plugins}, startupPathsPending: false};
       if (command === 'get_preferences') return structuredClone(preferences);
       if (command === 'set_preferences') { preferences=structuredClone(args.preferences);return {preferences,status:'Options updated'}; }
       if (command === 'get_snapshot') return snapshot;
@@ -932,7 +933,7 @@ test('Tauri inspector follows selection and edits the selected renderer', async 
 });
 
 test('Tauri bottom docks expose animation, sequence and trajectory controls', async ({page}) => {
-  const errors = await openShell(page);
+  const errors = await openShell(page, {}, {plugins: {mdtools: true}});
   await page.locator('[data-bottom-select="animation"]').click();
   await expect(page.locator('#animation-play')).toBeVisible();
   await expect(page.locator('#animation-list')).toContainText('No animation objects.');
@@ -940,7 +941,7 @@ test('Tauri bottom docks expose animation, sequence and trajectory controls', as
   await expect(page.locator('#sequence-view')).toBeVisible();
   await page.locator('[data-bottom-select="trajectory"]').click();
   await expect(page.locator('#trajectory-slider')).toBeVisible();
-  await page.locator('[data-bottom-select="output"]').click();
+  await page.locator('[data-bottom-select="console"]').click();
   await expect(page.getByLabel('Console command')).toBeVisible();
   await expect(page.locator('#error-alert-dialog')).not.toBeVisible();
   expect(errors).toEqual([]);
@@ -1105,7 +1106,7 @@ test('Tauri sequence virtualizes both axes and ranges include offscreen residues
 
 test('Tauri console keeps multiline drafts, IME, completion, dialect and stop controls', async ({page}) => {
   const errors = await openShell(page, {}, {consoleRunning: true});
-  await page.locator('[data-bottom-select="output"]').click();
+  await page.locator('[data-bottom-select="console"]').click();
   const input = page.locator('#output-command');
   await input.fill('select Pr');
   await input.press('Tab');
@@ -1133,7 +1134,7 @@ test('Tauri console keeps multiline drafts, IME, completion, dialect and stop co
   await expect(input).toHaveValue('unfinished');
   await page.locator('[data-console-dialect="PyMOL"]').click();
   await page.reload();
-  await page.locator('[data-bottom-select="output"]').click();
+  await page.locator('[data-bottom-select="console"]').click();
   await expect(page.locator('[data-console-dialect="PyMOL"]')).toHaveAttribute('aria-checked', 'true');
   await input.press('ArrowUp');
   await expect(input).toHaveValue(source);
@@ -2077,5 +2078,46 @@ test('Tauri picking preferences preserve cancellation and stop hover requests', 
   await dialog.getByRole('button',{name:'OK',exact:true}).click();
   await page.locator('#viewport').hover();
   await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='hover_at_screen').length)).toBeGreaterThan(before);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri plugin preferences cancel, restore tabs, and retain dialect choices',async({page},testInfo)=>{
+  const errors=await openShell(page);
+  await expect(page.locator('[data-bottom-select="console"]')).toBeVisible();
+  await expect(page.locator('[data-bottom-select="output"]')).toBeVisible();
+  await expect(page.locator('[data-bottom-select="trajectory"]')).toBeHidden();
+  const open=async()=>{
+    await page.getByRole('button',{name:'Settings',exact:true}).click();
+    await page.locator('[data-options-tab="Plugins"]').click();
+  };
+  await open();
+  const dialog=page.locator('#reference-dialog');
+  await dialog.getByLabel('MD Tools',{exact:true}).check();
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  await expect(page.locator('[data-bottom-select="trajectory"]')).toBeHidden();
+  await open();
+  await dialog.getByLabel('MD Tools',{exact:true}).check();
+  await dialog.getByLabel('Component Catalog',{exact:true}).check();
+  await dialog.getByLabel('PyMOL console',{exact:true}).uncheck();
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await expect(page.locator('[data-bottom-select="trajectory"]')).toBeVisible();
+  await expect(page.locator('[data-console-dialect="PyMOL"]')).toBeHidden();
+  await page.locator('[data-activity="catalog"]').click();
+  await expect(page.locator('[data-activity-panel="catalog"]')).toBeVisible();
+  await page.screenshot({path:testInfo.outputPath('plugins-catalog.png')});
+  await page.locator('[data-bottom-select="trajectory"]').click();
+  await open();
+  await dialog.getByLabel('MD Tools',{exact:true}).uncheck();
+  await dialog.getByLabel('Component Catalog',{exact:true}).uncheck();
+  await dialog.getByLabel('Console',{exact:true}).uncheck();
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await expect(page.locator('[data-bottom-select="output"]')).toHaveClass('active');
+  await expect(page.locator('[data-bottom-select="console"]')).toBeHidden();
+  await expect(page.locator('[data-activity="catalog"]')).toBeHidden();
+  await open();await dialog.getByLabel('Console',{exact:true}).check();
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await page.locator('[data-bottom-select="console"]').click();
+  await expect(page.locator('[data-console-dialect="PyMOL"]')).toBeHidden();
+  await expect(page.locator('[data-console-dialect="ChimeraX"]')).toBeVisible();
   expect(errors).toEqual([]);
 });

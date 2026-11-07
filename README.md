@@ -134,8 +134,9 @@ cuemol skill
 cuemol mcp config
 ```
 
-JavaScript uses the embedded Boa engine. `cuemol mcp connect` connects a client
-to the running native GUI; `cuemol mcp serve` owns an independent headless scene.
+JavaScript uses the embedded Boa engine. Enable **MCP Server** under
+**Options > Plugins**, then use `cuemol mcp connect` to connect a client to the
+running native GUI. `cuemol mcp serve` owns an independent headless scene.
 Use `cuemol mcp tools` to inspect the installed command schemas. See
 [commands and configuration](docs/usage.md#commands-mcp-and-configuration) or
 the [AI Agent guide](docs/usage.md#ai-agent) for further setup.

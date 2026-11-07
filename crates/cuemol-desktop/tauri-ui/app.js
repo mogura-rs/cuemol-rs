@@ -273,6 +273,35 @@ const trajectoryFrames = new Map();
 let recentFiles = loadRecentFiles();
 let applicationInfoCache = null;
 let preferences = null;
+const builtinPlugins = [
+  ["catalog", "Component Catalog", false], ["agent", "AI Agent", false],
+  ["mdtools", "MD Tools", false], ["console", "Console", true],
+  ["pymol-console", "PyMOL console", true], ["chimerax-console", "ChimeraX console (ChX)", true],
+  ["mcp", "MCP Server", false],
+];
+function pluginEnabled(id) {
+  if (["getpdb", "sequence"].includes(id)) return true;
+  return snapshot?.plugins?.[id] ?? preferences?.plugins?.[id] ?? builtinPlugins.find(plugin => plugin[0] === id)?.[2] ?? false;
+}
+function dialectEnabled(dialect) {
+  return pluginEnabled("console") && (dialect === "PyMOL" ? pluginEnabled("pymol-console") : dialect === "ChimeraX" ? pluginEnabled("chimerax-console") : true);
+}
+function renderPluginContributions() {
+  for (const [selector, id] of [
+    ['[data-bottom-select="console"], [data-local-action="show-console"]', "console"],
+    ['[data-bottom-select="trajectory"], [data-dialog="Open MD Trajectory"]', "mdtools"],
+    ['[data-activity="catalog"]', "catalog"],
+  ]) document.querySelectorAll(selector).forEach(item => { item.hidden = !pluginEnabled(id); });
+  document.querySelectorAll('[data-console-dialect]').forEach(item => { item.hidden = !dialectEnabled(item.dataset.consoleDialect); });
+  const active = document.querySelector('[data-bottom-select].active')?.dataset.bottomSelect;
+  if ((active === 'console' && !pluginEnabled('console')) || (active === 'trajectory' && !pluginEnabled('mdtools'))) showBottomPanel('output');
+  if (!dialectEnabled(consoleDialect)) setConsoleDialect('CueMol');
+  if (!pluginEnabled('mdtools')) {
+    trajectoryPlaying = false;
+    if (trajectoryTimer) { clearInterval(trajectoryTimer); trajectoryTimer = null; }
+  }
+  if (cueMolActivity === 'catalog' && !pluginEnabled('catalog')) selectCueMolActivity('explorer', false);
+}
 let moleculeDetails = {
   structureKey: "",
   structureObjectUid: null,
@@ -582,6 +611,9 @@ function recordStatus(message) {
   statusTrail = statusTrail.slice(-80);
   statusHistory.textContent = statusTrail.join("\n") || "cuemol-rs Rust core";
   statusHistory.scrollTop = statusHistory.scrollHeight;
+  const output = document.getElementById("output-history");
+  output.textContent = statusHistory.textContent;
+  output.scrollTop = output.scrollHeight;
 }
 
 function closeMenus(except = null) {
@@ -772,6 +804,7 @@ function setupRibbonCollapse() {
 }
 
 function showBottomPanel(name) {
+  if ((name === "console" && !pluginEnabled("console")) || (name === "trajectory" && !pluginEnabled("mdtools"))) name = "output";
   document.querySelectorAll("[data-bottom-select]").forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.bottomSelect === name);
   });
@@ -1928,12 +1961,28 @@ function optionsEditor(source) {
   }
   mousePane.append(presetGroup);
 
+  const pluginsPane = createPane("Plugins");
+  const pluginsGroup = group("Installed plugins");
+  draft.plugins = {...draft.plugins};
+  for (const [id, name, defaultEnabled] of builtinPlugins) {
+    check(pluginsGroup, name, draft.plugins[id] ?? defaultEnabled, value => { draft.plugins[id] = value; });
+  }
+  check(pluginsGroup, "MCP: Accept connections", draft.mcpAcceptConnections ?? true, value => { draft.mcpAcceptConnections = value; });
+  const mcpPort = document.createElement("input");
+  mcpPort.type = "number"; mcpPort.min = "0"; mcpPort.max = "65535"; mcpPort.step = "1";
+  mcpPort.value = String(draft.mcpPort ?? 27182);
+  mcpPort.addEventListener("change", () => { draft.mcpPort = Number(mcpPort.value); });
+  field(pluginsGroup, "MCP port (0 = automatic)", mcpPort);
+  pluginsGroup.append(dialogParagraph("Connect with cuemol mcp connect after enabling MCP Server."));
+  pluginsPane.append(pluginsGroup);
   const cancel = button("Cancel", "", () => referenceDialog.close());
   const ok = button("OK", "dialog-primary", async () => {
     setBusy(true);
     try {
       const result = await invoke("set_preferences", { preferences: draft });
       preferences = result.preferences;
+      if (snapshot) snapshot.plugins = preferences.plugins;
+      renderPluginContributions();
       recordStatus(result.status);
       referenceDialog.close();
       scheduleRender(0);
@@ -9642,7 +9691,7 @@ function renderSidePanel(name) {
 
 function syncSidePanelVisibility() {
   const cards = [...sidePanel.querySelectorAll("[data-side-card]")];
-  const anyVisible = cards.some((card) => !card.hidden && !card.classList.contains("activity-inactive")) || ["actions", "view"].includes(cueMolActivity);
+  const anyVisible = cards.some((card) => !card.hidden && !card.classList.contains("activity-inactive")) || ["actions", "view", "catalog"].includes(cueMolActivity);
   sidePanel.hidden = !anyVisible;
   contentHolder?.classList.toggle("no-visible-side-panels", !anyVisible);
   document.querySelectorAll("[data-panel-menu]").forEach((element) => {
@@ -9729,7 +9778,7 @@ async function handleLocalAction(action) {
       restoreDefaultPanels();
       break;
     case "show-console":
-      showBottomPanel("output");
+      showBottomPanel("console");
       break;
     case "check-updates":
       recordStatus("Update check is not available offline");
@@ -16703,6 +16752,7 @@ function scheduleSecondaryPanelRender() {
 
 function renderShell() {
   if (!snapshot) return;
+  renderPluginContributions();
   normalizeSelection();
   const workspaceRenderKey = workspaceChromeRenderKey();
   renderProjectionControls();
@@ -18496,6 +18546,27 @@ setupBottomPanelSplitter();
 setupRibbonCollapse();
 setupTritiumShell();
 
+let remoteModelRefresh = null;
+let remoteModelDirty = false;
+function refreshRemoteModel() {
+  remoteModelDirty = true;
+  if (remoteModelRefresh) return remoteModelRefresh;
+  remoteModelRefresh = (async () => {
+    if (cueMolNumericDrag) await cueMolNumericDrag.finish("discard");
+    while (remoteModelDirty) {
+      remoteModelDirty = false;
+      const current = await invoke("get_snapshot");
+      if (remoteModelDirty) continue;
+      snapshot = current;
+      workspaceRendererStyleCache.clear();
+      syncEmptyMoleculeDetails();
+      renderShell();
+      void renderViewport();
+      scheduleMoleculeDetailsRefresh();
+    }
+  })().catch(showError).finally(() => { remoteModelRefresh = null; });
+  return remoteModelRefresh;
+}
 async function start() {
   if (!invoke) {
     statusText.textContent = "Tauri IPC unavailable";
@@ -18504,6 +18575,9 @@ async function start() {
   }
   try {
     renderRecentMenu();
+    if (window.__TAURI__?.event?.listen) {
+      await window.__TAURI__.event.listen("cuemol-model-changed", refreshRemoteModel);
+    }
     await setupWindowGeometryPersistence();
     const sequence = ++requestSequence;
     const initial = await invoke("get_initial_state", viewportDimensions());

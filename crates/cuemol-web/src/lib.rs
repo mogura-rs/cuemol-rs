@@ -60,6 +60,7 @@ enum Event {
         Result<cuemol_mdtools::TrajectoryFrame, String>,
         cuemol_agent::ToolReply,
         u64,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
     ),
     ImportActions(String, String),
     Source(web_sys::File),
@@ -413,6 +414,10 @@ impl App {
         {
             agent.load_settings(&text);
         }
+        if state.config_value("plugins:agent:enabled").is_empty() && agent.settings.enabled {
+            let _ = state.set_plugin_enabled("agent", true);
+        }
+        agent.settings.enabled = state.plugin_enabled("agent");
         Ok(Self {
             clipboard_focus: Default::default(),
             clipboard_camera: None,
@@ -804,6 +809,9 @@ impl App {
         }
     }
     fn events(&mut self, ctx: &egui::Context) {
+        if !self.state.plugin_enabled("agent") {
+            self.agent.cancel("AI Agent plugin disabled.");
+        }
         let events = EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()));
         for event in events {
             self.validate_source_scene();
@@ -822,8 +830,8 @@ impl App {
                 }
                 Event::Input(event) => self.input_events.push_back(event),
                 Event::AgentCancel => self.agent.cancel("Cancelled; completed edits are kept."),
-                Event::AgentFrame(id, index, result, reply, revision) => {
-                    if reply.is_closed() {
+                Event::AgentFrame(id, index, result, reply, revision, cancelled) => {
+                    if cancelled.load(std::sync::atomic::Ordering::Relaxed) || reply.is_closed() {
                         continue;
                     }
                     if revision != self.revision {
@@ -856,6 +864,10 @@ impl App {
                         reply.try_send(result.map(|()| json!({"objectId":id.get(),"frame":index})));
                 }
                 Event::AgentStart(prompt, settings, key) => {
+                    if !self.state.plugin_enabled("agent") {
+                        self.message = "Enable AI Agent in Settings > Plugins first.".into();
+                        continue;
+                    }
                     if self.agent.running() {
                         self.message = "An agent turn is already running.".into();
                         continue;

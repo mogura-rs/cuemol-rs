@@ -673,3 +673,51 @@ fn scene_history_preserves_live_host_preferences() {
         assert_eq!(state.view_input_config().tbrad(), 1.4);
     }
 }
+
+#[test]
+fn gui_tool_dispatch_requires_valid_initialized_requests() {
+    let mut protocol = cuemol_command::Protocol::without_history();
+    let request =
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"undo"}});
+    assert!(!protocol.is_tool_call(&request));
+    let mut state = cuemol_desktop_core::DesktopAppState::new();
+    let mut camera = cuemol_qsys::Camera::new();
+    protocol.handle(
+        serde_json::json!({"jsonrpc":"2.0","id":0,"method":"initialize"}),
+        &mut state,
+        &mut camera,
+    );
+    assert!(protocol.is_tool_call(&request));
+    for invalid in [
+        serde_json::json!({"jsonrpc":"2.0","method":"tools/call","params":{"name":"undo","arguments":{}}}),
+        serde_json::json!({"jsonrpc":"1.0","id":1,"method":"tools/call","params":{"name":"undo","arguments":{}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":[],"method":"tools/call","params":{"name":"undo","arguments":{}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"undo","arguments":{"invalid":true}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"undo","arguments":null}}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"unknown","arguments":{}}}),
+    ] {
+        assert!(!protocol.is_tool_call(&invalid), "{invalid}");
+    }
+}
+
+#[test]
+fn asynchronous_tool_responses_keep_images_out_of_text_payloads() {
+    let response = cuemol_command::tool_response(
+        serde_json::json!(1),
+        Ok(serde_json::json!({"width":10,"_image":"aW1hZ2U="})),
+    );
+    assert_eq!(response["result"]["isError"], false);
+    let content = response["result"]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    let text: serde_json::Value =
+        serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(text["result"]["width"], 10);
+    assert!(text["result"].get("_image").is_none());
+    assert_eq!(
+        content[1],
+        serde_json::json!({"type":"image","mimeType":"image/png","data":"aW1hZ2U="})
+    );
+    let failed = cuemol_command::tool_response(serde_json::json!(2), Err("cancelled".into()));
+    assert_eq!(failed["result"]["isError"], true);
+    assert_eq!(failed["result"]["content"].as_array().unwrap().len(), 1);
+}

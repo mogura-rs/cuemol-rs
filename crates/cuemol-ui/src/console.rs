@@ -129,6 +129,10 @@ impl ConsoleEditor {
         running: bool,
     ) -> Option<ConsoleIntent> {
         self.rects.clear();
+        if !state.console_dialect_enabled(self.dialect.label()) {
+            self.dialect = Dialect::CueMol;
+            self.completions.clear();
+        }
         let mut intent = None;
         ui.horizontal(|ui| {
             for dialect in [
@@ -137,6 +141,9 @@ impl ConsoleEditor {
                 Dialect::ChimeraX,
                 Dialect::JavaScript,
             ] {
+                if !state.console_dialect_enabled(dialect.label()) {
+                    continue;
+                }
                 let response = ui.selectable_value(&mut self.dialect, dialect, dialect.label());
                 self.record(&format!("Console {}", dialect.label()), &response);
                 if response.changed() {

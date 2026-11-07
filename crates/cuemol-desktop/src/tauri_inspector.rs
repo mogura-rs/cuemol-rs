@@ -2,7 +2,34 @@ use super::*;
 use serde_json::{json, Value};
 
 impl AppModel {
+    pub(super) fn begin_remote_edit(&mut self) -> Result<(), String> {
+        if let Some((tool, mut args)) = self.numeric_preview.take() {
+            args["mode"] = json!("abort");
+            // A GUI operation may have removed the preview target already.
+            let _ = self.inspector_request_inner(&tool, &args);
+        }
+        self.remote_revision = self.remote_revision.wrapping_add(1);
+        Ok(())
+    }
+
     pub(super) fn inspector_request(&mut self, tool: &str, args: &Value) -> Result<Value, String> {
+        let numeric = matches!(tool, "edit_node_property" | "edit_animation_property");
+        if numeric
+            && args
+                .get("remoteRevision")
+                .is_some_and(|revision| revision.as_u64() != Some(self.remote_revision))
+        {
+            return Err("The scene changed outside this numeric edit".into());
+        }
+        let result = self.inspector_request_inner(tool, args);
+        if numeric && result.is_ok() {
+            self.numeric_preview =
+                (args["mode"] == "preview").then(|| (tool.to_owned(), args.clone()));
+        }
+        result
+    }
+
+    fn inspector_request_inner(&mut self, tool: &str, args: &Value) -> Result<Value, String> {
         if tool == "animation_element_detail" {
             if args["sceneId"].as_u64() != self.desktop.active_scene().map(|sid| sid.get()) {
                 return Err("The inspected scene changed".into());

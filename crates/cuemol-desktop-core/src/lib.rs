@@ -2,6 +2,7 @@ mod animation;
 mod clipboard;
 mod config_io;
 mod file_open;
+pub mod plugins;
 pub use clipboard::GuiClipboardPayload;
 pub use file_open::{FileOpenBatch, FileOpenTarget};
 mod scene_save;

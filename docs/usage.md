@@ -443,7 +443,13 @@ provides the same skill alongside release installation and headless examples.
 ### Connect to the application with MCP
 
 All installed entry points use `cuemol`; no separate JavaScript MCP launcher is
-needed. The running native GUI exposes an authenticated loopback MCP endpoint.
+needed. Enable **MCP Server** and **MCP: Accept connections** under
+**Options > Plugins** in either native frontend. The GUI then exposes an
+authenticated loopback endpoint; disabling either switch stops it. The default
+port is 27182; choose 0 to allocate an available port automatically. Before
+launching the GUI, the same plugin preference can be set with
+`cuemol config set plugins:mcp:enabled true`. The browser does not host an MCP
+listener.
 
 Property commands edit molecular, map, surface and lightweight objects through
 shared state. They preserve renderer identities even when names are empty or
@@ -467,8 +473,8 @@ cuemol mcp connect --upstream
 `connect` bridges stdio to the running GUI. `serve` owns an independent headless
 scene, and `config --headless` prints the corresponding client configuration.
 `connect --upstream` bridges to CueMol2's existing local API. The native catalog
-includes all 124 operation names in the reference catalog used for this port,
-plus convenience operations. This is command coverage, not a claim that every
+covers the current reference's 129 registrations, including its 127 MCP
+operations, plus convenience operations. This is command coverage, not a claim that every
 parameter combination or rendering algorithm is identical; see the boundaries
 below. `mcp tools` is the authoritative schema for the installed build.
 
@@ -586,6 +592,27 @@ scene.setName('My session');
 print('Startup commands loaded');
 ```
 
+### Built-in plugins
+
+Open **Options > Plugins** in a native frontend or **Settings > Plugins** in the
+browser. Native dialogs apply the complete draft with OK and discard it with
+Cancel. Browser checkboxes save immediately in that browser. These switches
+control the plugins compiled into the application; they do not install packages.
+
+| Plugin | Initial state |
+| --- | --- |
+| Get PDB and Sequence | Always enabled |
+| Console, PyMOL console, ChimeraX console | Enabled |
+| MD Tools, AI Agent, Component Catalog | Disabled |
+| MCP Server | Disabled; native application only |
+
+Disabling Console hides its tab and stops its pending commands. The individual
+PyMOL and ChimeraX choices remain stored while Console is disabled. Action
+Library remains available. Disabling MD Tools stops playback and hides its tab
+without deleting loaded trajectories. A hidden active tab returns to Output,
+and a hidden sidebar activity returns to Explorer. Scene Undo/Redo retains these
+preferences. The Component Catalog demonstrates form, list and property controls.
+
 ### Image rendering
 
 Open Render to preview an image before saving it. The Image tab sets the size,
@@ -621,8 +648,9 @@ include files, native runtime libraries, licenses and pinned source archive.
 
 ## AI Agent
 
-Open **Tools > AI Agent** in the native application or **AI Agent** in the
-browser. Enable it, choose `openai:model`, `anthropic:model`, or `google:model`,
+Enable **AI Agent** under **Options > Plugins** in the native application or
+**Settings > Plugins** in the browser. Then open **Tools > AI Agent** or the
+**AI Agent** sidebar, choose `openai:model`, `anthropic:model`, or `google:model`,
 and enter that provider's API key. The model field accepts arbitrary model IDs;
 **Refresh available models** queries the provider's catalog. Settings are saved
 in `agent.json` beside the other configuration files. Native keys can be stored

@@ -19,7 +19,7 @@ use cuemol_render::{
     PovSceneExporter, RenderSceneSnapshot, UmbreonDenoiseMode, UmbreonSceneExporter,
 };
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Emitter, Manager, State};
 
 #[cfg(test)]
 use crate::offscreen::camera_mvp;
@@ -39,6 +39,8 @@ mod actions;
 mod console;
 #[path = "tauri_inspector.rs"]
 mod inspector;
+#[path = "tauri_mcp.rs"]
+mod mcp_bridge;
 
 const MAX_VIEW_DIM: u32 = 4_096;
 const MIN_INTERACTIVE_RENDER_SCALE: f64 = 0.5;
@@ -913,6 +915,9 @@ struct TrajectoryDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppSnapshot {
+    remote_revision: u64,
+    mcp_listen_port: Option<u16>,
+    plugins: std::collections::BTreeMap<String, bool>,
     scenes: Vec<SceneDto>,
     views: Vec<ViewDto>,
     cameras: Vec<CameraDto>,
@@ -1467,6 +1472,12 @@ impl FileOpenContext {
 #[serde(rename_all = "camelCase")]
 struct PreferencesDto {
     #[serde(default)]
+    plugins: std::collections::BTreeMap<String, bool>,
+    #[serde(default = "enabled_preference")]
+    mcp_accept_connections: bool,
+    #[serde(default = "default_mcp_port")]
+    mcp_port: u16,
+    #[serde(default)]
     drop_target: cuemol_desktop_core::FileOpenTarget,
     #[serde(default)]
     shell_target: cuemol_desktop_core::FileOpenTarget,
@@ -1490,6 +1501,10 @@ struct PreferencesDto {
     #[serde(default = "enabled_preference")]
     hover_highlight: bool,
     shortcuts: Vec<ShortcutDto>,
+}
+
+fn default_mcp_port() -> u16 {
+    27182
 }
 
 fn enabled_preference() -> bool {
@@ -1610,6 +1625,9 @@ struct AnimationObjectPropertiesInput {
 }
 
 struct AppModel {
+    remote_revision: u64,
+    numeric_preview: Option<(String, serde_json::Value)>,
+    mcp_listen_port: Option<u16>,
     system_clipboard: crate::native_clipboard::Clipboard,
     desktop: DesktopAppState,
     config_path: Option<PathBuf>,
@@ -1656,6 +1674,20 @@ struct TauriApbsJob {
     receiver: mpsc::Receiver<Result<ApbsProcessOutput, String>>,
     cancel: Arc<AtomicBool>,
     potential_name: String,
+    scene_uid: Uid,
+    started: std::time::Instant,
+    command: Option<cuemol_command::transport::ApiRequest>,
+}
+
+impl TauriApbsJob {
+    fn reply(&mut self, outcome: Result<serde_json::Value, String>) {
+        if let Some(request) = self.command.take() {
+            let _ = request.reply.send(Some(cuemol_command::tool_response(
+                request.message["id"].clone(),
+                outcome,
+            )));
+        }
+    }
 }
 
 struct TauriPovRenderJob {
@@ -1849,6 +1881,9 @@ impl AppModel {
             pov_render_job: None,
             pov_render_result: None,
             animation_render_job: None,
+            remote_revision: 0,
+            numeric_preview: None,
+            mcp_listen_port: None,
             console_session: cuemol_command::console::Session::default(),
             console_run: None,
             log_lines: startup_log.lines().map(str::to_string).collect(),
@@ -2499,6 +2534,9 @@ impl AppModel {
         let structure_key = self.molecule_structure_key_from_objects(active_scene_uid, &objects);
         let sequence_key = self.molecule_sequence_key(&structure_key);
         AppSnapshot {
+            remote_revision: self.remote_revision,
+            mcp_listen_port: self.mcp_listen_port,
+            plugins: self.desktop.plugin_states(),
             scenes,
             views,
             cameras,
@@ -2764,6 +2802,9 @@ impl AppModel {
         let font_weight = self.desktop.style_value(0, "", "DefaultLabel.font_weight");
         let input = self.desktop.view_input_config();
         PreferencesDto {
+            plugins: self.desktop.plugin_states(),
+            mcp_accept_connections: self.desktop.config_value("mcp:accept-connections") != "false",
+            mcp_port: self.desktop.mcp_server_port().unwrap_or(27182),
             drop_target: cuemol_desktop_core::FileOpenTarget::from_config(
                 &self.desktop.config_value("files:drop-target"),
             ),
@@ -2851,6 +2892,15 @@ impl AppModel {
             return Err("pick precision must be between 0 and 100".to_string());
         }
         validate_shortcuts(&preferences.shortcuts)?;
+        self.desktop
+            .set_plugin_states(&preferences.plugins)
+            .map_err(|error| error.to_string())?;
+        self.desktop.put_config_value(
+            "mcp:accept-connections",
+            preferences.mcp_accept_connections.to_string(),
+        );
+        self.desktop
+            .put_config_value("mcp:port", preferences.mcp_port.to_string());
         self.desktop
             .put_config_value("files:drop-target", preferences.drop_target.as_str());
         self.desktop
@@ -8063,6 +8113,7 @@ impl AppModel {
 }
 
 enum ModelRequest {
+    LocalApiReady,
     Inspector {
         tool: String,
         args: serde_json::Value,
@@ -10046,6 +10097,7 @@ fn handle_model_request(
     request: ModelRequest,
 ) -> Result<ModelResponse, String> {
     match request {
+        ModelRequest::LocalApiReady => Ok(ModelResponse::Message(String::new())),
         ModelRequest::Inspector { tool, args } => Ok(ModelResponse::Inspector(model.inspector_request(&tool, &args)?)),
         ModelRequest::Actions { operation, args } => Ok(ModelResponse::Actions(model.actions_request(&operation, &args)?)),
         ModelRequest::StartRendererWarmup => {
@@ -12270,6 +12322,9 @@ fn handle_model_request(
                 receiver,
                 cancel,
                 potential_name,
+                scene_uid: model.desktop.scene_manager().scene_uid_for_object(object_uid).unwrap(),
+                started: std::time::Instant::now(),
+                command: None,
             });
             model.status = format!(
                 "APBS calculation started for {} atom(s)",
@@ -12278,31 +12333,55 @@ fn handle_model_request(
             Ok(ModelResponse::Message("running".to_string()))
         }
         ModelRequest::PollApbsCalculation => {
-            let Some(job) = model.apbs_job.take() else {
+            let Some(mut job) = model.apbs_job.take() else {
                 return Ok(ModelResponse::Message("idle".to_string()));
             };
+            if job.command.is_some() && !model.desktop.mcp_server_enabled() {
+                job.cancel.store(true, Ordering::Relaxed);
+            }
             match job.receiver.try_recv() {
                 Err(mpsc::TryRecvError::Empty) => {
                     model.apbs_job = Some(job);
                     Ok(ModelResponse::Message("running".to_string()))
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    job.reply(Err("APBS worker disconnected".into()));
                     model.status = "APBS worker disconnected".to_string();
                     Ok(ModelResponse::Message(
                         "error:APBS worker disconnected".to_string(),
                     ))
                 }
                 Ok(Err(error)) => {
+                    job.reply(Err(error.clone()));
                     model.status = error.clone();
                     Ok(ModelResponse::Message(format!("error:{error}")))
                 }
                 Ok(Ok(output)) => {
+                    if job.cancel.load(Ordering::Relaxed) {
+                        let _ = fs::remove_dir_all(output.work_dir);
+                        job.reply(Err("APBS calculation cancelled".into()));
+                        model.status = "APBS calculation cancelled".into();
+                        return Ok(ModelResponse::Message("error:APBS calculation cancelled".into()));
+                    }
+                    if job.command.is_some() {
+                        if let Err(error) = model.begin_remote_edit() {
+                            let _ = fs::remove_dir_all(output.work_dir);
+                            job.reply(Err(error.clone()));
+                            return Ok(ModelResponse::Message(format!("error:{error}")));
+                        }
+                    }
                     let undo = model.capture_undo();
-                    let result = model
-                        .desktop
-                        .open_apbs_potential_path(&output.dx_path, &job.potential_name);
+                    let result = model.desktop.open_apbs_potential_in_scene(job.scene_uid, &output.dx_path, &job.potential_name);
                     let _ = fs::remove_dir_all(output.work_dir);
-                    let map_uid = result.map_err(|error| error.to_string())?;
+                    let map_uid = match result {
+                        Ok(uid) => uid,
+                        Err(error) => {
+                            job.reply(Err(error.to_string()));
+                            model.status = error.to_string();
+                            return Ok(ModelResponse::Message(format!("error:{error}")));
+                        }
+                    };
+                    job.reply(Ok(serde_json::json!({"objectId":map_uid.get(),"name":job.potential_name,"seconds":job.started.elapsed().as_secs_f64()})));
                     if !output.log.trim().is_empty() {
                         model
                             .log_lines
@@ -13479,16 +13558,72 @@ fn handle_model_request(
     }
 }
 
-fn spawn_model(initial_paths: Vec<PathBuf>) -> ManagedState {
+fn spawn_model(initial_paths: Vec<PathBuf>, app: tauri::AppHandle) -> ManagedState {
     let (sender, receiver) = mpsc::channel::<ModelEnvelope>();
     let config_path = default_config_path();
+    let api_wake_sender = sender.clone();
     std::thread::Builder::new()
         .name("cuemol-tauri-model".to_string())
         .spawn(move || {
             let mut model = AppModel::new_with_config(Vec::new(), config_path);
-            while let Ok(envelope) = receiver.recv() {
-                let result = handle_model_request(&mut model, envelope.request);
-                let _ = envelope.response.send(result);
+            let mut api = cuemol_command::transport::GuiApiServer::default();
+            let mut protocol = cuemol_command::Protocol::without_history();
+            loop {
+                if model
+                    .apbs_job
+                    .as_ref()
+                    .is_some_and(|job| job.command.is_some())
+                {
+                    let _ = handle_model_request(&mut model, ModelRequest::PollApbsCalculation);
+                    if model.apbs_job.is_none() {
+                        let _ = app.emit("cuemol-model-changed", ());
+                    }
+                }
+                let wake_sender = api_wake_sender.clone();
+                match api.sync(&model.desktop, move || {
+                    let (response, _) = mpsc::channel();
+                    let _ = wake_sender.send(ModelEnvelope {
+                        request: ModelRequest::LocalApiReady,
+                        response,
+                    });
+                }) {
+                    Ok(true) => {
+                        protocol = cuemol_command::Protocol::without_history();
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        model.status = error.to_string();
+                        let _ = app.emit("cuemol-model-changed", ());
+                    }
+                }
+                if model.mcp_listen_port != api.port() {
+                    model.mcp_listen_port = api.port();
+                    let _ = app.emit("cuemol-model-changed", ());
+                }
+                let envelope = if model
+                    .apbs_job
+                    .as_ref()
+                    .is_some_and(|job| job.command.is_some())
+                {
+                    match receiver.recv_timeout(std::time::Duration::from_millis(30)) {
+                        Ok(envelope) => envelope,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                } else {
+                    let Ok(envelope) = receiver.recv() else {
+                        break;
+                    };
+                    envelope
+                };
+                if matches!(envelope.request, ModelRequest::LocalApiReady) {
+                    mcp_bridge::poll(&mut model, &api, &mut protocol, || {
+                        let _ = app.emit("cuemol-model-changed", ());
+                    });
+                } else {
+                    let result = handle_model_request(&mut model, envelope.request);
+                    let _ = envelope.response.send(result);
+                }
             }
         })
         .expect("spawn CueMol Tauri model thread");
@@ -16803,7 +16938,10 @@ pub fn run() -> Result<(), tauri::Error> {
     let initial_paths = std::env::args_os().skip(1).map(PathBuf::from).collect();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(spawn_model(initial_paths))
+        .setup(move |app| {
+            app.manage(spawn_model(initial_paths, app.handle().clone()));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             get_density_histogram,
@@ -17346,7 +17484,7 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
-    fn model_without_gpu() -> AppModel {
+    pub(super) fn model_without_gpu() -> AppModel {
         let mut desktop = DesktopAppState::new();
         desktop.ensure_active_scene();
         AppModel {
@@ -17386,6 +17524,9 @@ mod tests {
             pov_render_job: None,
             pov_render_result: None,
             animation_render_job: None,
+            remote_revision: 0,
+            numeric_preview: None,
+            mcp_listen_port: None,
             console_session: cuemol_command::console::Session::default(),
             console_run: None,
             log_lines: Vec::new(),

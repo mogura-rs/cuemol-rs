@@ -65,6 +65,7 @@ function setCueMolPaletteCollapsed(collapsed, save = true) {
 }
 
 function selectCueMolActivity(name, toggle = true) {
+  if (name === "catalog" && !pluginEnabled("catalog")) name = "explorer";
   void cancelCueMolNumericDrag();
   cueMolActivity = toggle && cueMolActivity === name ? null : name;
   document.querySelectorAll("[data-activity]").forEach((item) => {
@@ -116,7 +117,7 @@ function attachCueMolNumericDrag(input, label, row, commit, owner = cueMolProper
     event.preventDefault();
     const inspector = owner;
     const original = row.value;
-    const args = {...inspector.target, sceneId:snapshot.activeSceneUid, prop:row.key, originalValue:original, originalWasDefault:Boolean(row.isdefault)};
+    const args = {...inspector.target, remoteRevision:snapshot.remoteRevision ?? 0, sceneId:snapshot.activeSceneUid, prop:row.key, originalValue:original, originalWasDefault:Boolean(row.isdefault)};
     const drag = {owner, key:inspector.key, value:original, moved:false, ending:false, pending:null, running:null, finish:null};
     cueMolNumericDrag = drag;
     const apply = async (mode, value) => {
@@ -169,7 +170,7 @@ function attachCueMolNumericDrag(input, label, row, commit, owner = cueMolProper
       window.removeEventListener('blur', abort);
       try {
         if (drag.running) await drag.running;
-        if (drag.moved && row.schema?.realtime) await apply(mode, drag.value);
+        if (drag.moved && row.schema?.realtime && mode !== "discard") await apply(mode, drag.value);
         else if (drag.moved && mode === 'commit') commit(drag.value);
         if (mode === 'abort') input.value = row.format ? row.format(original) : original;
       } catch (error) { inspector.error = String(error); }

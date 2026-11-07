@@ -41,9 +41,12 @@ impl App {
                             .and_then(|index| group.source(index))
                         {
                             let revision = self.revision;
+                            let cancelled = self.agent.operation_cancel();
                             spawn_local(async move {
                                 let result = source.frame(local_index).await.map_err(js_error);
-                                enqueue(Event::AgentFrame(id, frame, result, reply, revision));
+                                enqueue(Event::AgentFrame(
+                                    id, frame, result, reply, revision, cancelled,
+                                ));
                             });
                             continue;
                         }
@@ -304,6 +307,23 @@ impl App {
                 let response=ui.checkbox(&mut value,label); self.record_ui_rect(label,&response);
                 if response.changed(){self.state.put_config_value(key,value.to_string());input_changed=true;}
             }
+            let plugins = ui.collapsing("Plugins", |ui| {
+                ui.strong("Installed plugins");
+                for plugin in cuemol_desktop_core::plugins::BUILTIN_PLUGINS.iter().filter(|plugin| !plugin.always_enabled && plugin.id != "mcp") {
+                    let mut enabled = self.state.plugin_enabled(plugin.id);
+                    let response = ui.checkbox(&mut enabled, plugin.name);
+                    self.record_ui_rect(&format!("Plugin {}", plugin.id), &response);
+                    if response.changed() {
+                        let _ = self.state.set_plugin_enabled(plugin.id, enabled);
+                        if plugin.id == "agent" {
+                            self.agent.settings.enabled = enabled;
+                            if !enabled { self.agent.cancel("AI Agent plugin disabled."); }
+                        }
+                        input_changed = true;
+                    }
+                }
+            });
+            self.record_ui_rect("Plugins", &plugins.header_response);
             if input_changed {
                 self.state.view_input_config_mut().set_style("");
                 self.settings_text = self.state.config_text();
@@ -320,7 +340,10 @@ impl App {
                 if save.clicked(){
                     let previous=self.state.clone();
                     match self.state.load_config_text(&self.settings_text){
-                        Ok(_)=>{self.state.view_input_config_mut().set_style("");if let Some(storage)=web_sys::window().and_then(|w|w.local_storage().ok().flatten()){
+                        Ok(_)=>{
+                            self.agent.settings.enabled = self.state.plugin_enabled("agent");
+                            if !self.agent.settings.enabled { self.agent.cancel("AI Agent plugin disabled."); }
+                            self.state.view_input_config_mut().set_style("");if let Some(storage)=web_sys::window().and_then(|w|w.local_storage().ok().flatten()){
                             let result=storage.set_item("cuemol.config",&self.settings_text).and_then(|_|storage.set_item("cuemol.startup",&self.startup_text));
                             self.message=result.map(|_|"Settings saved.".to_string()).unwrap_or_else(js_error);
                         }else{self.message="Browser storage is unavailable.".into();}}

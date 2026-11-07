@@ -202,6 +202,7 @@ def main():
     parser.add_argument('--view-only', action='store_true')
     parser.add_argument('--file-drop-only', action='store_true')
     parser.add_argument('--picking-only', action='store_true')
+    parser.add_argument('--plugins-only', action='store_true')
     args = parser.parse_args()
     binary, work = args.binary.resolve(), args.out.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -219,7 +220,8 @@ def main():
     window_x, window_y = available_x + 40, available_y + 40
     (config / 'config.tsv').write_text(
         f'window:width\t{window_width}\nwindow:height\t{window_height}\n'
-        f'window:x\t{window_x}\nwindow:y\t{window_y}\n')
+        f'window:x\t{window_x}\nwindow:y\t{window_y}\n'
+        'plugins:mcp:enabled\ttrue\nmcp:port\t0\n')
     if args.animation_timeline_only:
         with (config / 'config.tsv').open('a') as stream:
             stream.write('bottom_panel:tab\tanimation\nbottom_panel:visible\ttrue\nbottom_panel:height\t300\n')
@@ -299,6 +301,64 @@ def main():
             def input_focused(box):
                 pixels = capture().crop(box).getdata()
                 return sum(b - r > 30 and g - r > 10 for r, g, b in pixels) > 100
+
+            if args.plugins_only:
+                import socket
+
+                def open_plugins():
+                    click_at(x + 22, y + height - 45)
+                    time.sleep(0.2)
+                    click_at(x + 526, y + 157)
+                    time.sleep(0.2)
+
+                def toggle_examples():
+                    for row in [283, 335, 387]:
+                        click_at(x + 380, y + row)
+
+                original = call('get_scene_state')
+                before_config = (config / 'config.tsv').read_text()
+                open_plugins()
+                toggle_examples()
+                click_at(x + 938, y + 521)
+                if (config / 'config.tsv').read_text() != before_config:
+                    raise RuntimeError('Cancelling plugin options saved the draft')
+                open_plugins()
+                toggle_examples()
+                click_at(x + 979, y + 521)
+                wait_for(lambda: 'plugins:catalog:enabled\ttrue' in (config / 'config.tsv').read_text())
+                saved = (config / 'config.tsv').read_text()
+                for line in ['plugins:mdtools:enabled\ttrue', 'plugins:pymol-console:enabled\tfalse']:
+                    if line not in saved:
+                        raise RuntimeError(f'Plugin preference was not saved: {line}')
+                if call('get_scene_state')['sceneId'] != original['sceneId']:
+                    raise RuntimeError('Plugin changes replaced the active scene')
+                click_at(x + 22, y + 308)
+                time.sleep(0.3)
+                capture('plugin-catalog.png')
+                open_plugins()
+                capture('plugin-options-enabled.png')
+                connection = json.loads((config / 'local-api.json').read_text())
+                click_at(x + 380, y + 439)
+                click_at(x + 979, y + 521)
+                wait_for(lambda: not (config / 'local-api.json').exists())
+                def stopped():
+                    try:
+                        with socket.create_connection(('127.0.0.1', connection['port']), timeout=0.1):
+                            return False
+                    except OSError:
+                        return True
+                wait_for(stopped)
+                open_plugins()
+                click_at(x + 380, y + 439)
+                click_at(x + 979, y + 521)
+                wait_for(lambda: (config / 'local-api.json').exists())
+                if call('get_scene_state')['sceneId'] != original['sceneId']:
+                    raise RuntimeError('Reconnecting MCP changed the scene')
+                capture('plugin-mcp-reconnected.png')
+                report.update(ok=True, plugin_cancel=True, plugin_persistence=True,
+                              plugin_preserves_scene=True, mcp_stop_and_reconnect=True)
+                print(json.dumps(report), flush=True)
+                return
 
             if args.picking_only:
                 def gpu_enabled():

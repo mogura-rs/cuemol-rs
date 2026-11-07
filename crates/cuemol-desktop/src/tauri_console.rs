@@ -62,6 +62,9 @@ impl AppModel {
         source: &str,
         dialect: Dialect,
     ) -> Result<Update, String> {
+        if !self.desktop.console_dialect_enabled(dialect.label()) {
+            return Err("Console plugin or dialect is disabled.".into());
+        }
         self.console_run = None;
         self.console_session.finish_submission()?;
         self.console_session.begin_submission(source, dialect);

@@ -141,6 +141,47 @@ pub struct ApiServer {
     path: PathBuf,
 }
 
+#[derive(Default)]
+pub struct GuiApiServer {
+    server: Option<ApiServer>,
+    requested_port: Option<u16>,
+}
+
+impl GuiApiServer {
+    pub fn stop(&mut self) {
+        self.server = None;
+        self.requested_port = None;
+    }
+
+    pub fn sync(
+        &mut self,
+        state: &DesktopAppState,
+        wake: impl Fn() + Send + 'static,
+    ) -> Result<bool> {
+        if !state.mcp_server_enabled() || std::env::var_os("CUEMOL_DISABLE_MCP").is_some() {
+            self.requested_port = None;
+            return Ok(self.server.take().is_some());
+        }
+        let port = state.mcp_server_port()?;
+        if self.requested_port == Some(port) {
+            return Ok(false);
+        }
+        self.server = None;
+        self.requested_port = Some(port);
+        self.server = Some(ApiServer::start(([127, 0, 0, 1], port).into(), wake).map_err(|error| {
+            CueMolError::Io(format!("MCP listener failed: {error}. Change the port or disable and enable MCP to retry."))
+        })?);
+        Ok(true)
+    }
+
+    pub fn server(&self) -> Option<&ApiServer> {
+        self.server.as_ref()
+    }
+    pub fn port(&self) -> Option<u16> {
+        self.server.as_ref().map(ApiServer::port)
+    }
+}
+
 impl ApiServer {
     pub fn start(address: SocketAddr, wake: impl Fn() + Send + 'static) -> Result<Self> {
         if !address.ip().is_loopback() {
@@ -253,7 +294,24 @@ impl ApiServer {
                     continue;
                 }
                 wake();
-                match answer.recv_timeout(Duration::from_secs(1250)) {
+                let deadline = std::time::Instant::now() + Duration::from_secs(1250);
+                let response = loop {
+                    if quitting.load(Ordering::Relaxed) {
+                        break Err(503);
+                    }
+                    let timeout = deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .min(Duration::from_millis(100));
+                    if timeout.is_zero() {
+                        break Err(504);
+                    }
+                    match answer.recv_timeout(timeout) {
+                        Ok(response) => break Ok(response),
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break Err(503),
+                    }
+                };
+                match response {
                     Ok(Some(response)) => {
                         let response = tiny_http::Response::from_string(response.to_string())
                             .with_header(
@@ -265,8 +323,8 @@ impl ApiServer {
                     Ok(None) => {
                         let _ = request.respond(tiny_http::Response::empty(202));
                     }
-                    Err(_) => {
-                        let _ = request.respond(tiny_http::Response::empty(504));
+                    Err(status) => {
+                        let _ = request.respond(tiny_http::Response::empty(status));
                     }
                 }
             }

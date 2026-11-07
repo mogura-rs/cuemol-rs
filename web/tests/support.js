@@ -9,3 +9,11 @@ export async function call(page,name,args={}){
   },id),{timeout:60000}).toBe(true);
   return page.evaluate(()=>window.cuemol.status());
 }
+
+export async function enablePlugins(page, ids) {
+  await page.addInitScript(ids => {
+    let config = localStorage.getItem('cuemol.config') || '# cuemol-config-v2';
+    for (const id of ids) config += `\nplugins:${id}:enabled\ttrue`;
+    localStorage.setItem('cuemol.config', config);
+  }, ids);
+}

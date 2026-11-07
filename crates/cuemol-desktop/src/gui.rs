@@ -205,7 +205,7 @@ pub fn run_with_paths(paths: Vec<PathBuf>) -> Result<()> {
     let mut runner = NativeRunner::new(event_loop.create_proxy(), paths);
     let run_result = event_loop.run_app(&mut runner).map_err(gui_error);
     let init_error = runner.init_error.take();
-    drop(runner.api.take());
+    runner.api.stop();
     std::mem::forget(runner);
     run_result?;
     init_error.map_or(Ok(()), Err)
@@ -287,23 +287,14 @@ fn send_native_tool_result(
     request: cuemol_command::transport::ApiRequest,
     outcome: std::result::Result<serde_json::Value, String>,
 ) {
-    let error = outcome.is_err();
-    let (payload, image) = match outcome {
-        Ok(mut value) => {
-            let image = value.as_object_mut().and_then(|v| v.remove("_image"));
-            (serde_json::json!({"ok":true,"result":value}), image)
-        }
-        Err(error) => (serde_json::json!({"ok":false,"error":error}), None),
-    };
-    let mut content = vec![serde_json::json!({"type":"text","text":payload.to_string()})];
-    if let Some(image) = image {
-        content.push(serde_json::json!({"type":"image","mimeType":"image/png","data":image}));
-    }
-    let _ = request.reply.send(Some(serde_json::json!({"jsonrpc":"2.0","id":request.message["id"],"result":{"content":content,"isError":error}})));
+    let _ = request.reply.send(Some(cuemol_command::tool_response(
+        request.message["id"].clone(),
+        outcome,
+    )));
 }
 
 struct NativeRunner {
-    api: Option<cuemol_command::transport::ApiServer>,
+    api: cuemol_command::transport::GuiApiServer,
     protocol: cuemol_command::Protocol,
     window: Option<Arc<Window>>,
     egui_ctx: egui::Context,
@@ -328,7 +319,7 @@ impl NativeRunner {
         cuemol_ui::shell::configure_fonts(&mut fonts);
         egui_ctx.set_fonts(fonts);
         Self {
-            api: None,
+            api: cuemol_command::transport::GuiApiServer::default(),
             protocol: cuemol_command::Protocol::without_history(),
             window: None,
             egui_ctx,
@@ -718,30 +709,29 @@ impl NativeRunner {
         let (Some(app), Some(gpu)) = (&mut self.app, &mut self.gpu) else {
             return;
         };
-        if self.api.is_none()
-            && std::env::var_os("CUEMOL_DISABLE_MCP").is_none()
-            && app.state.config_value("mcp:enabled") != "false"
-        {
-            let proxy = self.event_proxy.clone();
-            match cuemol_command::transport::ApiServer::start(
-                "127.0.0.1:0".parse().unwrap(),
-                move || {
-                    let _ = proxy.send_event(());
-                },
-            ) {
-                Ok(api) => self.api = Some(api),
-                Err(error) => {
-                    app.set_error(error);
-                    app.state.put_config_value("mcp:enabled", "false");
+        let proxy = self.event_proxy.clone();
+        match self.api.sync(&app.state, move || {
+            let _ = proxy.send_event(());
+        }) {
+            Ok(true) => self.protocol = cuemol_command::Protocol::without_history(),
+            Ok(false) => {}
+            Err(error) => {
+                app.set_error(error);
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
         }
-        let Some(api) = &self.api else {
+        app.mcp_listen_port = self.api.port();
+        let Some(api) = self.api.server() else {
             return;
         };
         while let Ok(request) = api.requests.try_recv() {
             let name = request.message["params"]["name"].as_str().unwrap_or("");
-            let is_call = request.message["method"] == "tools/call";
+            let is_call = self.protocol.is_tool_call(&request.message);
+            if is_call && cuemol_command::tool_is_mutating(name) {
+                app.cancel_numeric_previews(&mut gpu.camera);
+            }
             if is_call
                 && matches!(name, "render_image" | "get_screenshot" | "capture_view")
                 && self.protocol.initialized()
@@ -1302,6 +1292,7 @@ struct NativeFileReaderOptions<'a> {
 
 #[derive(Debug)]
 struct GuiApplication {
+    mcp_listen_port: Option<u16>,
     agent: cuemol_ui::AgentPanel,
     state: DesktopAppState,
     open_path: String,
@@ -2206,6 +2197,7 @@ struct NativeApbsJob {
     started: Instant,
     command: Option<cuemol_command::transport::ApiRequest>,
     agent_reply: Option<cuemol_agent::ToolReply>,
+    agent_turn_cancel: Option<Arc<AtomicBool>>,
 }
 
 impl NativeApbsJob {
@@ -2214,12 +2206,7 @@ impl NativeApbsJob {
             let _ = reply.try_send(outcome.clone());
         }
         if let Some(request) = self.command.take() {
-            let error = outcome.is_err();
-            let payload = match outcome {
-                Ok(value) => serde_json::json!({"ok":true,"result":value}),
-                Err(error) => serde_json::json!({"ok":false,"error":error}),
-            };
-            let _ = request.reply.send(Some(serde_json::json!({"jsonrpc":"2.0","id":request.message["id"],"result":{"content":[{"type":"text","text":payload.to_string()}],"isError":error}})));
+            send_native_tool_result(request, outcome);
         }
     }
 }
@@ -2563,6 +2550,7 @@ enum OptionsPane {
     Misc,
     Key,
     Mouse,
+    Plugins,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2576,6 +2564,9 @@ struct NativeShortcut {
 
 #[derive(Debug, Clone, PartialEq)]
 struct NativePreferences {
+    plugins: Vec<(String, bool)>,
+    mcp_accept_connections: bool,
+    mcp_port: u16,
     drop_target: cuemol_desktop_core::FileOpenTarget,
     shell_target: cuemol_desktop_core::FileOpenTarget,
     atom_label_font: String,
@@ -4513,6 +4504,13 @@ impl NativePreferences {
     fn from_state(state: &DesktopAppState) -> Self {
         let input = state.view_input_config();
         Self {
+            mcp_accept_connections: state.config_value("mcp:accept-connections") != "false",
+            mcp_port: state.mcp_server_port().unwrap_or(27182),
+            plugins: cuemol_desktop_core::plugins::BUILTIN_PLUGINS
+                .iter()
+                .filter(|plugin| !plugin.always_enabled)
+                .map(|plugin| (plugin.id.into(), state.plugin_enabled(plugin.id)))
+                .collect(),
             drop_target: cuemol_desktop_core::FileOpenTarget::from_config(
                 &state.config_value("files:drop-target"),
             ),
@@ -4763,6 +4761,10 @@ impl GuiApplication {
         {
             agent.load_settings(&text);
         }
+        if state.config_value("plugins:agent:enabled").is_empty() && agent.settings.enabled {
+            let _ = state.set_plugin_enabled("agent", true);
+        }
+        agent.settings.enabled = state.plugin_enabled("agent");
         Self {
             agent,
             state,
@@ -4899,6 +4901,7 @@ impl GuiApplication {
             ray_lighting: cuemol_command::rendering_params(&serde_json::Map::new(), "umbreon")
                 .unwrap(),
             ray_job: None,
+            mcp_listen_port: None,
             pov_render_settings: NativePovRenderSettings::default(),
             pov_render_job: None,
             pov_render_result: None,
@@ -5117,6 +5120,10 @@ impl GuiApplication {
     }
 
     fn agent_ui(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        if !self.state.plugin_enabled("agent") {
+            self.agent.cancel("AI Agent plugin disabled.");
+            return;
+        }
         if self.agent.running() && self.agent.revision != self.snapshot_revision {
             self.agent
                 .cancel("Scene changed outside the agent; turn cancelled.");
@@ -5163,6 +5170,7 @@ impl GuiApplication {
                 if let Some(job) = &mut self.apbs_job {
                     job.command = None;
                     job.agent_reply = Some(reply);
+                    job.agent_turn_cancel = Some(self.agent.operation_cancel());
                 } else {
                     let error = receiver
                         .try_recv()
@@ -5333,7 +5341,7 @@ impl GuiApplication {
         self.poll_pdb_download(camera);
         self.poll_url_download(camera);
         self.poll_animation_render(camera);
-        self.poll_apbs_calculation();
+        self.poll_apbs_calculation(camera);
         self.poll_pov_render();
         self.poll_native_render(ctx);
         self.pixels_per_point = ctx.pixels_per_point();
@@ -5606,7 +5614,19 @@ impl GuiApplication {
             .show(ctx, |ui| {
                 ui.visuals_mut().override_text_color = Some(egui::Color32::from_gray(230));
                 ui.horizontal(|ui| {
-                    ui.label(&self.status);
+                    ui.add(egui::Label::new(&self.status).truncate());
+                    if self.state.plugin_enabled("mcp") {
+                        let label = self
+                            .mcp_listen_port
+                            .map_or_else(|| "MCP: off".into(), |port| format!("MCP: {port}"));
+                        if ui
+                            .small_button(label)
+                            .on_hover_text("Copy the connection command")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text("cuemol mcp connect".into());
+                        }
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(format!(
                             "{} atoms / {} bonds",
@@ -5643,7 +5663,9 @@ impl GuiApplication {
                         self.choose_open_file(camera);
                         ui.close();
                     }
-                    if ui.button("Open MD Trajectory...").clicked() {
+                    if self.state.plugin_enabled("mdtools")
+                        && ui.button("Open MD Trajectory...").clicked()
+                    {
                         self.md_trajectory_draft = Some(NativeMdTrajectoryDraft::default());
                         ui.close();
                     }
@@ -5879,7 +5901,7 @@ impl GuiApplication {
                     }
                 });
                 ui.menu_button("Tools", |ui| {
-                    if ui.button("AI Agent...").clicked() {
+                    if self.state.plugin_enabled("agent") && ui.button("AI Agent...").clicked() {
                         self.agent.visible = true;
                         ui.close();
                     }
@@ -13754,6 +13776,13 @@ impl GuiApplication {
 
     fn execute_console_input(&mut self) {
         use cuemol_command::console::Dialect;
+        if !self
+            .state
+            .console_dialect_enabled(self.console.dialect.label())
+        {
+            self.set_status("Console plugin or dialect is disabled.");
+            return;
+        }
         self.cancel_console("Console replaced by another submission.");
         if self.console.dialect == Dialect::JavaScript {
             self.execute_javascript_console();
@@ -17960,6 +17989,7 @@ impl GuiApplication {
             started: Instant::now(),
             command: None,
             agent_reply: None,
+            agent_turn_cancel: None,
         });
         self.set_status(format!(
             "APBS calculation started for {} atom(s)",
@@ -17991,14 +18021,18 @@ impl GuiApplication {
         }
     }
 
-    fn poll_apbs_calculation(&mut self) {
+    fn poll_apbs_calculation(&mut self, camera: &mut CameraController) {
         let Some(mut job) = self.apbs_job.take() else {
             return;
         };
         let is_agent = job.agent_reply.is_some();
         let cancelled_agent = job.agent_reply.as_ref().is_some_and(|r| r.is_closed())
+            || job
+                .agent_turn_cancel
+                .as_ref()
+                .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
             || (is_agent && self.agent.revision != self.snapshot_revision);
-        if cancelled_agent {
+        if cancelled_agent || (job.command.is_some() && !self.state.mcp_server_enabled()) {
             job.cancel.store(true, Ordering::Relaxed);
         }
         match job.receiver.try_recv() {
@@ -18012,12 +18046,13 @@ impl GuiApplication {
                 self.set_status(error);
             }
             Ok(Ok(output)) => {
-                if cancelled_agent {
+                if job.cancel.load(Ordering::Relaxed) {
                     let _ = fs::remove_dir_all(&output.work_dir);
                     job.reply(Err("Cancelled".into()));
                     return;
                 }
 
+                self.cancel_numeric_previews(camera);
                 let mut undo = self.capture_undo();
                 if is_agent {
                     undo.camera = Some(self.agent.initial_camera().clone());
@@ -19100,12 +19135,30 @@ impl GuiApplication {
                     ui.selectable_value(&mut self.options_pane, OptionsPane::Misc, "Misc");
                     ui.selectable_value(&mut self.options_pane, OptionsPane::Key, "Key");
                     ui.selectable_value(&mut self.options_pane, OptionsPane::Mouse, "Mouse");
+                    ui.selectable_value(&mut self.options_pane, OptionsPane::Plugins, "Plugins");
                 });
                 ui.separator();
                 match self.options_pane {
                     OptionsPane::Misc => Self::options_misc_ui(ui, &mut draft),
                     OptionsPane::Key => Self::options_key_ui(ui, &mut draft),
                     OptionsPane::Mouse => Self::options_mouse_ui(ui, &mut draft),
+                    OptionsPane::Plugins => {
+                        ui.strong("Installed plugins");
+                        ui.checkbox(&mut draft.mcp_accept_connections, "MCP: Accept connections");
+                        ui.horizontal(|ui| {
+                            ui.label("MCP port (0 = automatic)");
+                            ui.add(egui::DragValue::new(&mut draft.mcp_port));
+                        });
+                        ui.label("Connect with cuemol mcp connect after enabling MCP Server.");
+                        for (id, enabled) in &mut draft.plugins {
+                            if let Some(plugin) = cuemol_desktop_core::plugins::BUILTIN_PLUGINS
+                                .iter()
+                                .find(|plugin| plugin.id == id)
+                            {
+                                ui.checkbox(enabled, plugin.name);
+                            }
+                        }
+                    }
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -19321,6 +19374,19 @@ impl GuiApplication {
     ) -> std::result::Result<(), String> {
         validate_native_preferences(preferences)?;
         self.state
+            .set_plugin_states(&preferences.plugins.iter().cloned().collect())
+            .map_err(|error| error.to_string())?;
+        self.state.put_config_value(
+            "mcp:accept-connections",
+            preferences.mcp_accept_connections.to_string(),
+        );
+        self.state
+            .put_config_value("mcp:port", preferences.mcp_port.to_string());
+        self.agent.settings.enabled = self.state.plugin_enabled("agent");
+        if !self.agent.settings.enabled {
+            self.agent.cancel("AI Agent plugin disabled.");
+        }
+        self.state
             .put_config_value("files:drop-target", preferences.drop_target.as_str());
         self.state
             .put_config_value("files:shell-target", preferences.shell_target.as_str());
@@ -19452,7 +19518,20 @@ impl GuiApplication {
             .map_err(|error| format!("failed to save config {}: {error}", path.display()))
     }
 
+    fn sync_agent_plugin(&mut self) {
+        if self.state.config_value("plugins:agent:enabled").is_empty()
+            && self.agent.settings.enabled
+        {
+            let _ = self.state.set_plugin_enabled("agent", true);
+        }
+        self.agent.settings.enabled = self.state.plugin_enabled("agent");
+        if !self.agent.settings.enabled {
+            self.agent.cancel("AI Agent plugin disabled.");
+        }
+    }
+
     fn apply_stored_preferences(&mut self) {
+        self.sync_agent_plugin();
         let activity = self.state.config_value("layout:activity");
         self.activity = if activity.is_empty() {
             Some(cuemol_ui::shell::Activity::Explorer)
@@ -27869,9 +27948,7 @@ impl GuiApplication {
     }
 
     fn undo(&mut self, camera: &mut CameraController) {
-        for (tool, args) in self.animation_inspector.cancel() {
-            self.tritium_command(tool, args, camera);
-        }
+        self.cancel_numeric_previews(camera);
         let Some(mut snapshot) = self.undo_stack.pop() else {
             self.set_status("Nothing to undo");
             return;
@@ -27894,9 +27971,7 @@ impl GuiApplication {
     }
 
     fn redo(&mut self, camera: &mut CameraController) {
-        for (tool, args) in self.animation_inspector.cancel() {
-            self.tritium_command(tool, args, camera);
-        }
+        self.cancel_numeric_previews(camera);
         let Some(mut snapshot) = self.redo_stack.pop() else {
             self.set_status("Nothing to redo");
             return;
@@ -33830,6 +33905,7 @@ mod tests {
         let mut camera = CameraController::from_qsys_camera(&before);
         let before = cuemol_command::view_json(&camera.to_qsys_camera("__current"));
 
+        app.state.set_plugin_enabled("agent", true).unwrap();
         app.agent.settings = cuemol_agent::Settings {
             enabled: true,
             model: "openai:test-model".into(),
@@ -36826,6 +36902,45 @@ mod tests {
         assert_eq!(alpha(&app), 1.);
         app.redo(&mut camera);
         assert_eq!(alpha(&app), committed);
+        frame(
+            &mut app,
+            &mut camera,
+            &ctx,
+            vec![egui::Event::PointerMoved(start), pointer(start, true)],
+        );
+        frame(
+            &mut app,
+            &mut camera,
+            &ctx,
+            vec![egui::Event::PointerMoved(end)],
+        );
+        frame(
+            &mut app,
+            &mut camera,
+            &ctx,
+            vec![egui::Event::PointerMoved(end - egui::vec2(2., 0.))],
+        );
+        assert_ne!(alpha(&app), committed);
+        app.cancel_numeric_previews(&mut camera);
+        assert_eq!(alpha(&app), committed);
+        let before = app.capture_undo();
+        let mut protocol = cuemol_command::Protocol::without_history();
+        let mut view = camera.to_qsys_camera("__current");
+        protocol.handle(
+            serde_json::json!({"jsonrpc":"2.0","id":0,"method":"initialize"}),
+            &mut app.state,
+            &mut view,
+        );
+        let response = protocol.handle(serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"set_node_prop","arguments":{"nodeType":"renderer","nodeId":renderer.get(),"prop":"alpha","value":"0.42"}}}), &mut app.state, &mut view).unwrap();
+        assert_eq!(response["result"]["isError"], false);
+        app.push_undo_snapshot(before);
+        app.rebuild_snapshot();
+        frame(&mut app, &mut camera, &ctx, vec![pointer(end, false)]);
+        frame(&mut app, &mut camera, &ctx, vec![]);
+        assert!((alpha(&app) - 0.42).abs() < 1e-6);
+        assert_eq!(app.undo_stack.len(), 2);
+        app.undo(&mut camera);
+        assert_eq!(alpha(&app), committed);
     }
 
     #[test]
@@ -37263,7 +37378,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(3);
         while app.apbs_job.is_some() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
-            app.poll_apbs_calculation();
+            app.poll_apbs_calculation(&mut CameraController::default());
         }
         assert!(app.apbs_job.is_none());
         let maps = app.state.active_density_map_summaries();

@@ -115,6 +115,28 @@ impl App {
     }
 
     pub(super) fn shell(&mut self, ctx: &egui::Context) {
+        if self
+            .activity
+            .is_some_and(|activity| !activity.enabled(&self.state))
+        {
+            self.activity = Some(Activity::Explorer);
+        }
+        if !self.state.plugin_tab_enabled(&self.bottom_tab) {
+            self.bottom_tab = "Output".into();
+        }
+        if !self.state.plugin_enabled("mdtools") {
+            self.playing = false;
+        }
+        if !self.state.plugin_enabled("agent") {
+            self.agent.cancel("AI Agent plugin disabled.");
+            self.agent.visible = false;
+        }
+        if !self
+            .state
+            .console_dialect_enabled(self.console.dialect.label())
+        {
+            self.console.dialect = cuemol_command::console::Dialect::CueMol;
+        }
         shell::theme(ctx, !self.dark);
         self.agent.docked = true;
         self.shell_menu(ctx);
@@ -167,12 +189,17 @@ impl App {
             self.agent.visible = false;
         }
         let before = self.activity;
-        if shell::activity_bar_observed(ctx, &mut self.activity, |activity, rect| {
-            self.ui_rects.insert(
-                activity.title().into(),
-                [rect.min.x, rect.min.y, rect.width(), rect.height()],
-            );
-        }) {
+        if shell::activity_bar_filtered(
+            ctx,
+            &mut self.activity,
+            |activity| activity.enabled(&self.state),
+            |activity, rect| {
+                self.ui_rects.insert(
+                    activity.title().into(),
+                    [rect.min.x, rect.min.y, rect.width(), rect.height()],
+                );
+            },
+        ) {
             self.settings_text = self.state.config_text();
             self.show_settings = true;
         }
@@ -444,6 +471,7 @@ impl App {
                         }
                         ui.separator();
                         for activity in Activity::ALL {
+                            if !activity.enabled(&self.state) { continue; }
                             if ui.button(activity.title()).clicked() {
                                 self.activity = Some(activity);
                                 ui.close();
@@ -515,7 +543,7 @@ impl App {
                             self.show_console = true;
                             ui.close();
                         }
-                        if ui.button("AI Agent").clicked() {
+                        if self.state.plugin_enabled("agent") && ui.button("AI Agent").clicked() {
                             self.activity = Some(Activity::Agent);
                             ui.close();
                         }
@@ -794,6 +822,10 @@ impl App {
             .width_range(180.0..=620.)
             .show(ctx, |ui| {
                 shell::header(ui, activity.title());
+                if activity == Activity::Catalog {
+                    cuemol_ui::catalog::show(ui);
+                    return;
+                }
                 if activity == Activity::Agent {
                     if let Some(prompt) = self.agent.show_docked(ui) {
                         self.agent.start(
@@ -1631,6 +1663,9 @@ impl App {
                 }
                 shell::tab_strip(ui, |ui| {
                     for tab in shell::BOTTOM_TABS {
+                        if !self.state.plugin_tab_enabled(tab) {
+                            continue;
+                        }
                         let response = shell::tab(ui, tab, self.bottom_tab == tab, compact);
                         if response.clicked() {
                             self.bottom_tab = tab.into();

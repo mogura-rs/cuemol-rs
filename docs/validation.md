@@ -1,5 +1,66 @@
 # Validation evidence
 
+## Built-in plugin preferences and GUI MCP lifecycle
+
+The current reference's compiled plugin registry supplies defaults and permanent
+contributions. Get PDB and Sequence remain enabled. Console, PyMOL and ChimeraX
+start enabled; MD Tools, Agent, Catalog and MCP start disabled. Shared settings
+apply plugin maps atomically. Explicit old `mcp:enabled` values remain readable,
+and explicit new Agent preferences override legacy `agent.json` enablement.
+
+Native and browser shells filter activity buttons, menus, tabs and console
+dialects. Hiding the selected contribution falls back to Explorer or Output.
+MD data remains loaded when its controls are disabled. Console cancellation
+does not disable Action Library. Pending agent frames and APBS results retain
+the cancellation token of their originating turn. The browser omits the native
+MCP listener switch. Tauri separates its Output and Console tabs and keeps
+plugin preferences in its existing cancellable Options dialog. A regression
+found CSS overriding the hidden Catalog button; its hidden state now wins.
+
+Native and Tauri GUI MCP listeners share start, stop and port configuration.
+Tauri calls record edits in its GUI history, preserving preferences and view
+navigation. Both frontends validate initialization, IDs and argument schemas
+before dispatching special GUI operations. Shared responses carry image content
+as MCP image blocks. A failing loopback test reproduced a disabled listener
+waiting for a pending result. The result wait now observes shutdown, returns
+503 to that request and releases the listener. Stop/restart creates a new token
+and removes the old connection descriptor. A port conflict reports the failure
+without changing the saved enabled preference or retrying on every UI frame;
+changing the port or toggling MCP retries the listener.
+
+Tauri MCP APBS runs through the existing process worker. It imports the result
+into the originating molecule's scene even after a scene switch, with one undo
+entry. Disabling MCP or cancelling the job rejects the output, including an
+already completed output that has not yet been applied. The same late-output
+guard is applied to native egui APBS. Mock executables cover success, scene
+switching, undo and cancellation without external services.
+
+Native MCP edits and asynchronous APBS output restore active numeric previews
+before capturing history. The native density-drag regression verifies that a
+remote edit survives pointer release and that undo restores the committed value.
+Tauri also tags numeric requests with a remote revision, rejects queued preview,
+commit and abort requests after an MCP edit, and tolerates a removed preview
+target. Its model regression verifies the original default value after undo.
+
+The shared plugin and ConsoleRunner tests, nine protocol/lifecycle cases,
+207 native GUI tests and 180 Tauri model tests pass. Five optional Tauri tests
+remain ignored in the ordinary model run. WebGL and WebGPU plugin scenarios
+check saved switches, dialect retention and fallback after reload. The affected
+135 browser regressions passed before the final cancellation-token refinement.
+The final ten focused browser/Tauri DOM checks include delayed indexed-frame
+cancellation across a new turn and numeric-preview interactions. Linux OS
+input tests cancel/apply plugin settings, inspect saved preferences, disable
+MCP while checking its listener, reconnect and retain the active scene. Catalog
+and Options screenshots were inspected. Run the native window check with
+`scripts/check-native-gui.py --plugins-only`.
+
+The usage guide previously described the GUI endpoint as always available and
+still quoted an older 124-operation catalog. It now explains enabling the MCP
+plugin and reports the current 129 registrations/127 MCP operations. The Agent
+instructions also now include enabling its plugin before opening the panel.
+Category navigation, full catalog examples and the Tauri Agent interface remain
+separate open requirements; these checks do not establish complete parity.
+
 ## Picking preferences and scene-history separation
 
 The existing GPU picking pass had no settings control. A failing core regression
