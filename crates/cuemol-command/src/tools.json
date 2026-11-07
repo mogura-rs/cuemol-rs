@@ -196,7 +196,15 @@
           "type": [
             "boolean",
             "null"
-          ]
+          ],
+          "description": "True also centres the view on the new renderer. For maps, mapCenterPolicy takes precedence. Null or false leaves the view."
+        },
+        "group": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Existing renderer group in the target object. Null leaves the renderer ungrouped. Presets cannot be nested in a group."
         }
       },
       "required": [
@@ -244,7 +252,7 @@
             "boolean",
             "null"
           ],
-          "description": "True also centres the view on the new renderer (MolCoord objects only). Null or false leaves the view."
+          "description": "True also centres the view on the new renderer. For maps, mapCenterPolicy takes precedence. Null or false leaves the view."
         },
         "mapCenterPolicy": {
           "type": [
@@ -258,6 +266,13 @@
             null
           ],
           "description": "For a map renderer: setMapCenter draws it around the view centre, moveViewCenter moves the view to the map. Null or auto picks by the map kind."
+        },
+        "group": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Existing renderer group in the target object. Null leaves the renderer ungrouped. Presets cannot be nested in a group."
         }
       },
       "required": [

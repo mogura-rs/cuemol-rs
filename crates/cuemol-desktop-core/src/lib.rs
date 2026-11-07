@@ -12,6 +12,7 @@ pub mod plugins;
 #[cfg(feature = "scripting")]
 pub mod preferences;
 pub mod renderer_history;
+pub mod renderer_setup;
 pub use clipboard::GuiClipboardPayload;
 pub use file_open::{FileOpenBatch, FileOpenTarget};
 mod scene_save;

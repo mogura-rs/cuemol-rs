@@ -1,5 +1,56 @@
 # Validation evidence
 
+## Browser renderer setup and scalar-map centering
+
+The browser scene tree now opens New Renderer from objects, renderers and groups.
+The shared form restores class-specific type/preset history, proposes names across
+the scene, follows type changes until a manual edit and re-arms after clearing a
+name. It starts from the molecule's current selection, includes the shared
+selection builder and disables selection for presets. Group entry points inherit
+their group and omit presets. Auxiliary-object group rows now appear in the tree.
+The editable object-name field is ignored when attaching to an existing object,
+matching the reference's actual attach flow.
+
+Creation uses one command and one browser undo entry, including group membership
+and preset children. A shared target description resolves the object's scene,
+class, compatible options and existing groups. Missing groups, nested presets and
+invalid molecular selectors are rejected before renderer creation. Failed browser
+commands retain the draft and restore scene/camera state. Scene changes discard
+the dialog; missing objects and renamed/removed groups disable submission. Only
+successful creation saves class history. Cancelling leaves it unchanged.
+
+The new UI check exposed an existing scalar-map discrepancy: the shared centering
+helper returned early for ElePotMap, even with an explicit Move view center choice.
+The reference's `emDefaults.ts` also deliberately ignores ElePotMap despite its
+renderer form exposing map-center choices, and `createRendererOnObject.ts` does
+not invoke the map policy helper. Rust now honors explicit policies for potential
+maps, with Auto retaining the view. Only the new renderer receives the preserve-view
+center; fitting a map leaves all previous renderer centers unchanged. This is an
+intentional functional difference from the current reference. Map fitting uses
+the full grid extent, not the average of voxel sample coordinates.
+
+Renderer framing now uses the new molecular renderer's own selection and preset
+membership instead of falling back to the molecule's current selection. Shared
+regressions cover all-atoms creation with an unrelated current selection and a
+restricted renderer. The public command description formerly limited centerView
+to MolCoord even though the implementation also handles surfaces and lightweight
+objects; the schema now describes the implemented behavior and the map override.
+
+Validation passes: the shared form's two model tests, five command-option tests,
+ten map tests and 220 native GUI model tests. Four cases pass against the final
+browser artifact: molecular creation in WebGL and WebGPU; map/surface creation,
+explicit centering and auxiliary groups; and actual preset creation with one-step
+undo and remembered defaults. The cases exercise selection building, invalid
+input retention, manual-name preservation and clearing, cancellation, scene
+changes and group inheritance. Browser screenshots were inspected. Initial
+harness errors used a nonexistent query tool and sampled status before startup;
+these were corrected. A map expectation also initially used voxel sample centers
+instead of the established grid extent.
+
+Native/Tauri renderer form controls remain a separate open checklist item; the
+native suite passing here confirms shared changes did not regress its current
+behavior. The old browser quick-add-only limitation is superseded by this entry.
+
 ## Renderer history per object class
 
 A shared configuration record now remembers renderer types and presets by the
@@ -35,9 +86,8 @@ The old single desktop renderer preference and the browser's unconditional first
 choice did not implement the reference's per-class history. The old persistence
 test name claimed reference behavior but only checked the legacy file round trip;
 it now describes that limited scope. The usage guide previously described
-Automatic as unconditional and now states the no-history default. The dedicated
-browser New Renderer form remains open in the checklist; its existing quick-add
-control does not establish dialog parity.
+Automatic as unconditional and now states the no-history default. At this checkpoint the dedicated browser New Renderer form was still absent;
+that limitation is superseded by the later browser renderer setup entry above.
 
 ## Molecular surface forms, naming and read-only queries
 

@@ -13,6 +13,71 @@ fn fixture() -> (DesktopAppState, Camera, Uid) {
     (state, Camera::new(), object)
 }
 
+#[test]
+fn renderer_creation_validates_group_and_selection_before_mutating() {
+    let (mut state, mut camera, object) = fixture();
+    call_tool(
+        &mut state,
+        &mut camera,
+        "create_group",
+        &json!({"objId":object.get(),"name":"bundle"}),
+    )
+    .unwrap();
+    let before = state.clone();
+    let preset = state
+        .molecule_renderer_setup_options(state.active_scene().unwrap())
+        .unwrap()
+        .into_iter()
+        .find(|option| option.preset)
+        .unwrap()
+        .name;
+    for args in [
+        json!({"objId":object.get(),"rendererType":"cpk","group":"missing"}),
+        json!({"objId":object.get(),"rendererType":preset,"group":"bundle"}),
+        json!({"objId":object.get(),"rendererType":"cpk","group":"bundle","selection":"invalid ((("}),
+    ] {
+        assert!(call_tool(&mut state, &mut camera, "create_renderer", &args).is_err());
+        assert!(state.same_undo_state(&before));
+    }
+    let result = call_tool(&mut state, &mut camera, "create_renderer", &json!({
+        "objId":object.get(),"rendererType":"cpk","name":"atoms","selection":"aid 1","group":"bundle","centerView":false
+    })).unwrap();
+    let renderer = state
+        .scene_manager()
+        .object(object)
+        .unwrap()
+        .renderer(Uid::new(result["rendererId"].as_u64().unwrap()))
+        .unwrap();
+    assert_eq!(renderer.group(), Some("bundle"));
+    assert_eq!(renderer.selection().to_string(), "aid 1");
+}
+
+#[test]
+fn new_renderer_framing_uses_its_selection_instead_of_the_current_molecule_selection() {
+    let (mut state, mut camera, object) = fixture();
+    state.set_molecule_selection_text(object, "aid 1").unwrap();
+    call_tool(
+        &mut state,
+        &mut camera,
+        "create_renderer",
+        &json!({
+            "objId":object.get(),"rendererType":"cpk","centerView":true
+        }),
+    )
+    .unwrap();
+    assert_eq!([camera.center().x, camera.center().y], [2., 4.]);
+    call_tool(
+        &mut state,
+        &mut camera,
+        "create_renderer",
+        &json!({
+            "objId":object.get(),"rendererType":"cpk","selection":"aid 2","centerView":true
+        }),
+    )
+    .unwrap();
+    assert_eq!([camera.center().x, camera.center().y], [4., 0.]);
+}
+
 fn copy_and_paste(
     state: &mut DesktopAppState,
     camera: &mut Camera,

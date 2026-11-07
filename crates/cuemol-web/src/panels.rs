@@ -507,6 +507,68 @@ impl App {
         }
     }
 
+    pub(super) fn open_new_renderer(&mut self, object: Uid, group: Option<String>) {
+        match cuemol_ui::renderer::RendererDialog::new(&self.state, object, group) {
+            Ok(dialog) => self.new_renderer = Some(dialog),
+            Err(error) => self.message = error.to_string(),
+        }
+    }
+
+    pub(super) fn new_renderer_ui(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.new_renderer.take() else {
+            return;
+        };
+        if self.state.active_scene() != Some(dialog.target.scene) {
+            self.message = "The active scene changed. Reopen New Renderer.".into();
+            return;
+        }
+        let mut open = true;
+        let mut action = None;
+        let window = egui::Window::new(dialog.title())
+            .id(egui::Id::new("new-renderer"))
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(520.)
+            .show(ctx, |ui| {
+                action = dialog.show(ui, &self.state, self.revision);
+            });
+        self.ui_rects.extend(dialog.rects.clone());
+        if let Some(window) = window {
+            self.record_ui_rect("New renderer window", &window.response);
+        }
+        match action {
+            Some(cuemol_ui::renderer::Action::Create) => {
+                if let Some(error) = dialog.validation_error(&self.state) {
+                    dialog.error = error.into();
+                } else if self.call_shared("create_renderer", dialog.arguments()) {
+                    let result: Value = serde_json::from_str(&self.message).unwrap_or_default();
+                    dialog.remember(&mut self.state);
+                    self.persist_selection_history();
+                    self.settings_text = self.state.config_text();
+                    if let Some(storage) =
+                        web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+                    {
+                        let _ = storage.set_item("cuemol.config", &self.settings_text);
+                    }
+                    self.selected = Some(dialog.target.object);
+                    if let Some(id) = result["rendererId"].as_u64() {
+                        self.tree_selection = vec![id];
+                        self.open_properties("renderer", Some(id));
+                    }
+                    self.message = format!("Created renderer {}", dialog.renderer_name.trim());
+                    open = false;
+                } else {
+                    dialog.error.clone_from(&self.message);
+                }
+            }
+            Some(cuemol_ui::renderer::Action::Cancel) => open = false,
+            None => {}
+        }
+        if open {
+            self.new_renderer = Some(dialog);
+        }
+    }
+
     pub(super) fn superposition_ui(&mut self, ctx: &egui::Context) {
         if !self.show_superposition {
             return;

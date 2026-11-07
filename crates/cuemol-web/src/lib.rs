@@ -314,7 +314,7 @@ struct App {
     dirty: bool,
     selected: Option<Uid>,
     selection: String,
-    representation: String,
+    new_renderer: Option<cuemol_ui::renderer::RendererDialog>,
     pdb_dialog: cuemol_ui::pdb_dialog::PdbDialog,
     console_tool: String,
     console_args: String,
@@ -534,7 +534,7 @@ impl App {
             dirty: true,
             selected: None,
             selection: String::new(),
-            representation: "ribbon".into(),
+            new_renderer: None,
             pdb_dialog: cuemol_ui::pdb_dialog::PdbDialog::default(),
             console_tool: "get_scene_state".into(),
             console_args: "{}".into(),
@@ -1602,6 +1602,7 @@ impl eframe::App for App {
         self.tools_ui(ctx);
         self.interaction_ui(ctx);
         self.superposition_ui(ctx);
+        self.new_renderer_ui(ctx);
         self.surface_ui(ctx);
         self.secondary_ui(ctx);
         self.molecule_edit_ui(ctx);

@@ -255,17 +255,25 @@ pub fn call_tool(
         }
         "list_renderer_types" => {
             let id=uid(args,"objId")?;
-            let types=if state.density_map_summary(id).is_some() { state.density_map_renderer_setup_options() }
-                else if state.surface_summary(id).is_some() { state.surface_renderer_setup_options() }
-                else if state.lw_object_summary(id).is_some() { vec![cuemol_desktop_core::GuiRendererSetupOption {name:"lwrend".into(),description:"Lightweight renderer".into(),preset:false}] }
-                else { state.scene_manager().object(id).ok_or_else(||CueMolError::not_found("object"))?; state.molecule_renderer_setup_options(scene(state)?)? };
+            let types=cuemol_desktop_core::renderer_setup::Target::for_object(state,id)?.options;
             Ok(json!({"rendererTypes":types.iter().filter(|t|!t.preset).map(|t|&t.name).collect::<Vec<_>>(),"presetTypes":types.iter().filter(|t|t.preset).map(|t|&t.name).collect::<Vec<_>>()}))
         }
         "create_renderer" | "create_preset_renderer" => {
             crate::file_commands::map_center_policy(args)?;
             let object=uid(args,"objId")?;
             let kind=text(args,if name=="create_renderer" {"rendererType"} else {"preset"})?;
-            let label=args["name"].as_str().map(str::to_string).unwrap_or(state.suggest_renderer_name(scene(state)?,kind)?);
+            let target=cuemol_desktop_core::renderer_setup::Target::for_object(state,object)?;
+            let option=target.options.iter().find(|option|option.name==kind)
+                .ok_or_else(||CueMolError::invalid_argument("incompatible renderer type"))?;
+            let group=args["group"].as_str().map(str::trim).filter(|name|!name.is_empty());
+            if let Some(group)=group {
+                if option.preset {return Err(CueMolError::invalid_argument("preset renderers cannot be nested in another group"));}
+                if !target.groups.iter().any(|name|name==group) {return Err(CueMolError::not_found("renderer group in target object"));}
+            }
+            if !option.preset && target.kind==cuemol_desktop_core::renderer_setup::Kind::Molecule {
+                if let Some(selection)=args["selection"].as_str() {state.parse_object_selector(object,selection)?;}
+            }
+            let label=args["name"].as_str().map(str::to_string).unwrap_or(state.suggest_renderer_name(target.scene,kind)?);
             let renderer=if state.density_map_summary(object).is_some() {
                 let id=state.add_density_renderer(object,kind)?;
                 state.rename_density_renderer(object,id,&label)?; id
@@ -277,13 +285,20 @@ pub fn call_tool(
                 if kind!="lwrend" { return Err(CueMolError::invalid_argument("lightweight objects require a lwrend renderer")); }
                 let id=state.add_lw_renderer(object)?;
                 state.rename_lw_renderer(object,id,&label)?; id
-            } else {state.new_renderer_from_setup(scene(state)?,object,kind,&label,args["selection"].as_str())?};
+            } else {state.new_renderer_from_setup(target.scene,object,kind,&label,args["selection"].as_str())?};
             if let Some(selection)=args["selection"].as_str().filter(|_| state.scene_manager().object(object).is_none()) {
                 state.set_auxiliary_renderer_property(object,renderer,"sel",selection)?;
             }
+            if group.is_some() {state.set_workspace_renderer_group_name(object,renderer,group)?;}
             if state.density_map_summary(object).is_some() {
                 crate::file_commands::apply_map_renderer_center_policy(state,camera,object,&[renderer],args)?;
-            } else if args["centerView"] == true { fit(state,camera,Some(object),args["selection"].as_str(),true)?; }
+            } else if args["centerView"] == true {
+                if target.kind==cuemol_desktop_core::renderer_setup::Kind::Molecule {
+                    let mut view=crate::properties::current_fit_view(state,camera)?;
+                    state.fit_molecule_view(object,Some(renderer),&mut view)?;
+                    *camera=view.camera();
+                } else {fit(state,camera,Some(object),None,true)?;}
+            }
             Ok(json!({"objectId":object.get(),"rendererId":renderer.get(),"name":label}))
         }
         "set_renderer_type" => {

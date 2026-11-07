@@ -98,3 +98,6 @@ pub mod molecule_edit;
 pub mod superposition;
 #[cfg(feature = "egui")]
 pub mod surface;
+
+#[cfg(feature = "egui")]
+pub mod renderer;

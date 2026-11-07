@@ -261,6 +261,54 @@ fn creating_map_renderer_applies_policy_only_to_the_new_renderer() {
 }
 
 #[test]
+fn potential_map_renderer_respects_explicit_centering_without_changing_existing_renderers() {
+    let (mut state, mut camera) = initial_state();
+    let dx = b"object 1 class gridpositions counts 2 2 2\norigin 10 20 30\ndelta 1 0 0\ndelta 0 1 0\ndelta 0 0 1\nobject 2 class gridconnections counts 2 2 2\nobject 3 class array type double rank 0 items 8 data follows\n0 1 2 3 4 5 6 7\n";
+    state.open_bytes("potential.dx", dx).unwrap();
+    let map = state.active_density_map_summaries()[0].clone();
+    assert_eq!(map.class_name, "ElePotMap");
+    let old = map.renderers[0].clone();
+    let view = camera.clone();
+    let result = call_tool(
+        &mut state,
+        &mut camera,
+        "create_renderer",
+        &json!({
+            "objId":map.uid.get(),"rendererType":"contour","mapCenterPolicy":"setMapCenter"
+        }),
+    )
+    .unwrap();
+    assert_eq!(camera, view);
+    let added = state
+        .density_map_summary(map.uid)
+        .unwrap()
+        .renderers
+        .into_iter()
+        .find(|r| Some(r.uid.get()) == result["rendererId"].as_u64())
+        .unwrap();
+    assert_eq!(added.specific["center"], view.center().to_string());
+    call_tool(
+        &mut state,
+        &mut camera,
+        "create_renderer",
+        &json!({
+            "objId":map.uid.get(),"rendererType":"isosurf","mapCenterPolicy":"moveViewCenter"
+        }),
+    )
+    .unwrap();
+    let center = camera.center();
+    assert_eq!([center.x, center.y, center.z], [11., 21., 31.]);
+    let old_after = state
+        .density_map_summary(map.uid)
+        .unwrap()
+        .renderers
+        .into_iter()
+        .find(|r| r.uid == old.uid)
+        .unwrap();
+    assert_eq!(old_after.specific["center"], old.specific["center"]);
+}
+
+#[test]
 fn emdb_download_uses_absolute_or_default_contour_and_fits_the_map() {
     for level in [Some(10.), None] {
         let (mut state, mut camera) = initial_state();

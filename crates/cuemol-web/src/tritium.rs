@@ -1022,10 +1022,11 @@ impl App {
                     .unwrap_or(true);
                 if open {
                     order.extend(
-                        object["renderers"]
+                        object["rendererGroups"]
                             .as_array()
                             .into_iter()
                             .flatten()
+                            .chain(object["renderers"].as_array().into_iter().flatten())
                             .filter(|renderer| renderer["type"] != "*selection")
                             .filter_map(|renderer| renderer["id"].as_u64()),
                     );
@@ -1118,6 +1119,12 @@ impl App {
                     self.paint_selected = 0;
                 }
                 response.context_menu(|ui| {
+                    let create = ui.button("New Renderer…");
+                    if create.clicked() {
+                        self.open_new_renderer(Uid::new(id), None);
+                        ui.close();
+                    }
+                    self.record_ui_rect("Workspace New Renderer", &create);
                     if let Some(surface) = self.state.surface_summary(Uid::new(id)) {
                         if !surface.original_molecule.is_empty() {
                             let enabled = self
@@ -1159,7 +1166,12 @@ impl App {
                 });
                 if open {
                     ui.indent(id, |ui| {
-                        for renderer in object["renderers"].as_array().into_iter().flatten() {
+                        for renderer in object["rendererGroups"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .chain(object["renderers"].as_array().into_iter().flatten())
+                        {
                             if renderer["type"] == "*selection" {
                                 continue;
                             }
@@ -1208,6 +1220,17 @@ impl App {
                                 self.paint_selected = 0;
                             }
                             response.context_menu(|ui| {
+                                let create = ui.button("New Renderer…");
+                                if create.clicked() {
+                                    let group = if renderer["type"] == "*group" {
+                                        renderer["name"].as_str()
+                                    } else {
+                                        renderer["group"].as_str()
+                                    };
+                                    self.open_new_renderer(Uid::new(id), group.map(str::to_string));
+                                    ui.close();
+                                }
+                                self.record_ui_rect("Workspace New Renderer", &create);
                                 for (label, action) in
                                     [("Copy", "copy"), ("Cut", "cut"), ("Paste", "paste")]
                                 {
@@ -1235,14 +1258,38 @@ impl App {
             }
         });
         ui.separator();
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("representation-kind").selected_text(&self.representation).show_ui(ui,|ui| {
-                for kind in cuemol_desktop_core::MOLECULE_RENDERER_TYPES {ui.selectable_value(&mut self.representation,kind.to_string(),*kind);}
-            });
-            if shell::icon_button(ui,Icon::New,"Add representation",false,egui::vec2(22.,22.)).clicked() {
-                if let Some(id)=self.selected {self.call("create_renderer",json!({"objId":id.get(),"rendererType":self.representation,"selection":if self.selection.is_empty(){"*"}else{&self.selection}}));}
+        let create = ui.add_enabled(self.selected.is_some(), egui::Button::new("New Renderer…"));
+        if create.clicked() {
+            if let Some(object) = self.selected {
+                let group = self
+                    .inspector_target
+                    .as_ref()
+                    .filter(|target| target.kind == "renderer")
+                    .and_then(|target| target.id)
+                    .and_then(|id| {
+                        let object = data["objects"]
+                            .as_array()?
+                            .iter()
+                            .find(|item| item["id"].as_u64() == Some(object.get()))?;
+                        object["rendererGroups"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .chain(object["renderers"].as_array().into_iter().flatten())
+                            .find(|item| item["id"].as_u64() == Some(id))
+                    })
+                    .and_then(|renderer| {
+                        if renderer["type"] == "*group" {
+                            renderer["name"].as_str()
+                        } else {
+                            renderer["group"].as_str()
+                        }
+                    })
+                    .map(str::to_string);
+                self.open_new_renderer(object, group);
             }
-        });
+        }
+        self.record_ui_rect("Workspace Add Renderer", &create);
         self.style_tree(ui);
         self.clipboard_focus
             .region(cuemol_ui::clipboard::Scope::Tree, ui);

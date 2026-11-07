@@ -82,12 +82,26 @@ and its remaining batch.
 
 Renderer choices are remembered separately for each object class. Molecular,
 density-map, electrostatic-potential and surface choices do not overwrite one
-another. File options and the native/Tauri New Renderer dialogs share this
+another. File options and the New Renderer dialogs share this
 history. A removed preset or unsupported stored type falls back to the default.
 Confirming a file dialog remembers the offered choice; cancelling does not.
 Undo preserves these preferences, and the next application/browser session
 restores them. Renderer names follow type changes until edited by hand; clearing
 the name lets the next type change propose a default again.
+
+In the browser, choose **New Renderer…** from an object, renderer or group context
+menu, or use the button below the scene tree. The form offers compatible types,
+presets, a scene-wide unique name, a selection builder and view centering.
+Opening it from a group or grouped renderer inherits that group and hides presets,
+since presets create their own group. A preset disables the selection input;
+its children retain the selections defined by the preset. The object-name field
+does not rename an existing object. Errors retain the draft, Cancel leaves the
+scene and preferences unchanged, and Create adds one undo entry.
+
+Map forms offer Auto, keep the current view, or fit the map. Explicit centering
+also works for electrostatic potential maps; Auto keeps their current view.
+The policy affects the newly added renderer and leaves existing renderer centers
+unchanged.
 
 Linked and embedded native QSC saves retain loaded AMBER coordinates; linked
 sources preserve the companion path and compression setting. Browser scene

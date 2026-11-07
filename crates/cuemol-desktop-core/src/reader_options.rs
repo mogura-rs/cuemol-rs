@@ -27,10 +27,10 @@ impl DesktopAppState {
         policy: GuiMapCenterPolicy,
         view: &mut View,
     ) -> Result<()> {
-        let Some((_, kind)) = self.density_map_kind(map_uid) else {
-            return Ok(());
-        };
-        let fit = policy.fits_map(kind == "em");
+        let fit = policy.fits_map(
+            self.density_map_kind(map_uid)
+                .is_some_and(|(_, kind)| kind == "em"),
+        );
         let renderers = self
             .density_map_summary(map_uid)
             .ok_or_else(|| CueMolError::not_found("density map"))?
