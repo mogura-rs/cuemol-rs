@@ -1,5 +1,64 @@
 # Validation evidence
 
+## Tauri Rendering as a separate OS window
+
+Tauri now opens Rendering in a lazily created, independently decorated webview
+window over the existing Rust application model. It reuses the same rendering
+controls, jobs and history without loading a second main frontend. Window menu
+requests preserve the mode and custom size; Image/Movie menu requests still
+apply their explicit presets. Closing Rendering flushes pending settings and
+hides the window. Its frontend polling stops while the model continues jobs.
+Reopening retains the same window, history, image framing and saved geometry.
+Theme changes propagate from the main shell. Native file and confirmation
+pickers remain available in the child window.
+
+Application exit now flushes pending Rendering edits before taking the snapshot
+used for unsaved-scene confirmation. A regression reproduces an edit that has
+not yet marked its scene modified and verifies that close preparation includes
+it, with one Undo entry and the camera preserved. Errors and cancelled exit
+confirmation leave the application open. The main window's destruction exits
+the application even when Rendering is hidden.
+
+Actual OS testing also exposed an existing close-permission defect: Tauri's
+`onCloseRequested` helper calls `destroy` after the callback accepts closure,
+but the capability only permitted `close`. The accepted close therefore left
+the window alive. The required destroy permission is now explicit, and the
+final OS run verifies that both windows disappear after File > Quit. The old
+Tauri New Window action and its shortcut were removed to match the current
+reference, which retains New Tab and deliberately omits New Window.
+
+Validation:
+
+- Tauri Rust model/library tests: 211 passed, six existing tests ignored. The
+  shell source contracts pass all 68 checks, including the explicit permission.
+- The complete Tauri DOM run passed all 92 cases before the final close-guard
+  and theme refinements. Three focused window/menu/theme cases and the new
+  close-guard case passed after those refinements. They cover hidden polling,
+  retained history/framing, mode arguments, errors and cancelled exit.
+- The final Linux Tauri binary build passed. An actual WebKit window driven
+  through X11 mouse/keyboard input passed the full separate-window scenario:
+  independent windows and movement, 96 x 72 pixel input, a native PNG save with
+  150 DPI, OS close/Ctrl-W/reopen, retained framing and history, and concurrent
+  Molecular superposition without hiding Rendering. A hidden 2048 x 1536 still
+  completed while preserving a later main-camera edit. A hidden 64 x 48 movie
+  completed all 31 frames. Stopping a longer movie retained nine of 1201 frames
+  and the count remained stable. Ctrl-Q reached the main unsaved-scene dialog;
+  Cancel retained both windows. Saving and quitting through the main window
+  then terminated the application with Rendering hidden.
+
+The successful OS log is
+`.cache/current-audit/native-tauri-render-window-pass.log`; its result and
+screenshots are in `.cache/current-native-tauri-render-window/`. Earlier harness
+runs corrected menu selectors, window-mapping/focus timing and fixture API
+arguments. Those runs also exposed the real missing destroy permission; their
+failed exits are not counted as successful application shutdown.
+
+The usage text now describes both native Rendering windows and uses the current
+Movie rendering menu label. The old startup source contract was also reconciled
+with the native constructor introduced by the preceding window change.
+macOS/Windows OS-window integration is not established by the Linux run or the
+local model tests. No shared browser rendering code changed in this step.
+
 ## Native egui Rendering as a separate OS window
 
 The native egui frontend now creates one independently decorated Rendering
@@ -45,9 +104,10 @@ clipboard byte comparison. The successful checks above use actual OS input;
 they do not infer window behavior from a source contract.
 
 The Linux run used a window manager for decorated-window checks. macOS and
-Windows window-manager integration remains unverified for this change. Tauri
-still hosts Rendering inside its main window and needs its own OS-window
-integration. The previous menu section records the earlier in-window state.
+Windows window-manager integration remains unverified for this change. At this
+point Tauri still hosted Rendering inside its main window; the newer section
+above records its separate-window implementation. The previous menu section
+records the earlier in-window state.
 
 ## Current application menu and Rendering reopen behavior
 

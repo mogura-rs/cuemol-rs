@@ -5938,9 +5938,19 @@ function showMoleculeEditFields(title) {
   update();
 }
 
+async function openRenderingWindow(backend, movie) {
+  if (window.__TAURI_INTERNALS__) {
+    await invoke("render_window_request", {operation: "open", args: {backend, movie}});
+  } else if (backend === undefined && movie === undefined) {
+    await CueMolRendering.open();
+  } else {
+    await CueMolRendering.open(backend, movie);
+  }
+}
+
 async function showReferenceDialog(title, initialTrajectoryPaths = []) {
   if (title === "Rendering" || title === "POV-Ray rendering" || title === "Animation rendering") {
-    try { await CueMolRendering.open(title === "POV-Ray rendering" ? "povray" : undefined, title === "Animation rendering"); }
+    try { await openRenderingWindow(title === "POV-Ray rendering" ? "povray" : undefined, title === "Animation rendering"); }
     catch (error) { showError(error); }
     return;
   }
@@ -8592,7 +8602,7 @@ async function handleLocalAction(action) {
       break;
     }
     case "focus-rendering":
-      await CueMolRendering.open();
+      await openRenderingWindow();
       break;
     case "quit": {
       const getCurrent = tauri?.webviewWindow?.getCurrentWebviewWindow || tauri?.window?.getCurrentWindow;
@@ -8601,22 +8611,6 @@ async function handleLocalAction(action) {
       break;
     }
 
-    case "new-window": {
-      const WebviewWindow = tauri?.webviewWindow?.WebviewWindow;
-      if (!WebviewWindow) {
-        showError("Tauri window API is unavailable.");
-        break;
-      }
-      new WebviewWindow(`cuemol-${Date.now()}`, {
-        url: "index.html",
-        title: "cuemol-rs",
-        width: 1024,
-        height: 768,
-        minWidth: 760,
-        minHeight: 520,
-      });
-      break;
-    }
     case "reload-scene": {
       const scene = snapshot?.scenes.find((item) => item.active);
       if (scene?.modified && !(await showConfirmReloadSceneDialog(scene.name || ""))) {
@@ -16378,10 +16372,14 @@ async function setupApplicationCloseGuard() {
     if (applicationClosePending) return;
     applicationClosePending = true;
     try {
+      snapshot = await invoke("prepare_application_close");
+      renderShell();
       if (!(await confirmApplicationExit())) return;
       await persistWindowGeometry(appWindow);
       applicationCloseAllowed = true;
       await appWindow.close();
+    } catch (error) {
+      showError(error);
     } finally {
       applicationClosePending = false;
     }
@@ -17333,9 +17331,7 @@ window.addEventListener("keydown", (event) => {
   if (shortcut) {
     event.preventDefault();
     cameraCommand("pan", shortcut.id === "view-trans-plusx" ? 1 : -1, 0);
-  } else if (primary && !event.altKey && !event.shiftKey && key === "n") {
-    event.preventDefault();
-    handleLocalAction("new-window");
+
   } else if (primary && !event.altKey && !event.shiftKey && key === "t") {
     event.preventDefault();
     handleAction("new-scene");
@@ -17474,6 +17470,7 @@ async function start() {
     renderRecentMenu();
     if (window.__TAURI__?.event?.listen) {
       await window.__TAURI__.event.listen("cuemol-model-changed", refreshRemoteModel);
+      await window.__TAURI__.event.listen("cuemol-request-quit", () => { void handleLocalAction("quit").catch(showError); });
       await window.__TAURI__.event.listen("cuemol-agent-changed", refreshAgent);
       await window.__TAURI__.event.listen("cuemol-update-changed", event => displayUpdateStatus(event.payload, event.payload?.notify));
     }

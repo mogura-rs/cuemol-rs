@@ -1006,6 +1006,47 @@ mod tests {
     }
 
     #[test]
+    fn application_close_flushes_pending_render_edits_before_checking_modified_scenes() {
+        let mut model = model();
+        model.rendering_request("open", &json!({})).unwrap();
+        let scene = model.desktop.active_scene().unwrap();
+        model.desktop.clear_scene_modified(scene);
+        let camera = model.camera.clone();
+        let depth = model.undo_stack.len();
+        edit(&mut model, "width", json!(84));
+        assert!(model.rendering.editor.pending());
+        assert!(
+            !model
+                .snapshot()
+                .scenes
+                .iter()
+                .find(|item| item.uid == scene.get())
+                .unwrap()
+                .modified
+        );
+        let ModelResponse::Snapshot(snapshot) =
+            handle_model_request(&mut model, ModelRequest::PrepareApplicationClose).unwrap()
+        else {
+            panic!("expected close snapshot");
+        };
+        assert!(
+            snapshot
+                .scenes
+                .iter()
+                .find(|item| item.uid == scene.get())
+                .unwrap()
+                .modified
+        );
+        assert!(!model.rendering.editor.pending());
+        assert_eq!(model.undo_stack.len(), depth + 1);
+        assert_eq!(model.camera, camera);
+        assert_eq!(
+            model.rendering_request("poll", &json!({})).unwrap()["values"]["width"],
+            84.
+        );
+    }
+
+    #[test]
     fn rendering_worker_drop_cancels_and_joins() {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker = cancel.clone();

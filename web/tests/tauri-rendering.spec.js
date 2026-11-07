@@ -9,14 +9,15 @@ const picture = new PNG({width:3000,height:2500});
 for(let i=0;i<picture.data.length;i+=4){picture.data[i]=30;picture.data[i+1]=100;picture.data[i+2]=150;picture.data[i+3]=160;}
 const image = `data:image/png;base64,${PNG.sync.write(picture).toString('base64')}`;
 
-async function open(page) {
+async function open(page, standalone = false) {
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
   await page.route('http://rendering.test/**',async route=>{
     const path=new URL(route.request().url()).pathname.slice(1);
+    if(!path && standalone){await route.fulfill({contentType:'text/html',body:await readFile(new URL('rendering.html',root))});return;}
     if(!path){await route.fulfill({contentType:'text/html',body:'<html><head><meta charset="utf-8"><link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="rendering.css"><script src="rendering.js"></script></head><body></body></html>'});return;}
     await route.fulfill({contentType:path.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL(path,root))});
   });
-  await page.addInitScript(({catalog,hatchCatalog,image})=>{
+  await page.addInitScript(({catalog,hatchCatalog,image,standalone})=>{
     const values={backend:'umbreon',width:1200,height:1200,unit:'px',dpi:600,transparentBg:false};
     for(const [prefix,rows]of Object.entries(catalog))for(const row of rows){const key=prefix==='common'?row.key:`${prefix}.${row.key}`;if(key in values)continue;values[key]=row.type==='boolean'?false:row.type==='color'?'#000000':row.type==='enum'?(row.enumValues||row.options)[0]:row.min??1;}
     values['umbreon_npr.hatchStyle']='pencil';values['umbreon_npr.hatchLayersSpec']='';values['umbreon_npr.hatchToneSpec']='';
@@ -45,7 +46,11 @@ async function open(page) {
     window.renderCalls=[];window.savedPaths=[];window.confirmClear=false;
     window.chooseOutputPath=async()=>{window.savedPaths.push(state.current.id);return 'image.png';};
     window.showConfirmationDialog=async()=>window.confirmClear;
-    window.invoke=async(command,{operation,args})=>{
+    window.__windowOperations=[];
+    window.invoke=async(command,input={})=>{
+      const {operation,args}=input;
+      if(command==='get_preferences')return {darkMode:false};
+      if(command==='render_window_request'){window.__windowOperations.push(operation);window.__windowHidden=operation==='hide';return;}
       if(command!=='rendering_request')throw new Error(command);
       window.renderCalls.push({operation,args:structuredClone(args)});
       await new Promise(resolve=>setTimeout(resolve,operation==='target'?80:15));
@@ -80,9 +85,15 @@ async function open(page) {
     };
     window.finishRender=()=>{state.running=false;state.message='Rendered 3000 × 2500';state.livePreview=false;state.preview=null;const record={id:next++,size:state.movieMode?[values.width,values.height]:[3000,2500],source:{scene_name:`Scene ${state.sceneId}`,settings:structuredClone(values)},elapsed_seconds:0.1};if(state.movieMode){record.movie={frameCount:3,framesAvailable:true,moviePath:'temporary/movie.mp4',options:structuredClone(state.movieOptions)};state.frame=2;state.availableFrames=3;state.hasMovieOutputs=true;}records.push(record);state.historyLength=records.length;state.selected=records.length-1;state.current=record;};
     window.liveMovieFrame=()=>{state.livePreview=true;state.preview={size:[3000,2500],frame:0};state.progress={completed:1,total:3};};
-  },{catalog,hatchCatalog,image});
+    if(standalone){
+      window.__nativeEvents={};
+      const appWindow={innerSize:async()=>({width:1000,height:700}),outerPosition:async()=>({x:200,y:100}),setSize:async()=>{},setPosition:async()=>{},onMoved:async()=>{},onResized:async()=>{}};
+      window.__TAURI__={core:{invoke:window.invoke},dialog:{save:async()=>null,confirm:async()=>false},webviewWindow:{getCurrentWebviewWindow:()=>appWindow},event:{listen:async(name,callback)=>{window.__nativeEvents[name]=callback;}},window:{availableMonitors:async()=>[{position:{x:0,y:0},size:{width:1920,height:1080}}]},dpi:{PhysicalSize:class{},PhysicalPosition:class{}}};
+    }
+  },{catalog,hatchCatalog,image,standalone});
   await page.goto('http://rendering.test/');
-  await page.evaluate(()=>CueMolRendering.open());
+  if(!standalone)await page.evaluate(()=>CueMolRendering.open());
+  else await expect(page.getByRole('dialog',{name:'Rendering',exact:true})).toBeVisible();
   return errors;
 }
 
@@ -296,5 +307,43 @@ test('Tauri Rendering focus preserves the selected mode and custom image size', 
   const request = await page.evaluate(() => renderCalls.filter(call => call.operation === 'open').at(-1));
   expect(request.args.movie).toBeUndefined();
   expect(await panel.evaluate(node => node.contains(document.activeElement))).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri Rendering window keeps hidden jobs and history through native close and reopen', async ({page}) => {
+  const errors=await open(page,true);
+  const panel=page.getByRole('dialog',{name:'Rendering',exact:true});
+  await expect(panel.locator('.rendering-header')).toBeHidden();
+  expect(await panel.boundingBox()).toEqual({x:0,y:0,...page.viewportSize()});
+  await expect(page.locator('html')).toHaveAttribute('data-theme','light');
+  await page.evaluate(()=>window.dispatchEvent(new StorageEvent('storage',{key:'cuemol3.shell.v1',newValue:JSON.stringify({theme:'dark'})})));
+  await expect(page.locator('html')).toHaveAttribute('data-theme','dark');
+  await panel.getByLabel('Width',{exact:true}).fill('80');
+  await panel.getByRole('button',{name:'Start Render',exact:true}).click();
+  await expect(panel.getByRole('button',{name:'Stop',exact:true})).toBeVisible();
+  await page.keyboard.press('Control+w');
+  await expect(panel).toBeHidden();
+  await expect.poll(()=>page.evaluate(()=>__windowOperations.at(-1))).toBe('hide');
+  const polls=await page.evaluate(()=>renderCalls.filter(call=>call.operation==='poll').length);
+  await page.waitForTimeout(550);
+  expect(await page.evaluate(()=>renderCalls.filter(call=>call.operation==='poll').length)).toBe(polls);
+  expect(await page.evaluate(()=>renderCalls.some(call=>call.operation==='stop'))).toBe(false);
+  await page.evaluate(()=>{finishRender();__nativeEvents['cuemol-render-open']();});
+  await expect(panel).toBeVisible();
+  await expect(panel.getByText('1 / 1 · 3000 × 2500 · Scene 1',{exact:true})).toBeVisible();
+  await expect(panel.getByLabel('Width',{exact:true})).toHaveValue('80');
+  await panel.getByRole('button',{name:'100%',exact:true}).click();
+  const image=panel.getByRole('img',{name:'Rendered image',exact:true});
+  expect(await image.evaluate(node=>node.getBoundingClientRect().width)).toBe(3000);
+  await page.evaluate(()=>__nativeEvents['cuemol-render-close']());
+  await expect(panel).toBeHidden();
+  const geometry=await page.evaluate(()=>JSON.parse(localStorage.getItem('cuemol.rendering-window.geometry.v1')));
+  expect(geometry).toEqual({width:1000,height:700,x:200,y:100});
+  await page.evaluate(()=>__nativeEvents['cuemol-render-open']());
+  await expect(panel).toBeVisible();
+  expect(await image.evaluate(node=>node.getBoundingClientRect().width)).toBe(3000);
+  await page.keyboard.press('Control+q');
+  await expect.poll(()=>page.evaluate(()=>__windowOperations.at(-1))).toBe('quit');
   expect(errors).toEqual([]);
 });

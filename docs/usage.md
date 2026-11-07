@@ -906,11 +906,13 @@ In all three frontends, Rendering > Image rendering opens the preview controls
 with the still-image size preset. Rendering > Movie rendering selects movie
 mode and its size preset. Window > Rendering Window reopens the existing
 controls without resetting the mode, size, target, history or movie preferences.
-Native egui opens these controls in a separate OS window. Closing it retains
-its image history, framing, mode and settings, and an active render continues in
-the background. Reopening reuses the same window; its position and dimensions
-are saved separately from the main window. Tauri currently keeps its controls
-inside the main window. The Image tab sets size, physical units, DPI and
+Native egui and Tauri open these controls in a separate OS window. Closing it
+retains image history, framing, mode and settings, and an active render continues
+in the background. Reopening reuses the same window; its position and dimensions
+are saved separately from the main window. Ctrl/Command-W hides Rendering;
+Escape also hides the Tauri window. Ctrl/Command-Q requests application exit
+through the main window and its unsaved-scene confirmation. Tauri commits
+pending render settings before that confirmation. The Image tab sets size, physical units, DPI and
 transparency. The Render tab contains independent supersampling, lighting, AO quality, GI lighting
 and shadow choices, with grouped advanced controls. NPR offers raytracing or AO;
 its Detail tab edits hatch layers and tone specifications. Selecting a quality
@@ -979,7 +981,7 @@ PNG. Tauri uses its webview image element for the same full-resolution preview.
 Its modeless Rendering window retains history when closed, and its target selector
 waits for the new scene settings before accepting edits.
 
-Native egui, Tauri and the browser handle Movie mode. The Animation rendering menu opens
+Native egui, Tauri and the browser handle Movie mode. The Movie rendering menu opens
 that mode with the QVGA preset. Still/Movie requests reset the size preset while
 preserving backend settings and movie preferences. Movies use pixel dimensions,
 the complete target animation, a positive fractional frame rate, and an optional

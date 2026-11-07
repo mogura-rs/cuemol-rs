@@ -513,8 +513,9 @@ fn tauri_window_menu_focuses_main_and_rendering_while_panels_keep_local_controls
     assert!(NATIVE_GUI_RS.contains("fn load_native_window_geometry"));
     assert!(NATIVE_GUI_RS.contains("fn record_native_window_geometry"));
     assert!(NATIVE_GUI_RS.contains("WindowEvent::Moved(_)"));
-    assert!(CAPABILITIES.contains(r#""cuemol-*""#));
-    assert!(CAPABILITIES.contains("core:webview:allow-create-webview-window"));
+    assert!(CAPABILITIES.contains(r#""rendering""#));
+    assert!(!CAPABILITIES.contains("core:webview:allow-create-webview-window"));
+    assert!(CAPABILITIES.contains("core:window:allow-destroy"));
     assert!(CAPABILITIES.contains("core:window:allow-set-position"));
     assert!(CAPABILITIES.contains("core:window:allow-set-size"));
 }
@@ -1052,7 +1053,7 @@ fn desktop_startup_and_fetch_overlap_independent_initialization() {
         .unwrap();
     let config_start = NATIVE_GUI_RS.find("cuemol-config-init").unwrap();
     let app_start = NATIVE_GUI_RS
-        .find("self.app = Some(GuiApplication::new_with_config_source(config))")
+        .find("let mut app = GuiApplication::new_with_config_source(config)")
         .unwrap();
     assert!(gpu_start < config_start);
     assert!(config_start < app_start);
@@ -1355,7 +1356,7 @@ fn png_export_matches_the_reference_options_dialog() {
 
 #[test]
 fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
-    assert!(JS.contains("CueMolRendering.open(title === \"POV-Ray rendering\" ? \"povray\" : undefined, title === \"Animation rendering\")"));
+    assert!(JS.contains("openRenderingWindow(title === \"POV-Ray rendering\" ? \"povray\" : undefined, title === \"Animation rendering\")"));
     for label in [
         "Temporary",
         "Custom",
@@ -2799,13 +2800,13 @@ fn tauri_global_shortcuts_match_the_reference_keyset() {
         })
         .expect("global keydown handler");
 
-    for key in ["n", "t", "o", "r", "s", "z", "y", "k"] {
+    for key in ["t", "o", "r", "s", "z", "y", "k"] {
         assert!(
             shortcuts.contains(&format!("key === \"{key}\"")),
             "missing reference shortcut {key}"
         );
     }
-    assert!(shortcuts.contains("handleLocalAction(\"new-window\")"));
+    assert!(!shortcuts.contains("handleLocalAction(\"new-window\")"));
     assert!(shortcuts.contains("handleAction(\"new-scene\")"));
     assert!(shortcuts.contains("event.shiftKey && key === \"o\""));
     assert!(shortcuts.contains("openScene()"));

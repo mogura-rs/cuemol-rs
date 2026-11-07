@@ -351,10 +351,10 @@ const CueMolRendering = (() => {
     const tabs=element('div',undefined,'rendering-tabs');nodes.tabs=tabs;tabs.setAttribute('role','tablist');
     for(const label of ['Image','Render','NPR Detail']){const node=button(label,()=>{tab=label;tabs.querySelectorAll('button').forEach(item=>item.setAttribute('aria-selected',String(item===node)));renderControls();});node.setAttribute('role','tab');node.setAttribute('aria-selected',String(label===tab));tabs.append(node);}
     nodes.controls=element('div',undefined,'rendering-controls');right.append(tabs,nodes.controls);
-    dialogElement.addEventListener('cancel',event=>{event.preventDefault();close();});
+    dialogElement.addEventListener('cancel',event=>{event.preventDefault();void close().catch(error);});
     dialogElement.addEventListener('keydown',event=>{
       event.stopPropagation();
-      if(event.key==='Escape'){event.preventDefault();close();return;}
+      if(event.key==='Escape'){event.preventDefault();void close().catch(error);return;}
       if((event.ctrlKey||event.metaKey)&&!event.target.closest('input,textarea,[contenteditable="true"]')){
         const key=event.key.toLowerCase();
         if(key==='z'||(event.ctrlKey&&key==='y')){event.preventDefault();send(key==='y'||event.shiftKey?'redo':'undo');}
@@ -388,7 +388,9 @@ const CueMolRendering = (() => {
     document.body.append(dialogElement);
   }
   async function close() {
-    try{await request('close');dialogElement.close();clearInterval(timer);}catch{}
+    await request('close');
+    if (CueMolRendering.onClose) await CueMolRendering.onClose();
+    dialogElement.close();clearInterval(timer);
   }
   async function open(backend,movie) {
     if(!dialogElement)build();
@@ -398,5 +400,5 @@ const CueMolRendering = (() => {
     clearInterval(timer);timer=setInterval(()=>{if(!pending&&dialogElement.open)send('poll');},250);
     frame();
   }
-  return {open};
+  return {open, close, onClose: null};
 })();

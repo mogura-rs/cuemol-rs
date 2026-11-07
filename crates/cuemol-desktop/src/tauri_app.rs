@@ -47,6 +47,8 @@ mod image_export;
 mod inspector;
 #[path = "tauri_mcp.rs"]
 mod mcp_bridge;
+#[path = "tauri_render_window.rs"]
+mod render_window;
 #[path = "tauri_rendering.rs"]
 mod rendering;
 
@@ -7754,6 +7756,7 @@ enum ModelRequest {
     },
     StartRendererWarmup,
     GetSnapshot,
+    PrepareApplicationClose,
     GetDensityHistogram {
         map_uid: u64,
         minimum: f64,
@@ -9788,6 +9791,10 @@ fn handle_model_request(
             ))
         }
         ModelRequest::GetSnapshot => Ok(ModelResponse::Snapshot(Box::new(model.snapshot()))),
+        ModelRequest::PrepareApplicationClose => {
+            model.flush_rendering()?;
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::GetDensityHistogram {
             map_uid,
             minimum,
@@ -13439,6 +13446,7 @@ fn spawn_model(initial_paths: Vec<PathBuf>, app: tauri::AppHandle) -> ManagedSta
                     envelope
                 };
                 if matches!(envelope.request, ModelRequest::Shutdown) {
+                    let _ = model.flush_rendering();
                     model.agent.cancel("Application closed.");
                     model.stop_console();
                     if let Some(job) = &model.apbs_job {
@@ -13885,6 +13893,14 @@ fn message_response(response: ModelResponse) -> Result<String, String> {
         ModelResponse::Message(message) => Ok(message),
         _ => Err("unexpected non-message response".to_string()),
     }
+}
+
+#[tauri::command]
+fn prepare_application_close(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::PrepareApplicationClose,
+    )?)
 }
 
 #[tauri::command]
@@ -16924,6 +16940,8 @@ pub fn run() -> Result<(), tauri::Error> {
     let initial_paths = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let application = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(render_window::WindowState::default())
+        .on_window_event(render_window::window_event)
         .setup(move |app| {
             app.manage(spawn_model(initial_paths, app.handle().clone()));
             Ok(())
@@ -16932,7 +16950,9 @@ pub fn run() -> Result<(), tauri::Error> {
             update_request,
             agent_request,
             rendering_request,
+            render_window::render_window_request,
             get_snapshot,
+            prepare_application_close,
             get_density_histogram,
             get_molecule_details,
             get_initial_state,
@@ -17147,6 +17167,9 @@ pub fn run() -> Result<(), tauri::Error> {
         ])
         .build(tauri::generate_context!())?;
     application.run(|app, event| {
+        if matches!(&event, tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } if label == "main") {
+            app.exit(0);
+        }
         if matches!(event, tauri::RunEvent::Exit) {
             if let Some(state) = app.try_state::<ManagedState>() {
                 let (response, finished) = mpsc::channel();

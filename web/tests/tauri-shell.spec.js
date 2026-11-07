@@ -156,9 +156,16 @@ async function openShell(page, storage = {}, options = {}) {
     const events = new Map();
     window.__finishAgent=()=>{agent.running=false;agent.message='Complete';agent.messages.push({role:'Tool',text:'get_scene_state {}',image:null,tool:{name:'get_scene_state',input:'{}',result:'{\"objects\":[]}',ok:true}},{role:'Assistant',text:'<img src=x onerror=alert(1)> kept as text',image:null});events.get('cuemol-agent-changed')?.();};
     window.__shellCalls = [];
+    if (options.nativeRenderingWindow) window.__TAURI_INTERNALS__ = {};
     window.__actionsRunning = false;
     window.__TAURI__ = {core: {invoke: async (command, args) => {
       window.__shellCalls.push({command, args});
+      if (command === 'render_window_request') return;
+      if (command === 'prepare_application_close') {
+        if(window.__closePreparationError)throw new Error('Pending render settings could not be saved');
+        if(options.closeGuard)snapshot.scenes[0].modified=true;
+        return structuredClone(snapshot);
+      }
       if (options.updates && command === 'update_request') {
         const checking=args.operation==='check';
         return {currentVersion:'0.1.0',message:checking?'Checking for updates…':'CueMol 0.2.0 is available.',checking,installing:false,release:checking?null:{version:'0.2.0',url:'https://github.com/example/cuemol/releases/tag/v0.2.0',newer:true}};
@@ -672,6 +679,17 @@ async function openShell(page, storage = {}, options = {}) {
       if (command === 'export_scene_geometry') return structuredClone(snapshot);
       throw new Error(`Unexpected IPC: ${command}`);
     }}};
+    if(options.closeGuard){
+      window.__closedWindows=0;
+      let handler;
+      const appWindow={onCloseRequested:async callback=>{handler=callback;},close:async()=>{
+        let prevented=false;
+        await handler?.({preventDefault:()=>{prevented=true;}});
+        if(!prevented)window.__closedWindows++;
+      }};
+      window.__requestApplicationClose=()=>appWindow.close();
+      window.__TAURI__.webviewWindow={getCurrentWebviewWindow:()=>appWindow};
+    }
     if(options.agent) window.__TAURI__.event={listen:async(name,callback)=>{events.set(name,callback);return ()=>events.delete(name);}};
     const backendInvoke=window.__TAURI__.core.invoke;
     window.__TAURI__.core.invoke=async(command,args)=>structuredClone(await backendInvoke(command,structuredClone(args)));
@@ -3271,5 +3289,42 @@ test('Tauri menus use the current groups and focus Rendering without a mode pres
   await windowMenu.getByRole('button', {name:'Main Window', exact:true}).click();
   await expect.poll(() => page.evaluate(() => __focusedWindows)).toEqual(['main']);
   await expect(page.locator('#viewport')).toBeFocused();
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri native menus request the separate Rendering window with explicit mode only for render actions', async ({page}) => {
+  const errors=await openShell(page,{}, {nativeRenderingWindow:true});
+  const windowMenu=page.locator('.menu').filter({has:page.locator('summary',{hasText:/^Window$/})});
+  await windowMenu.locator('summary').click();
+  await windowMenu.getByRole('button',{name:'Rendering Window',exact:true}).click();
+  const rendering=page.locator('.menu').filter({has:page.locator('summary',{hasText:/^Rendering$/})});
+  await rendering.locator('summary').click();
+  await rendering.getByRole('button',{name:'Movie rendering…',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>__shellCalls.filter(call=>call.command==='render_window_request').map(call=>call.args))).toEqual([
+    {operation:'open',args:{}},{operation:'open',args:{movie:true}},
+  ]);
+  await expect(page.getByRole('dialog',{name:'Rendering',exact:true})).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri application close flushes remote settings and keeps errors or cancelled exits open', async ({page}) => {
+  const errors=await openShell(page,{}, {closeGuard:true});
+  await page.evaluate(()=>{window.__closePreparationError=true;void __requestApplicationClose();});
+  const alert=page.locator('#error-alert-dialog');
+  await expect(alert).toBeVisible();
+  await expect(alert).toContainText('Pending render settings could not be saved');
+  expect(await page.evaluate(()=>__closedWindows)).toBe(0);
+  await alert.getByRole('button',{name:'OK',exact:true}).click();
+  await page.evaluate(()=>{window.__closePreparationError=false;void __requestApplicationClose();});
+  const confirmation=page.locator('#reference-dialog.confirm-close-dialog');
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole('button',{name:'Cancel',exact:true}).click();
+  expect(await page.evaluate(()=>__closedWindows)).toBe(0);
+  await page.evaluate(()=>{void __requestApplicationClose();});
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole('button',{name:"Don't Save",exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>__closedWindows)).toBe(1);
   expect(errors).toEqual([]);
 });
