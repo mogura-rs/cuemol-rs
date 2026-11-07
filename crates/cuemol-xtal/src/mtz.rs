@@ -3,7 +3,7 @@ use crate::map_renderers::DensityMap;
 use cuemol_core::{CueMolError, Result};
 use cuemol_qsys::{InOutHandler, ObjReader};
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -430,26 +430,94 @@ pub fn read_mtz_file(path: impl AsRef<Path>) -> Result<MtzFile> {
     read_mtz_bytes(&bytes)
 }
 
+pub fn mtz_header_offset(prefix: &[u8], file_len: usize) -> Result<usize> {
+    if prefix.len() < 12 || !prefix.starts_with(b"MTZ ") {
+        return Err(CueMolError::parse("missing MTZ header"));
+    }
+    let (word, _) = detect_mtz_header_start_for_len(prefix, file_len)?;
+    (word - 1)
+        .checked_mul(4)
+        .ok_or_else(|| CueMolError::parse("MTZ header offset overflow"))
+}
+
+pub fn read_mtz_metadata_parts(prefix: &[u8], header: &[u8], file_len: usize) -> Result<MtzFile> {
+    let offset = mtz_header_offset(prefix, file_len)?;
+    if header.len() > file_len.saturating_sub(offset) {
+        return Err(CueMolError::parse("MTZ metadata exceeds file length"));
+    }
+    let (word, swapped) = detect_mtz_header_start_for_len(prefix, file_len)?;
+    parse_mtz_header(header, word, swapped)
+}
+
 pub fn read_mtz_metadata_file(path: impl AsRef<Path>) -> Result<MtzFile> {
-    let mut file = fs::File::open(path)?;
-    let file_len = file.metadata()?.len() as usize;
+    let mut file = fs::File::open(path.as_ref())?;
+    let file_len = usize::try_from(file.metadata()?.len())
+        .map_err(|_| CueMolError::parse("MTZ file exceeds addressable memory"))?;
     let mut prefix = [0_u8; 12];
     file.read_exact(&mut prefix)?;
-    if prefix.get(0..4) != Some(b"MTZ ".as_slice()) {
-        return Err(CueMolError::parse("missing MTZ magic"));
+    if !prefix.starts_with(b"MTZ ") {
+        return read_mtz_metadata_from_decoder(|mut output| {
+            cuemol_core::compressed::copy_to(path.as_ref(), &mut output, 0)
+        });
     }
-
-    let (header_start_word, byte_swapped) = detect_mtz_header_start_for_len(&prefix, file_len)?;
-    let header_offset = (header_start_word - 1)
-        .checked_mul(4)
-        .ok_or_else(|| CueMolError::parse("MTZ header offset overflow"))?;
-    file.seek(SeekFrom::Start(header_offset as u64))?;
-    let mut header = Vec::with_capacity(file_len.saturating_sub(header_offset));
+    let offset = mtz_header_offset(&prefix, file_len)?;
+    file.seek(SeekFrom::Start(offset as u64))?;
+    let mut header = Vec::new();
     file.read_to_end(&mut header)?;
-    parse_mtz_header(&header, header_start_word, byte_swapped)
+    read_mtz_metadata_parts(&prefix, &header, file_len)
+}
+
+/// Read compressed metadata without retaining the decoded reflection body.
+pub fn read_mtz_metadata_compressed_bytes(bytes: &[u8]) -> Result<MtzFile> {
+    read_mtz_metadata_from_decoder(|mut output| {
+        cuemol_core::compressed::copy_bytes_to(bytes, &mut output, 0)
+    })
+}
+
+fn read_mtz_metadata_from_decoder(
+    mut decode: impl FnMut(&mut dyn Write) -> Result<u64>,
+) -> Result<MtzFile> {
+    struct MetadataWriter {
+        skip: usize,
+        limit: usize,
+        bytes: Vec<u8>,
+    }
+    impl Write for MetadataWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let start = self.skip.min(bytes.len());
+            self.skip -= start;
+            let count = (bytes.len() - start).min(self.limit.saturating_sub(self.bytes.len()));
+            self.bytes.extend_from_slice(&bytes[start..start + count]);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut prefix = MetadataWriter {
+        skip: 0,
+        limit: 12,
+        bytes: Vec::new(),
+    };
+    let file_len = usize::try_from(decode(&mut prefix)?)
+        .map_err(|_| CueMolError::parse("MTZ file exceeds addressable memory"))?;
+    let offset = mtz_header_offset(&prefix.bytes, file_len)?;
+    let mut header = MetadataWriter {
+        skip: offset,
+        limit: file_len - offset,
+        bytes: Vec::new(),
+    };
+    decode(&mut header)?;
+    read_mtz_metadata_parts(&prefix.bytes, &header.bytes, file_len)
 }
 
 pub fn read_mtz_bytes(bytes: &[u8]) -> Result<MtzFile> {
+    if bytes.starts_with(&[0x1f, 0x8b])
+        || bytes.starts_with(b"BZh")
+        || bytes.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0])
+    {
+        return read_mtz_bytes(&cuemol_core::compressed::decode_bytes(bytes)?);
+    }
     if bytes.len() < 12 {
         return Err(CueMolError::parse("MTZ file is too short"));
     }
@@ -788,6 +856,34 @@ mod tests {
         assert!(metadata.reflections.is_empty());
         assert_eq!(full.reflections.len(), 1);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn compressed_mtz_metadata_preserves_columns_without_decoding_reflections() {
+        let bytes = test_mtz_bytes();
+        let full = read_mtz_bytes(&bytes).unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&bytes).unwrap();
+        let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+        bz.write_all(&bytes).unwrap();
+        let mut xz = Vec::new();
+        lzma_rs::xz_compress(&mut std::io::Cursor::new(&bytes), &mut xz).unwrap();
+        for (suffix, encoded) in [
+            ("gz", gz.finish().unwrap()),
+            ("bz2", bz.finish().unwrap()),
+            ("xz", xz),
+        ] {
+            assert_eq!(read_mtz_bytes(&encoded).unwrap(), full);
+            let metadata = read_mtz_metadata_compressed_bytes(&encoded).unwrap();
+            assert_eq!(metadata.columns, full.columns);
+            assert_eq!(metadata.cell, full.cell);
+            assert!(metadata.reflections.is_empty());
+            assert!(read_mtz_metadata_compressed_bytes(&encoded[..encoded.len() / 2]).is_err());
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("map.mtz.{suffix}"));
+            fs::write(&path, encoded).unwrap();
+            assert_eq!(read_mtz_metadata_file(path).unwrap(), metadata);
+        }
     }
 
     #[test]

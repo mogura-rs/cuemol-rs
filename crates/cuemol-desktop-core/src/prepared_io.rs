@@ -132,6 +132,123 @@ impl PreparedFile {
         })
     }
 
+    pub fn parse_with_file_options(
+        name: &str,
+        bytes: &[u8],
+        options: &GuiFileReaderOptions,
+        companion: Option<&[u8]>,
+    ) -> Result<Self> {
+        use GuiFileReaderOptions as Reader;
+        if matches!(options, Reader::Automatic) {
+            return Self::parse(name, bytes);
+        }
+        if let Reader::Molecule(options) = options {
+            return Self::parse_with_molecule_options(name, bytes, options);
+        }
+        let decode = |bytes: &[u8]| cuemol_core::compressed::decode_bytes(bytes);
+        let decoded;
+        let bytes = if bytes.starts_with(&[0x1f, 0x8b])
+            || bytes.starts_with(b"BZh")
+            || bytes.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0])
+        {
+            decoded = decode(bytes)?;
+            decoded.as_slice()
+        } else {
+            bytes
+        };
+        let companion = companion.map(decode).transpose()?;
+        fn text(bytes: &[u8]) -> Result<&str> {
+            std::str::from_utf8(bytes).map_err(|error| CueMolError::parse(error.to_string()))
+        }
+        let contents = match options {
+            Reader::Ccp4(options) => {
+                if !options.min.is_finite()
+                    || !options.max.is_finite()
+                    || options.subsample == 0
+                    || !options.max_voxels.is_finite()
+                    || options.max_voxels < 0.
+                {
+                    return Err(CueMolError::invalid_argument("invalid CCP4 reader options"));
+                }
+                let mut reader = Ccp4MapReader::new();
+                reader.set_normalize(options.normalize);
+                reader.set_truncate_min(options.truncate_min);
+                reader.set_min(options.min);
+                reader.set_truncate_max(options.truncate_max);
+                reader.set_max(options.max);
+                reader.set_subsample(options.subsample);
+                reader.set_max_voxels(options.max_voxels);
+                reader.set_use_header_stats(options.use_header_stats);
+                let mut map = reader.read_density_map_bytes(bytes)?;
+                map.set_map_type(options.map_type.as_str())?;
+                PreparedContents::Map {
+                    format: "ccp4map".into(),
+                    data: map.transfer_data(),
+                }
+            }
+            Reader::Mtz(options) => {
+                validate_mtz_map_reader_options(options)?;
+                let mut reader = Mtz2MapReader::new();
+                reader.set_column_f(&options.column_f);
+                reader.set_column_phi(if options.use_phase {
+                    &options.column_phi
+                } else {
+                    ""
+                });
+                reader.set_column_weight(if options.use_weight {
+                    &options.column_weight
+                } else {
+                    ""
+                });
+                reader.set_resolution(options.resolution);
+                reader.set_grid_size(options.grid_size);
+                reader.read_bytes(bytes)?;
+                PreparedContents::Map {
+                    format: "mtzmap".into(),
+                    data: reader.build_density_map()?.transfer_data(),
+                }
+            }
+            Reader::Amber => {
+                let topology = text(bytes)?;
+                let coordinates = companion.as_deref().map(text).transpose()?;
+                let loaded = cuemol_mdtools::read_amber_prmtop_with_restart_str(
+                    &topology,
+                    coordinates.as_deref(),
+                )?;
+                PreparedContents::Molecule(loaded.molecule.transfer_data())
+            }
+            Reader::Namd => {
+                let topology = text(companion.as_deref().ok_or_else(|| {
+                    CueMolError::invalid_argument("a PSF topology file is required")
+                })?)?;
+                let loaded = cuemol_mdtools::read_namd_coor_with_psf_bytes(bytes, &topology)?;
+                PreparedContents::Molecule(loaded.molecule.transfer_data())
+            }
+            Reader::Msms { primary_vertices } => {
+                let primary = text(bytes)?;
+                let companion = text(companion.as_deref().ok_or_else(|| {
+                    CueMolError::invalid_argument("both MSMS vertex and face files are required")
+                })?)?;
+                let (vertices, faces) = if *primary_vertices {
+                    (&primary, &companion)
+                } else {
+                    (&companion, &primary)
+                };
+                let mut surface = cuemol_surface::MolSurfObj::new();
+                *surface.mesh_mut() = cuemol_surface::read_msms_surface_str(vertices, faces)?;
+                PreparedContents::Surface {
+                    format: "qdfsurf".into(),
+                    source: cuemol_surface::qdf::write_qdf_surface_bytes(&surface),
+                }
+            }
+            Reader::Automatic | Reader::Molecule(_) => unreachable!(),
+        };
+        Ok(Self {
+            name: name.into(),
+            contents,
+        })
+    }
+
     pub fn parse_pdb_download(name: &str, bytes: &[u8], kind: GuiPdbFileKind) -> Result<Self> {
         let lower = name.to_ascii_lowercase();
         let plain_name = lower.strip_suffix(".gz").unwrap_or(&lower);

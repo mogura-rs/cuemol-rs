@@ -2,7 +2,9 @@ mod animation;
 mod clipboard;
 mod config_io;
 mod file_open;
+mod file_options;
 mod reader_options;
+pub use file_options::{GuiFileOpenMetadata, GuiFileReaderOptions};
 pub use reader_options::{
     GuiAmberPrmtopReaderOptions, GuiMapCenterPolicy, GuiMapHeader, GuiMapType,
 };
@@ -1473,13 +1475,15 @@ pub struct GuiRendererSetup {
     pub map_center_policy: Option<GuiMapCenterPolicy>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum GuiMoleculeReaderKind {
     Pdb,
     Mmcif,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GuiMoleculeReaderOptions {
     pub kind: GuiMoleculeReaderKind,
     pub ignore_multiple_models: bool,
@@ -1502,7 +1506,8 @@ pub struct GuiNamdCoorReaderOptions {
     pub topology_path: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GuiCcp4MapReaderOptions {
     pub map_type: GuiMapType,
     pub normalize: bool,
@@ -1530,13 +1535,15 @@ impl Default for GuiCcp4MapReaderOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GuiMtzColumnOption {
     pub name: String,
     pub kind: char,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GuiMtzMapReaderOptions {
     pub columns: Vec<GuiMtzColumnOption>,
     pub column_f: String,
@@ -1561,7 +1568,8 @@ pub struct GuiMsmsReaderOptions {
     pub vertex_path: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum GuiFileRendererTarget {
     Molecule,
     DensityMap,

@@ -84,6 +84,7 @@ fn failed_renderer_setup_does_not_insert_a_molecule_or_scene() {
             renderer_name: "invalid".into(),
             selection: None,
             recenter: false,
+            map_center_policy: None,
         };
         assert!(app
             .open_path_with_reader_and_renderer_setup(&path, reader.as_ref(), &setup)

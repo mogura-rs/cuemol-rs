@@ -291,6 +291,7 @@ impl App {
                 });
             });
         self.close_tab_dialog(ctx);
+        self.file_options_ui(ctx);
         self.about.show(ctx);
         for (name, rect) in &self.about.rects {
             self.ui_rects.insert(
@@ -345,6 +346,12 @@ impl App {
                         }
                         if ui.button("Open File…").clicked() {
                             choose_file();
+                            ui.close();
+                        }
+                        let options = ui.button("Open with options…");
+                        self.ui_rects.insert("Open with options".into(), [options.rect.min.x, options.rect.min.y, options.rect.width(), options.rect.height()]);
+                        if options.clicked() {
+                            choose_file_input("file-options");
                             ui.close();
                         }
                         if ui.button("Open Scene…").clicked() {

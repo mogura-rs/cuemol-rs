@@ -42,10 +42,13 @@ use egui_wgpu::ScreenDescriptor;
 #[cfg(test)]
 use glam::Vec4 as GlamVec4;
 use glam::{Mat4, Quat, Vec3};
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::rc::Rc;
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
     mpsc, Arc,
@@ -865,15 +868,15 @@ impl NativeRunner {
         self.poll_config_init(event_loop);
         self.poll_commands();
         if let (Some(app), Some(gpu)) = (&mut self.app, &mut self.gpu) {
-            let mut batch = cuemol_desktop_core::FileOpenBatch::new(
+            let batch = Rc::new(RefCell::new(cuemol_desktop_core::FileOpenBatch::new(
                 cuemol_desktop_core::FileOpenTarget::from_config(
                     &app.state.config_value("files:shell-target"),
                 ),
-            );
+            )));
             for path in std::mem::take(&mut self.startup_paths) {
-                app.open_path = path.to_string_lossy().into_owned();
-                app.open_current_path_in_batch(&mut gpu.camera, Some(&mut batch));
+                app.pending_file_opens.push_back((path, batch.clone()));
             }
+            app.process_pending_file_opens(&mut gpu.camera);
             for path in std::mem::take(&mut self.dropped_paths) {
                 app.handle_window_event(&WindowEvent::DroppedFile(path), &mut gpu.camera);
             }
@@ -968,6 +971,11 @@ fn format_download_bytes(bytes: u64) -> String {
 enum NativeRendererSetupAction {
     PdbDownload,
     OpenPath(PathBuf),
+    OpenPathInBatch {
+        path: PathBuf,
+        batch: Rc<RefCell<cuemol_desktop_core::FileOpenBatch>>,
+        source_scene: Option<cuemol_core::Uid>,
+    },
     OpenTrajectory(NativeTrajectoryLoadRequest),
     MolClient(NativeMolClientRequest),
 }
@@ -1274,6 +1282,8 @@ enum NativeTrajectoryPanelAction {
 struct NativeRendererSetupDraft {
     action: NativeRendererSetupAction,
     target: crate::GuiFileRendererTarget,
+    reader_open: bool,
+    reader_defaults: NativeRendererReaderOptions,
     reader_options: Option<crate::GuiMoleculeReaderOptions>,
     namd_coor_options: Option<crate::GuiNamdCoorReaderOptions>,
     amber_prmtop_options: Option<crate::GuiAmberPrmtopReaderOptions>,
@@ -1291,7 +1301,7 @@ struct NativeRendererSetupDraft {
     map_center_policy: crate::GuiMapCenterPolicy,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct NativeRendererReaderOptions {
     molecule: Option<crate::GuiMoleculeReaderOptions>,
     namd_coor: Option<crate::GuiNamdCoorReaderOptions>,
@@ -1316,7 +1326,8 @@ struct GuiApplication {
     agent: cuemol_ui::AgentPanel,
     state: DesktopAppState,
     open_path: String,
-    file_drop_batch: Option<cuemol_desktop_core::FileOpenBatch>,
+    file_drop_batch: Option<Rc<RefCell<cuemol_desktop_core::FileOpenBatch>>>,
+    pending_file_opens: VecDeque<(PathBuf, Rc<RefCell<cuemol_desktop_core::FileOpenBatch>>)>,
     save_path: String,
     object_save_path: String,
     view_save_path: String,
@@ -4677,6 +4688,7 @@ impl GuiApplication {
             state,
             open_path: "../cuemol2/tests/test_data/1CRN.pdb".to_string(),
             file_drop_batch: None,
+            pending_file_opens: VecDeque::new(),
             save_path: "scene.qsc".to_string(),
             object_save_path: "object.pdb".to_string(),
             view_save_path: "current_view.cam".to_string(),
@@ -5601,6 +5613,15 @@ impl GuiApplication {
                     ui.separator();
                     if ui.button("Open File...").clicked() {
                         self.choose_open_file(camera);
+                        ui.close();
+                    }
+                    if ui.button("Open with options...").clicked() {
+                        if let Some(path) =
+                            native_file_dialog(NativeFileDialog::OpenObject, &self.open_path)
+                        {
+                            self.open_path = path.to_string_lossy().into_owned();
+                            self.request_open_current_path_with_options(camera, true);
+                        }
                         ui.close();
                     }
                     if self.state.plugin_enabled("mdtools")
@@ -16356,6 +16377,14 @@ impl GuiApplication {
     }
 
     fn request_open_current_path(&mut self, camera: &mut CameraController) {
+        self.request_open_current_path_with_options(camera, false);
+    }
+
+    fn request_open_current_path_with_options(
+        &mut self,
+        camera: &mut CameraController,
+        force_options: bool,
+    ) {
         let open_path = self.open_path.trim().to_string();
         if open_path.is_empty() {
             self.set_status("Open path is empty");
@@ -16380,7 +16409,8 @@ impl GuiApplication {
         }
         match self.state.file_renderer_setup_for_path(&path) {
             Ok(Some(file_setup))
-                if file_setup.target == crate::GuiFileRendererTarget::Molecule
+                if !force_options
+                    && file_setup.target == crate::GuiFileRendererTarget::Molecule
                     && file_setup.namd_coor_reader_options.is_none()
                     && file_setup.amber_prmtop_reader_options.is_none() =>
             {
@@ -16405,6 +16435,20 @@ impl GuiApplication {
                         msms: file_setup.msms_reader_options,
                     },
                 );
+                if force_options && file_setup.target == crate::GuiFileRendererTarget::Molecule {
+                    if let Some(draft) = self.renderer_setup_draft.as_mut() {
+                        draft.options.insert(
+                            0,
+                            crate::GuiRendererSetupOption {
+                                name: "auto".into(),
+                                description: "Automatic representations".into(),
+                                preset: false,
+                            },
+                        );
+                        draft.renderer_type = "auto".into();
+                        draft.renderer_name = "auto1".into();
+                    }
+                }
             }
             Ok(None) => self.open_current_path(camera),
             Err(error) => {
@@ -16520,6 +16564,49 @@ impl GuiApplication {
             self.load_view_path(&path, camera);
             return;
         }
+        match self.state.file_renderer_setup_for_path(&path) {
+            Ok(Some(file_setup))
+                if file_setup.target == crate::GuiFileRendererTarget::DensityMap =>
+            {
+                let name = path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("map");
+                let scene = self.state.active_scene();
+                let setup = crate::GuiRendererSetup {
+                    object_name: scene
+                        .and_then(|id| self.state.suggest_object_name(id, name).ok())
+                        .unwrap_or_else(|| name.to_string()),
+                    renderer_type: "contour".into(),
+                    renderer_name: scene
+                        .and_then(|id| self.state.suggest_renderer_name(id, "contour").ok())
+                        .unwrap_or_else(|| "contour1".into()),
+                    selection: None,
+                    recenter: false,
+                    map_center_policy: Some(crate::GuiMapCenterPolicy::Auto),
+                };
+                self.open_path_with_renderer_setup_in_batch(
+                    path,
+                    file_setup.target,
+                    NativeFileReaderOptions {
+                        molecule: None,
+                        namd_coor: None,
+                        amber_prmtop: None,
+                        density_map: file_setup.density_map_reader_options.as_ref(),
+                        msms: None,
+                    },
+                    setup,
+                    camera,
+                    batch,
+                );
+                return;
+            }
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+            _ => {}
+        }
         let undo = self.capture_undo();
         let result = if let Some(batch) = batch {
             let _ = self
@@ -16634,8 +16721,32 @@ impl GuiApplication {
         setup: crate::GuiRendererSetup,
         camera: &mut CameraController,
     ) {
+        self.open_path_with_renderer_setup_in_batch(
+            path,
+            target,
+            reader_options,
+            setup,
+            camera,
+            None,
+        );
+    }
+
+    fn open_path_with_renderer_setup_in_batch(
+        &mut self,
+        path: PathBuf,
+        target: crate::GuiFileRendererTarget,
+        reader_options: NativeFileReaderOptions<'_>,
+        setup: crate::GuiRendererSetup,
+        camera: &mut CameraController,
+        batch: Option<&mut cuemol_desktop_core::FileOpenBatch>,
+    ) {
         let recenter = setup.recenter;
         let undo = self.capture_undo();
+        if batch.is_some() {
+            let _ = self
+                .state
+                .set_active_view_camera(&camera.to_qsys_camera("__current"));
+        }
         let map_renderer_center = (setup.map_center_policy.is_some() || !recenter).then(|| {
             Vector4::new3(
                 camera.target.x as f64,
@@ -16643,29 +16754,30 @@ impl GuiApplication {
                 camera.target.z as f64,
             )
         });
-        let result = match target {
-            crate::GuiFileRendererTarget::Molecule => {
-                self.state.open_path_with_molecule_reader_setup(
-                    &path,
-                    &crate::GuiMoleculeFileSetup {
-                        reader_options: reader_options.molecule.cloned(),
-                        namd_coor_reader_options: reader_options.namd_coor.cloned(),
-                        amber_prmtop_reader_options: reader_options.amber_prmtop.cloned(),
-                    },
-                    &setup,
-                )
-            }
-            crate::GuiFileRendererTarget::DensityMap => {
-                self.state.open_density_map_path_with_renderer_setup(
+        let open = |state: &mut DesktopAppState| match target {
+            crate::GuiFileRendererTarget::Molecule => state.open_path_with_molecule_reader_setup(
+                &path,
+                &crate::GuiMoleculeFileSetup {
+                    reader_options: reader_options.molecule.cloned(),
+                    namd_coor_reader_options: reader_options.namd_coor.cloned(),
+                    amber_prmtop_reader_options: reader_options.amber_prmtop.cloned(),
+                },
+                &setup,
+            ),
+            crate::GuiFileRendererTarget::DensityMap => state
+                .open_density_map_path_with_renderer_setup(
                     &path,
                     reader_options.density_map,
                     map_renderer_center,
                     &setup,
-                )
+                ),
+            crate::GuiFileRendererTarget::Surface => {
+                state.open_surface_path_with_renderer_setup(&path, reader_options.msms, &setup)
             }
-            crate::GuiFileRendererTarget::Surface => self
-                .state
-                .open_surface_path_with_renderer_setup(&path, reader_options.msms, &setup),
+        };
+        let result = match batch {
+            Some(batch) => batch.open_object(&mut self.state, open),
+            None => open(&mut self.state),
         };
         match result {
             Ok(GuiLoadedPath::Object {
@@ -27010,6 +27122,10 @@ impl GuiApplication {
         self.renderer_setup_draft = Some(NativeRendererSetupDraft {
             action,
             target,
+            reader_open: reader_options.namd_coor.is_some()
+                || reader_options.msms.is_some()
+                || reader_options.amber_prmtop.is_some(),
+            reader_defaults: reader_options.clone(),
             reader_options: reader_options.molecule,
             namd_coor_options: reader_options.namd_coor,
             amber_prmtop_options: reader_options.amber_prmtop,
@@ -27041,377 +27157,467 @@ impl GuiApplication {
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                egui::Grid::new("pdb_renderer_setup_grid")
-                    .num_columns(2)
-                    .spacing([8.0, 6.0])
+                egui::ScrollArea::vertical()
+                    .id_salt("file-setup-scroll")
+                    .max_height((ctx.content_rect().height() - 180.0).max(120.0))
                     .show(ui, |ui| {
-                        ui.label("Object:");
-                        ui.add_sized(
-                            [240.0, 22.0],
-                            egui::TextEdit::singleline(&mut draft.object_name),
-                        );
-                        ui.end_row();
-
-                        ui.label("Renderer type:");
-                        let selected_label = draft
-                            .options
-                            .iter()
-                            .find(|option| option.name == draft.renderer_type)
-                            .map(|option| option.description.as_str())
-                            .unwrap_or(draft.renderer_type.as_str());
-                        let mut selected_type = None;
-                        egui::ComboBox::from_id_salt("pdb_renderer_setup_type")
-                            .selected_text(selected_label)
-                            .show_ui(ui, |ui| {
-                                let mut separator_added = false;
-                                for option in &draft.options {
-                                    if !option.preset && !separator_added {
-                                        ui.separator();
-                                        separator_added = true;
-                                    }
-                                    if ui
-                                        .selectable_label(
-                                            draft.renderer_type == option.name,
-                                            &option.description,
-                                        )
-                                        .clicked()
-                                    {
-                                        selected_type = Some(option.name.clone());
-                                    }
-                                }
-                            });
-                        if let Some(renderer_type) = selected_type {
-                            draft.renderer_type = renderer_type;
-                            if draft.renderer_name_default {
-                                let scene_uid = self.state.ensure_active_scene();
-                                draft.renderer_name = self
-                                    .state
-                                    .suggest_renderer_name(scene_uid, &draft.renderer_type)
-                                    .unwrap_or_else(|_| format!("{}1", draft.renderer_type));
-                            }
-                        }
-                        ui.end_row();
-
-                        ui.label("Renderer name:");
-                        let name_response = ui.add_sized(
-                            [240.0, 22.0],
-                            egui::TextEdit::singleline(&mut draft.renderer_name),
-                        );
-                        if name_response.changed() && !draft.renderer_name.trim().is_empty() {
-                            draft.renderer_name_default = false;
-                        }
-                        ui.end_row();
-
-                        let molecule_target =
-                            draft.target == crate::GuiFileRendererTarget::Molecule;
-                        ui.add_enabled_ui(molecule_target, |ui| {
-                            ui.checkbox(&mut draft.selection_enabled, "Selection:");
-                        });
-                        ui.add_enabled_ui(molecule_target && draft.selection_enabled, |ui| {
-                            ui.horizontal(|ui| {
+                        egui::Grid::new("pdb_renderer_setup_grid")
+                            .num_columns(2)
+                            .spacing([8.0, 6.0])
+                            .show(ui, |ui| {
+                                ui.label("Object:");
                                 ui.add_sized(
-                                    [166.0, 22.0],
-                                    egui::TextEdit::singleline(&mut draft.selection),
+                                    [240.0, 22.0],
+                                    egui::TextEdit::singleline(&mut draft.object_name),
                                 );
-                                ui.add_enabled_ui(!selection_history.is_empty(), |ui| {
-                                    ui.menu_button("History", |ui| {
-                                        for entry in &selection_history {
-                                            if ui.button(entry).clicked() {
-                                                draft.selection = entry.clone();
-                                                ui.close();
+                                ui.end_row();
+
+                                ui.label("Renderer type:");
+                                let selected_label = draft
+                                    .options
+                                    .iter()
+                                    .find(|option| option.name == draft.renderer_type)
+                                    .map(|option| option.description.as_str())
+                                    .unwrap_or(draft.renderer_type.as_str());
+                                let mut selected_type = None;
+                                egui::ComboBox::from_id_salt("pdb_renderer_setup_type")
+                                    .selected_text(selected_label)
+                                    .show_ui(ui, |ui| {
+                                        let mut separator_added = false;
+                                        for option in &draft.options {
+                                            if !option.preset && !separator_added {
+                                                ui.separator();
+                                                separator_added = true;
+                                            }
+                                            if ui
+                                                .selectable_label(
+                                                    draft.renderer_type == option.name,
+                                                    &option.description,
+                                                )
+                                                .clicked()
+                                            {
+                                                selected_type = Some(option.name.clone());
                                             }
                                         }
                                     });
+                                if let Some(renderer_type) = selected_type {
+                                    draft.renderer_type = renderer_type;
+                                    if draft.renderer_name_default {
+                                        let scene_uid = self.state.ensure_active_scene();
+                                        draft.renderer_name = self
+                                            .state
+                                            .suggest_renderer_name(scene_uid, &draft.renderer_type)
+                                            .unwrap_or_else(|_| {
+                                                format!("{}1", draft.renderer_type)
+                                            });
+                                    }
+                                }
+                                ui.end_row();
+
+                                ui.label("Renderer name:");
+                                let name_response = ui.add_sized(
+                                    [240.0, 22.0],
+                                    egui::TextEdit::singleline(&mut draft.renderer_name),
+                                );
+                                if name_response.changed() && !draft.renderer_name.trim().is_empty()
+                                {
+                                    draft.renderer_name_default = false;
+                                }
+                                ui.end_row();
+
+                                let molecule_target =
+                                    draft.target == crate::GuiFileRendererTarget::Molecule;
+                                ui.add_enabled_ui(molecule_target, |ui| {
+                                    ui.checkbox(&mut draft.selection_enabled, "Selection:");
                                 });
+                                ui.add_enabled_ui(
+                                    molecule_target && draft.selection_enabled,
+                                    |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.add_sized(
+                                                [166.0, 22.0],
+                                                egui::TextEdit::singleline(&mut draft.selection),
+                                            );
+                                            ui.add_enabled_ui(
+                                                !selection_history.is_empty(),
+                                                |ui| {
+                                                    ui.menu_button("History", |ui| {
+                                                        for entry in &selection_history {
+                                                            if ui.button(entry).clicked() {
+                                                                draft.selection = entry.clone();
+                                                                ui.close();
+                                                            }
+                                                        }
+                                                    });
+                                                },
+                                            );
+                                        });
+                                    },
+                                );
+                                ui.end_row();
                             });
-                        });
-                        ui.end_row();
-                    });
-                match draft.target {
-                    crate::GuiFileRendererTarget::Molecule => {
-                        ui.checkbox(&mut draft.recenter, "Recenter view");
-                    }
-                    crate::GuiFileRendererTarget::DensityMap => {
-                        for (policy, label) in [
-                            (crate::GuiMapCenterPolicy::Auto, "Auto (from map type)"),
-                            (
-                                crate::GuiMapCenterPolicy::SetMapCenter,
-                                "Set map center (keep the view)",
-                            ),
-                            (
-                                crate::GuiMapCenterPolicy::MoveViewCenter,
-                                "Move view center (fit the map)",
-                            ),
-                        ] {
-                            ui.radio_value(&mut draft.map_center_policy, policy, label);
-                        }
-                    }
-                    crate::GuiFileRendererTarget::Surface => {
-                        ui.checkbox(&mut draft.recenter, "Recenter view");
-                    }
-                }
-                if let Some(options) = draft.reader_options.as_mut() {
-                    ui.separator();
-                    ui.strong(match options.kind {
-                        crate::GuiMoleculeReaderKind::Pdb => "PDB options",
-                        crate::GuiMoleculeReaderKind::Mmcif => "mmCIF options",
-                    });
-                    ui.checkbox(
-                        &mut options.ignore_multiple_models,
-                        "Ignore multilpe models",
-                    );
-                    ui.checkbox(&mut options.ignore_anisou, "Ignore anisotropic U");
-                    ui.checkbox(
-                        &mut options.ignore_alt_conf,
-                        "Ignore alternate conformation",
-                    );
-                    if options.kind == crate::GuiMoleculeReaderKind::Pdb {
-                        ui.checkbox(&mut options.load_segid_as_chain, "Load SEGID as chain name");
-                    }
-                    ui.checkbox(
-                        &mut options.calculate_secondary_structure,
-                        "Calculate protein secondary structure",
-                    );
-                    ui.checkbox(
-                        &mut options.auto_generate_topology,
-                        "Auto-generate non-standard topology",
-                    );
-                }
-                if let Some(options) = draft.namd_coor_options.as_mut() {
-                    ui.separator();
-                    ui.strong("NAMD Coor file options");
-                    ui.horizontal(|ui| {
-                        ui.label("PSF file:");
-                        ui.add_sized(
-                            [240.0, 22.0],
-                            egui::TextEdit::singleline(&mut options.topology_path),
-                        );
-                        if ui.button("Change ...").clicked() {
-                            if let Some(path) = native_file_dialog(
-                                NativeFileDialog::OpenPsf,
-                                &options.topology_path,
-                            ) {
-                                options.topology_path = path.to_string_lossy().into_owned();
+                        match draft.target {
+                            crate::GuiFileRendererTarget::Molecule => {
+                                ui.checkbox(&mut draft.recenter, "Recenter view");
                             }
-                        }
-                    });
-                }
-                if let Some(options) = draft.amber_prmtop_options.as_mut() {
-                    ui.separator();
-                    ui.strong("AMBER topology options");
-                    ui.horizontal(|ui| {
-                        ui.label("Coordinate file:");
-                        ui.add_sized(
-                            [240., 22.],
-                            egui::TextEdit::singleline(&mut options.coordinate_path),
-                        );
-                        if ui.button("Change ...").clicked() {
-                            if let Some(path) = native_file_dialog(
-                                NativeFileDialog::OpenAmberCoordinate,
-                                &options.coordinate_path,
-                            ) {
-                                options.coordinate_path = path.to_string_lossy().into_owned();
-                            }
-                        }
-                    });
-                    ui.label("Leave empty to load topology only.");
-                }
-                if let Some(options) = draft.msms_options.as_mut() {
-                    ui.separator();
-                    ui.strong("MSMS surface file options");
-                    ui.horizontal(|ui| {
-                        ui.label("Vertex file:");
-                        ui.add_sized(
-                            [240.0, 22.0],
-                            egui::TextEdit::singleline(&mut options.vertex_path),
-                        );
-                        if ui.button("Change ...").clicked() {
-                            if let Some(path) = native_file_dialog(
-                                NativeFileDialog::OpenMsmsVertex,
-                                &options.vertex_path,
-                            ) {
-                                options.vertex_path = path.to_string_lossy().into_owned();
-                            }
-                        }
-                    });
-                }
-                if let Some(options) = draft.density_map_options.as_mut() {
-                    ui.separator();
-                    match options {
-                        crate::GuiDensityMapReaderOptions::Ccp4(options) => {
-                            ui.strong("CCP4Map options");
-                            if let Some(header) = draft.map_header {
-                                let stored = header.stored_voxels(options.subsample);
-                                ui.label(format!(
-                                    "Grid {} × {} × {} ({:.1} MiB at stride {})",
-                                    header.counts[0],
-                                    header.counts[1],
-                                    header.counts[2],
-                                    stored as f64 / 1_048_576.,
-                                    options.subsample
-                                ));
-                                if stored > crate::GuiMapHeader::LARGE_MAP_VOXELS {
-                                    ui.colored_label(
-                                        ui.visuals().warn_fg_color,
-                                        format!(
-                                            "Large map; suggested subsample: {}",
-                                            header.suggested_subsample()
-                                        ),
-                                    );
+                            crate::GuiFileRendererTarget::DensityMap => {
+                                for (policy, label) in [
+                                    (crate::GuiMapCenterPolicy::Auto, "Auto (from map type)"),
+                                    (
+                                        crate::GuiMapCenterPolicy::SetMapCenter,
+                                        "Set map center (keep the view)",
+                                    ),
+                                    (
+                                        crate::GuiMapCenterPolicy::MoveViewCenter,
+                                        "Move view center (fit the map)",
+                                    ),
+                                ] {
+                                    ui.radio_value(&mut draft.map_center_policy, policy, label);
                                 }
                             }
+                            crate::GuiFileRendererTarget::Surface => {
+                                ui.checkbox(&mut draft.recenter, "Recenter view");
+                            }
+                        }
+                        let changed = draft.reader_options != draft.reader_defaults.molecule
+                            || draft.namd_coor_options != draft.reader_defaults.namd_coor
+                            || draft.amber_prmtop_options != draft.reader_defaults.amber_prmtop
+                            || draft.msms_options != draft.reader_defaults.msms
+                            || draft.density_map_options != draft.reader_defaults.density_map;
+                        let has_reader = draft.reader_options.is_some()
+                            || draft.namd_coor_options.is_some()
+                            || draft.amber_prmtop_options.is_some()
+                            || draft.msms_options.is_some()
+                            || draft.density_map_options.is_some();
+                        if has_reader {
+                            ui.separator();
                             ui.horizontal(|ui| {
-                                ui.label("Map type");
-                                egui::ComboBox::from_id_salt("reader-map-type")
-                                    .selected_text(options.map_type.as_str())
-                                    .show_ui(ui, |ui| {
-                                        for (kind, label) in [
-                                            (crate::GuiMapType::Auto, "Auto (from header)"),
-                                            (
-                                                crate::GuiMapType::Xtal,
-                                                "Crystallographic (periodic)",
-                                            ),
-                                            (crate::GuiMapType::Em, "Cryo-EM (whole map)"),
-                                        ] {
-                                            ui.selectable_value(&mut options.map_type, kind, label);
-                                        }
-                                    });
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("Grid sampling stride");
-                                ui.add(
-                                    egui::DragValue::new(&mut options.subsample).range(1..=65536),
-                                );
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("Maximum voxels (0 = unlimited)");
-                                ui.add(
-                                    egui::DragValue::new(&mut options.max_voxels)
-                                        .range(0.0..=f64::MAX)
-                                        .speed(1_000_000.),
-                                );
-                            });
-                            ui.checkbox(&mut options.use_header_stats, "Use header density range");
-                            ui.checkbox(&mut options.normalize, "Normalize by mean and stdev");
-                            ui.horizontal(|ui| {
-                                ui.checkbox(
-                                    &mut options.truncate_min,
-                                    "Truncate density lower than:",
-                                );
-                                ui.add_enabled(
-                                    options.truncate_min,
-                                    egui::DragValue::new(&mut options.min).speed(0.1),
-                                );
-                                ui.label("σ");
-                            });
-                            ui.horizontal(|ui| {
-                                ui.checkbox(
-                                    &mut options.truncate_max,
-                                    "Truncate density higher than:",
-                                );
-                                ui.add_enabled(
-                                    options.truncate_max,
-                                    egui::DragValue::new(&mut options.max).speed(0.1),
-                                );
-                                ui.label("σ");
+                                let label = if changed {
+                                    "File reader options (modified)"
+                                } else {
+                                    "File reader options"
+                                };
+                                if ui
+                                    .button(format!(
+                                        "{} {label}",
+                                        if draft.reader_open { "-" } else { "+" }
+                                    ))
+                                    .clicked()
+                                {
+                                    draft.reader_open = !draft.reader_open;
+                                }
+                                if ui
+                                    .add_enabled(changed, egui::Button::new("Reset"))
+                                    .clicked()
+                                {
+                                    draft.reader_options = draft.reader_defaults.molecule.clone();
+                                    draft.namd_coor_options =
+                                        draft.reader_defaults.namd_coor.clone();
+                                    draft.amber_prmtop_options =
+                                        draft.reader_defaults.amber_prmtop.clone();
+                                    draft.msms_options = draft.reader_defaults.msms.clone();
+                                    draft.density_map_options =
+                                        draft.reader_defaults.density_map.clone();
+                                }
                             });
                         }
-                        crate::GuiDensityMapReaderOptions::Mtz(options) => {
-                            ui.strong("MTZ options");
-                            let amplitudes = options
-                                .columns
-                                .iter()
-                                .filter(|column| column.kind == 'F')
-                                .map(|column| column.name.clone())
-                                .collect::<Vec<_>>();
-                            let phases = options
-                                .columns
-                                .iter()
-                                .filter(|column| column.kind == 'P')
-                                .map(|column| column.name.clone())
-                                .collect::<Vec<_>>();
-                            let weights = options
-                                .columns
-                                .iter()
-                                .filter(|column| column.kind == 'W')
-                                .map(|column| column.name.clone())
-                                .collect::<Vec<_>>();
-                            egui::Grid::new("mtz_reader_options_grid")
-                                .num_columns(2)
-                                .spacing([8.0, 6.0])
-                                .show(ui, |ui| {
-                                    ui.label("Amplitude (F):");
-                                    egui::ComboBox::from_id_salt("mtz_amplitude")
-                                        .selected_text(&options.column_f)
-                                        .show_ui(ui, |ui| {
-                                            for name in &amplitudes {
-                                                ui.selectable_value(
-                                                    &mut options.column_f,
-                                                    name.clone(),
-                                                    name,
+                        if draft.reader_open {
+                            if let Some(options) = draft.reader_options.as_mut() {
+                                ui.separator();
+                                ui.strong(match options.kind {
+                                    crate::GuiMoleculeReaderKind::Pdb => "PDB options",
+                                    crate::GuiMoleculeReaderKind::Mmcif => "mmCIF options",
+                                });
+                                ui.checkbox(
+                                    &mut options.ignore_multiple_models,
+                                    "Ignore multiple models",
+                                );
+                                ui.checkbox(&mut options.ignore_anisou, "Ignore anisotropic U");
+                                ui.checkbox(
+                                    &mut options.ignore_alt_conf,
+                                    "Ignore alternate conformation",
+                                );
+                                if options.kind == crate::GuiMoleculeReaderKind::Pdb {
+                                    ui.checkbox(
+                                        &mut options.load_segid_as_chain,
+                                        "Load SEGID as chain name",
+                                    );
+                                }
+                                ui.checkbox(
+                                    &mut options.calculate_secondary_structure,
+                                    "Calculate protein secondary structure",
+                                );
+                                ui.checkbox(
+                                    &mut options.auto_generate_topology,
+                                    "Auto-generate non-standard topology",
+                                );
+                            }
+                            if let Some(options) = draft.namd_coor_options.as_mut() {
+                                ui.separator();
+                                ui.strong("NAMD Coor file options");
+                                ui.horizontal(|ui| {
+                                    ui.label("PSF file:");
+                                    ui.add_sized(
+                                        [240.0, 22.0],
+                                        egui::TextEdit::singleline(&mut options.topology_path),
+                                    );
+                                    if ui.button("Change ...").clicked() {
+                                        if let Some(path) = native_file_dialog(
+                                            NativeFileDialog::OpenPsf,
+                                            &options.topology_path,
+                                        ) {
+                                            options.topology_path =
+                                                path.to_string_lossy().into_owned();
+                                        }
+                                    }
+                                });
+                            }
+                            if let Some(options) = draft.amber_prmtop_options.as_mut() {
+                                ui.separator();
+                                ui.strong("AMBER topology options");
+                                ui.horizontal(|ui| {
+                                    ui.label("Coordinate file:");
+                                    ui.add_sized(
+                                        [240., 22.],
+                                        egui::TextEdit::singleline(&mut options.coordinate_path),
+                                    );
+                                    if ui.button("Change ...").clicked() {
+                                        if let Some(path) = native_file_dialog(
+                                            NativeFileDialog::OpenAmberCoordinate,
+                                            &options.coordinate_path,
+                                        ) {
+                                            options.coordinate_path =
+                                                path.to_string_lossy().into_owned();
+                                        }
+                                    }
+                                });
+                                ui.label("Leave empty to load topology only.");
+                            }
+                            if let Some(options) = draft.msms_options.as_mut() {
+                                ui.separator();
+                                ui.strong("MSMS surface file options");
+                                ui.horizontal(|ui| {
+                                    ui.label("Vertex file:");
+                                    ui.add_sized(
+                                        [240.0, 22.0],
+                                        egui::TextEdit::singleline(&mut options.vertex_path),
+                                    );
+                                    if ui.button("Change ...").clicked() {
+                                        if let Some(path) = native_file_dialog(
+                                            NativeFileDialog::OpenMsmsVertex,
+                                            &options.vertex_path,
+                                        ) {
+                                            options.vertex_path =
+                                                path.to_string_lossy().into_owned();
+                                        }
+                                    }
+                                });
+                            }
+                            if let Some(options) = draft.density_map_options.as_mut() {
+                                ui.separator();
+                                match options {
+                                    crate::GuiDensityMapReaderOptions::Ccp4(options) => {
+                                        ui.strong("CCP4Map options");
+                                        if let Some(header) = draft.map_header {
+                                            let stored = header.stored_voxels(options.subsample);
+                                            ui.label(format!(
+                                                "Grid {} × {} × {} ({:.1} MiB at stride {})",
+                                                header.counts[0],
+                                                header.counts[1],
+                                                header.counts[2],
+                                                stored as f64 / 1_048_576.,
+                                                options.subsample
+                                            ));
+                                            if stored > crate::GuiMapHeader::LARGE_MAP_VOXELS {
+                                                ui.colored_label(
+                                                    ui.visuals().warn_fg_color,
+                                                    format!(
+                                                        "Large map; suggested subsample: {}",
+                                                        header.suggested_subsample()
+                                                    ),
                                                 );
                                             }
+                                        }
+                                        ui.horizontal(|ui| {
+                                            ui.label("Map type");
+                                            egui::ComboBox::from_id_salt("reader-map-type")
+                                                .selected_text(options.map_type.as_str())
+                                                .show_ui(ui, |ui| {
+                                                    for (kind, label) in [
+                                                        (
+                                                            crate::GuiMapType::Auto,
+                                                            "Auto (from header)",
+                                                        ),
+                                                        (
+                                                            crate::GuiMapType::Xtal,
+                                                            "Crystallographic (periodic)",
+                                                        ),
+                                                        (
+                                                            crate::GuiMapType::Em,
+                                                            "Cryo-EM (whole map)",
+                                                        ),
+                                                    ] {
+                                                        ui.selectable_value(
+                                                            &mut options.map_type,
+                                                            kind,
+                                                            label,
+                                                        );
+                                                    }
+                                                });
                                         });
-                                    ui.end_row();
-                                    ui.add_enabled(
-                                        !phases.is_empty(),
-                                        egui::Checkbox::new(&mut options.use_phase, "Phase:"),
-                                    );
-                                    ui.add_enabled_ui(options.use_phase, |ui| {
-                                        egui::ComboBox::from_id_salt("mtz_phase")
-                                            .selected_text(&options.column_phi)
-                                            .show_ui(ui, |ui| {
-                                                for name in &phases {
-                                                    ui.selectable_value(
-                                                        &mut options.column_phi,
-                                                        name.clone(),
-                                                        name,
-                                                    );
-                                                }
-                                            });
-                                    });
-                                    ui.end_row();
-                                    ui.add_enabled(
-                                        !weights.is_empty(),
-                                        egui::Checkbox::new(&mut options.use_weight, "Weight:"),
-                                    );
-                                    ui.add_enabled_ui(options.use_weight, |ui| {
-                                        egui::ComboBox::from_id_salt("mtz_weight")
-                                            .selected_text(&options.column_weight)
-                                            .show_ui(ui, |ui| {
-                                                for name in &weights {
-                                                    ui.selectable_value(
-                                                        &mut options.column_weight,
-                                                        name.clone(),
-                                                        name,
-                                                    );
-                                                }
-                                            });
-                                    });
-                                    ui.end_row();
-                                    ui.label("Max resolution (Å):");
-                                    ui.add(
-                                        egui::DragValue::new(&mut options.resolution).speed(0.1),
-                                    );
-                                    ui.end_row();
-                                    ui.label("Grid spacing:");
-                                    ui.horizontal(|ui| {
-                                        ui.add(
-                                            egui::DragValue::new(&mut options.grid_size)
-                                                .speed(0.01),
+                                        ui.horizontal(|ui| {
+                                            ui.label("Grid sampling stride");
+                                            ui.add(
+                                                egui::DragValue::new(&mut options.subsample)
+                                                    .range(1..=65536),
+                                            );
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Maximum voxels (0 = unlimited)");
+                                            ui.add(
+                                                egui::DragValue::new(&mut options.max_voxels)
+                                                    .range(0.0..=f64::MAX)
+                                                    .speed(1_000_000.),
+                                            );
+                                        });
+                                        ui.checkbox(
+                                            &mut options.use_header_stats,
+                                            "Use header density range",
                                         );
-                                        if ui.small_button("Fine (0.25)").clicked() {
-                                            options.grid_size = 0.25;
-                                        }
-                                        if ui.small_button("Coarse (0.33)").clicked() {
-                                            options.grid_size = 0.333_333;
-                                        }
-                                    });
-                                    ui.end_row();
-                                });
+                                        ui.checkbox(
+                                            &mut options.normalize,
+                                            "Normalize by mean and stdev",
+                                        );
+                                        ui.horizontal(|ui| {
+                                            ui.checkbox(
+                                                &mut options.truncate_min,
+                                                "Truncate density lower than:",
+                                            );
+                                            ui.add_enabled(
+                                                options.truncate_min,
+                                                egui::DragValue::new(&mut options.min).speed(0.1),
+                                            );
+                                            ui.label("σ");
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.checkbox(
+                                                &mut options.truncate_max,
+                                                "Truncate density higher than:",
+                                            );
+                                            ui.add_enabled(
+                                                options.truncate_max,
+                                                egui::DragValue::new(&mut options.max).speed(0.1),
+                                            );
+                                            ui.label("σ");
+                                        });
+                                    }
+                                    crate::GuiDensityMapReaderOptions::Mtz(options) => {
+                                        ui.strong("MTZ options");
+                                        let amplitudes = options
+                                            .columns
+                                            .iter()
+                                            .filter(|column| column.kind == 'F')
+                                            .map(|column| column.name.clone())
+                                            .collect::<Vec<_>>();
+                                        let phases = options
+                                            .columns
+                                            .iter()
+                                            .filter(|column| column.kind == 'P')
+                                            .map(|column| column.name.clone())
+                                            .collect::<Vec<_>>();
+                                        let weights = options
+                                            .columns
+                                            .iter()
+                                            .filter(|column| column.kind == 'W')
+                                            .map(|column| column.name.clone())
+                                            .collect::<Vec<_>>();
+                                        egui::Grid::new("mtz_reader_options_grid")
+                                            .num_columns(2)
+                                            .spacing([8.0, 6.0])
+                                            .show(ui, |ui| {
+                                                ui.label("Amplitude (F):");
+                                                egui::ComboBox::from_id_salt("mtz_amplitude")
+                                                    .selected_text(&options.column_f)
+                                                    .show_ui(ui, |ui| {
+                                                        for name in &amplitudes {
+                                                            ui.selectable_value(
+                                                                &mut options.column_f,
+                                                                name.clone(),
+                                                                name,
+                                                            );
+                                                        }
+                                                    });
+                                                ui.end_row();
+                                                ui.add_enabled(
+                                                    !phases.is_empty(),
+                                                    egui::Checkbox::new(
+                                                        &mut options.use_phase,
+                                                        "Phase:",
+                                                    ),
+                                                );
+                                                ui.add_enabled_ui(options.use_phase, |ui| {
+                                                    egui::ComboBox::from_id_salt("mtz_phase")
+                                                        .selected_text(&options.column_phi)
+                                                        .show_ui(ui, |ui| {
+                                                            for name in &phases {
+                                                                ui.selectable_value(
+                                                                    &mut options.column_phi,
+                                                                    name.clone(),
+                                                                    name,
+                                                                );
+                                                            }
+                                                        });
+                                                });
+                                                ui.end_row();
+                                                ui.add_enabled(
+                                                    !weights.is_empty(),
+                                                    egui::Checkbox::new(
+                                                        &mut options.use_weight,
+                                                        "Weight:",
+                                                    ),
+                                                );
+                                                ui.add_enabled_ui(options.use_weight, |ui| {
+                                                    egui::ComboBox::from_id_salt("mtz_weight")
+                                                        .selected_text(&options.column_weight)
+                                                        .show_ui(ui, |ui| {
+                                                            for name in &weights {
+                                                                ui.selectable_value(
+                                                                    &mut options.column_weight,
+                                                                    name.clone(),
+                                                                    name,
+                                                                );
+                                                            }
+                                                        });
+                                                });
+                                                ui.end_row();
+                                                ui.label("Max resolution (Å):");
+                                                ui.add(
+                                                    egui::DragValue::new(&mut options.resolution)
+                                                        .speed(0.1),
+                                                );
+                                                ui.end_row();
+                                                ui.label("Grid spacing:");
+                                                ui.horizontal(|ui| {
+                                                    ui.add(
+                                                        egui::DragValue::new(
+                                                            &mut options.grid_size,
+                                                        )
+                                                        .speed(0.01),
+                                                    );
+                                                    if ui.small_button("Fine (0.25)").clicked() {
+                                                        options.grid_size = 0.25;
+                                                    }
+                                                    if ui.small_button("Coarse (0.33)").clicked() {
+                                                        options.grid_size = 0.333_333;
+                                                    }
+                                                });
+                                                ui.end_row();
+                                            });
+                                    }
+                                }
+                            }
                         }
-                    }
-                }
+                    });
                 ui.separator();
                 ui.horizontal(|ui| {
                     let valid = !draft.object_name.trim().is_empty()
@@ -27487,6 +27693,32 @@ impl GuiApplication {
                         setup,
                         camera,
                     );
+                }
+                NativeRendererSetupAction::OpenPathInBatch {
+                    path,
+                    batch,
+                    source_scene,
+                } => {
+                    if self.state.active_scene() != source_scene {
+                        self.pending_file_opens
+                            .retain(|(_, pending)| !Rc::ptr_eq(pending, &batch));
+                        self.set_status("File loading cancelled because the active scene changed");
+                    } else {
+                        self.open_path_with_renderer_setup_in_batch(
+                            path,
+                            draft.target,
+                            NativeFileReaderOptions {
+                                molecule: draft.reader_options.as_ref(),
+                                namd_coor: draft.namd_coor_options.as_ref(),
+                                amber_prmtop: draft.amber_prmtop_options.as_ref(),
+                                density_map: draft.density_map_options.as_ref(),
+                                msms: draft.msms_options.as_ref(),
+                            },
+                            setup,
+                            camera,
+                            Some(&mut batch.borrow_mut()),
+                        );
+                    }
                 }
                 NativeRendererSetupAction::OpenTrajectory(request) => {
                     self.load_md_trajectory_with_renderer_setup(request, setup, camera);
@@ -29142,23 +29374,74 @@ impl GuiApplication {
         }
     }
 
+    fn process_pending_file_opens(&mut self, camera: &mut CameraController) {
+        let stale_batch =
+            self.renderer_setup_draft
+                .as_ref()
+                .and_then(|draft| match &draft.action {
+                    NativeRendererSetupAction::OpenPathInBatch {
+                        batch,
+                        source_scene,
+                        ..
+                    } if *source_scene != self.state.active_scene() => Some(batch.clone()),
+                    _ => None,
+                });
+        if let Some(batch) = stale_batch {
+            self.renderer_setup_draft = None;
+            self.pending_file_opens
+                .retain(|(_, pending)| !Rc::ptr_eq(pending, &batch));
+            self.set_status("File loading cancelled because the active scene changed");
+        }
+        while self.renderer_setup_draft.is_none() && self.md_trajectory_draft.is_none() {
+            let Some((path, batch)) = self.pending_file_opens.pop_front() else {
+                break;
+            };
+            self.open_path = path.to_string_lossy().into_owned();
+            if is_trajectory_file(&path) {
+                self.request_open_current_path(camera);
+                continue;
+            }
+            let needs_companion = self
+                .state
+                .file_renderer_setup_for_path(&path)
+                .ok()
+                .flatten()
+                .is_some_and(|setup| {
+                    setup.namd_coor_reader_options.is_some()
+                        || setup.amber_prmtop_reader_options.is_some()
+                        || setup.msms_reader_options.is_some()
+                });
+            if needs_companion {
+                let source_scene = self.state.active_scene();
+                self.request_open_current_path(camera);
+                if let Some(draft) = self.renderer_setup_draft.as_mut() {
+                    draft.action = NativeRendererSetupAction::OpenPathInBatch {
+                        path,
+                        batch,
+                        source_scene,
+                    };
+                }
+            } else {
+                self.open_current_path_in_batch(camera, Some(&mut batch.borrow_mut()));
+            }
+        }
+    }
+
     fn handle_window_event(&mut self, event: &WindowEvent, camera: &mut CameraController) -> bool {
         use cuemol_qsys::view_input::{self as input, PointerRelease};
         if let WindowEvent::DroppedFile(path) = event {
-            self.open_path = path.to_string_lossy().into_owned();
-            if is_trajectory_file(path) {
-                self.request_open_current_path(camera);
-            } else {
-                let mut batch = self.file_drop_batch.take().unwrap_or_else(|| {
-                    cuemol_desktop_core::FileOpenBatch::new(
+            let batch = self
+                .file_drop_batch
+                .get_or_insert_with(|| {
+                    Rc::new(RefCell::new(cuemol_desktop_core::FileOpenBatch::new(
                         cuemol_desktop_core::FileOpenTarget::from_config(
                             &self.state.config_value("files:drop-target"),
                         ),
-                    )
-                });
-                self.open_current_path_in_batch(camera, Some(&mut batch));
-                self.file_drop_batch = Some(batch);
-            }
+                    )))
+                })
+                .clone();
+            self.pending_file_opens.push_back((path.clone(), batch));
+            self.process_pending_file_opens(camera);
             return true;
         }
         let time = self.input_origin.elapsed().as_millis() as i64;
@@ -34077,6 +34360,143 @@ mod tests {
     }
 
     #[test]
+    fn native_file_drop_maps_have_renderers_and_preserve_xtal_view() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("density.map");
+        fs::write(&path, "\n       1\n REMARKS generated by desktop test\n       2       0       1       1       0       0       1       0       0\n 2.00000E+00 1.00000E+00 1.00000E+00 9.00000E+01 9.00000E+01 9.00000E+01\nZYX\n0\n 1.00000E+00 2.00000E+00\n").unwrap();
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        camera.target = Vec3::new(40.0, 50.0, 60.0);
+        let before = camera.to_qsys_camera("before");
+        app.handle_window_event(&WindowEvent::DroppedFile(path), &mut camera);
+        let scene = app.state.active_scene().unwrap();
+        let maps = app.state.density_map_summaries(scene);
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].renderers.len(), 1);
+        assert_eq!(maps[0].renderers[0].renderer_type, "contour");
+        assert_eq!(camera.target, Vec3::new(40.0, 50.0, 60.0));
+        assert_eq!(camera.to_qsys_camera("after").zoom(), before.zoom());
+        assert_eq!(app.undo_stack.len(), 1);
+        app.undo(&mut camera);
+        assert!(app.state.density_map_summaries(scene).is_empty());
+        app.redo(&mut camera);
+        assert_eq!(app.state.density_map_summaries(scene)[0].renderers.len(), 1);
+    }
+
+    #[test]
+    fn native_file_drop_companions_defer_batches_until_accept_or_cancel() {
+        let directory = tempfile::tempdir().unwrap();
+        let coor = directory.path().join("frame.coor");
+        let psf = directory.path().join("frame.psf");
+        let pdb = directory.path().join("next.pdb");
+        let mut bytes = 1i32.to_le_bytes().to_vec();
+        for coordinate in [1.25f64, -2.5, 3.75] {
+            bytes.extend_from_slice(&coordinate.to_le_bytes());
+        }
+        fs::write(&coor, bytes).unwrap();
+        fs::write(&psf, "PSF\n\n       1 !NTITLE\n REMARKS tiny\n       1 !NATOM\n       1 SEG      1 LIG  C1   C       0.000000       12.0110           0\n       0 !NBOND: bonds\n").unwrap();
+        fs::write(
+            &pdb,
+            "HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n",
+        )
+        .unwrap();
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().into_owned();
+        app.open_current_path(&mut camera);
+        let original = app.state.active_scene().unwrap();
+        let history = app.undo_stack.len();
+        app.state.put_config_value("files:drop-target", "new");
+        app.handle_window_event(&WindowEvent::DroppedFile(coor.clone()), &mut camera);
+        app.handle_window_event(&WindowEvent::DroppedFile(pdb.clone()), &mut camera);
+        app.file_drop_batch = None;
+        assert_eq!(app.state.active_scene(), Some(original));
+        assert_eq!(app.state.active_object_summaries().len(), 1);
+        assert_eq!(app.undo_stack.len(), history);
+        assert_eq!(app.pending_file_opens.len(), 1);
+        let draft = app.renderer_setup_draft.take().unwrap();
+        let NativeRendererSetupAction::OpenPathInBatch { path, batch, .. } = draft.action else {
+            panic!("deferred batch");
+        };
+        assert!(batch.borrow().scene().is_none());
+        let options = crate::GuiNamdCoorReaderOptions {
+            topology_path: psf.to_string_lossy().into_owned(),
+        };
+        let setup = crate::GuiRendererSetup {
+            object_name: "coordinates".into(),
+            renderer_type: "auto".into(),
+            renderer_name: "auto1".into(),
+            selection: None,
+            recenter: true,
+            map_center_policy: None,
+        };
+        app.open_path_with_renderer_setup_in_batch(
+            path,
+            draft.target,
+            NativeFileReaderOptions {
+                molecule: None,
+                namd_coor: Some(&options),
+                amber_prmtop: None,
+                density_map: None,
+                msms: None,
+            },
+            setup,
+            &mut camera,
+            Some(&mut batch.borrow_mut()),
+        );
+        let destination = app.state.active_scene().unwrap();
+        assert_ne!(destination, original);
+        assert_eq!(batch.borrow().scene(), Some(destination));
+        app.process_pending_file_opens(&mut camera);
+        assert_eq!(app.state.active_scene(), Some(destination));
+        assert_eq!(app.state.active_object_summaries().len(), 2);
+        let molecule = app
+            .state
+            .scene_manager()
+            .object(app.state.active_object_summaries()[0].uid)
+            .unwrap();
+        assert_eq!(
+            molecule.mol().atoms()[0].position,
+            Vector4::new3(1.25, -2.5, 3.75)
+        );
+        app.undo(&mut camera);
+        assert_eq!(app.state.active_object_summaries().len(), 1);
+        app.undo(&mut camera);
+        assert_eq!(app.state.active_scene(), Some(original));
+        assert_eq!(app.state.active_object_summaries().len(), 1);
+        app.handle_window_event(&WindowEvent::DroppedFile(coor), &mut camera);
+        app.handle_window_event(&WindowEvent::DroppedFile(pdb), &mut camera);
+        app.file_drop_batch = None;
+        app.renderer_setup_draft = None;
+        app.process_pending_file_opens(&mut camera);
+        assert_ne!(app.state.active_scene(), Some(original));
+        assert_eq!(app.state.active_object_summaries().len(), 1);
+        assert!(app.pending_file_opens.is_empty());
+    }
+
+    #[test]
+    fn native_file_drop_cancels_deferred_companions_after_scene_switch() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("frame.coor");
+        let mut bytes = 1i32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&[0; 24]);
+        fs::write(&path, bytes).unwrap();
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        for _ in 0..2 {
+            app.handle_window_event(&WindowEvent::DroppedFile(path.clone()), &mut camera);
+        }
+        assert!(app.renderer_setup_draft.is_some());
+        assert_eq!(app.pending_file_opens.len(), 1);
+        app.state.new_scene("Other", true);
+        app.process_pending_file_opens(&mut camera);
+        assert!(app.renderer_setup_draft.is_none());
+        assert!(app.pending_file_opens.is_empty());
+        assert!(app.state.active_object_summaries().is_empty());
+        assert!(app.undo_stack.is_empty());
+    }
+
+    #[test]
     fn native_file_drop_loads_coordinates() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("dropped.pdb");
@@ -38292,6 +38712,27 @@ mod tests {
             setup.reader_options.as_ref().map(|options| options.kind),
             Some(crate::GuiMoleculeReaderKind::Pdb)
         );
+    }
+
+    #[test]
+    fn native_optional_file_setup_defers_molecule_loading_without_changing_fast_open() {
+        let path =
+            std::env::temp_dir().join(format!("cuemol-optional-file-{}.pdb", std::process::id()));
+        fs::write(&path, "ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n").unwrap();
+        let mut app = GuiApplication::new();
+        app.open_path = path.to_string_lossy().into_owned();
+        let mut camera = CameraController::default();
+        app.request_open_current_path_with_options(&mut camera, true);
+        assert!(app.state.active_object_summaries().is_empty());
+        assert!(app.undo_stack.is_empty());
+        let draft = app.renderer_setup_draft.take().unwrap();
+        assert_eq!(draft.renderer_type, "auto");
+        assert!(draft.reader_options.is_some());
+        app.request_open_current_path(&mut camera);
+        assert!(app.renderer_setup_draft.is_none());
+        assert_eq!(app.state.active_object_summaries().len(), 1);
+        assert_eq!(app.undo_stack.len(), 1);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

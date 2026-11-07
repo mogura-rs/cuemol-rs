@@ -1,5 +1,49 @@
 # Validation evidence
 
+## Browser reader options and native deferred imports
+
+Native egui and the browser now expose optional file setup. The browser dialog
+covers PDB/mmCIF flags, renderer/preset selection and names, selection, map-center
+policies, CCP4 strides/kinds/limits, MTZ columns and companion files. Required
+NAMD/MSMS companions open the dialog automatically. AMBER companions are optional.
+Worker metadata and parsed results are guarded by request generation and source
+scene. Invalid reader/renderer choices roll back the load and batch destination;
+successful imports form one history entry. Native reader sections now collapse
+and reset, and action buttons stay outside their scroll area.
+
+The native drop/startup queue retains its batch while a companion dialog is
+open. Ordinary molecules still load immediately. Maps now receive a contour
+renderer and the shared Auto policy. Cancelling options skips that file, and
+changing scenes discards the pending companion batch. Tests cover preserved
+first destinations, no insertion before acceptance, cancellation, stale scene
+changes, map renderers and undo/redo.
+
+All 184 default-feature shared-core tests pass, including the load-failure
+integration tests. The native suite passes 212 cases; the later stale-scene
+regression passes with all six focused drop cases. The rebuilt browser passes
+23 reader/loading/destination cases across WebGL/WebGPU. Three MTZ cases also pass after the compressed-reader follow-up, including
+column selection, map creation and one-step history. The real Linux XDND check
+confirms renderer creation, EM centering, visible contour pixels, one-step
+Undo/Redo and deferred companions. Native companion and browser molecule/map screenshots were inspected.
+
+CCP4 inspection reads its bounded header. Uncompressed MTZ inspection skips the
+reflection body. Compressed MTZ metadata decodes twice and retains the prefix
+and header tail; six MTZ unit tests cover gzip/bzip2/xz, metadata, full read parity
+and truncated streams. A browser regression inspects a compressed MTZ containing
+a 64 MiB decoded reflection region while keeping WASM linear memory below that
+size. Compressed CIF inspection discards preamble chunks and recognizes table
+tags across chunk boundaries. The sampled CCP4 transfer test also checks the
+actual stored grid dimension.
+
+The previous guide said browser reader options were unfinished; the new guide
+describes the implemented controls and companion behavior. The earlier drop
+checks covered molecules and surfaces, so they missed maps inserted without a
+renderer and companion files bypassing setup. This audit also found compressed
+MTZ metadata and direct reads using raw bytes; both now handle compression. A
+load-failure test literal had missed the earlier map-center policy field and now
+compiles with the complete shared-core suite. Renderer history by object class
+and the remaining dialog comparisons stay open.
+
 ## Shared file-open map centering
 
 Native egui and Tauri now offer Auto, keep-view and fit-map policies. Auto

@@ -82,3 +82,6 @@ pub mod view;
 
 #[cfg(feature = "egui")]
 pub mod settings;
+
+#[cfg(feature = "egui")]
+pub mod file_options;

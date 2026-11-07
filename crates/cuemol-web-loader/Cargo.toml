@@ -9,6 +9,9 @@ crate-type = ["cdylib", "rlib"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 cuemol-desktop-core.workspace = true
+cuemol-core.workspace = true
+cuemol-xtal.workspace = true
+serde_json = "1"
 wasm-bindgen = "0.2"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }

@@ -59,10 +59,24 @@ it does not require filesystem paths.
 
 ### Reader options
 
-The native egui and Tauri file dialogs accept an optional AMBER coordinate file
-when opening a topology. An empty coordinate path loads topology only. Linked
-and embedded QSC saves retain loaded coordinates; linked AMBER sources preserve
-the companion path and compression setting.
+Native egui and the browser provide **File > Open with options…** for reader
+settings, object/renderer names, renderer types or presets, selection and view
+centering. Ordinary molecule opens keep their immediate automatic display.
+Tauri presents its existing setup dialog for supported object files. Native and
+browser reader sections can be collapsed and reset; their action buttons remain
+outside the scrolling content.
+
+The dialogs accept optional AMBER coordinates when opening a topology. An empty
+coordinate choice loads topology only. NAMD coordinates require a PSF topology;
+MSMS faces/vertices require the matching companion. The browser uses a second
+file chooser for companions and opens these required options automatically.
+Native drops and file-manager opens wait for companion options before advancing
+the batch. Cancellation leaves that file unloaded. Switching scenes cancels the
+pending native/browser dialog and its remaining batch.
+
+Linked and embedded native QSC saves retain loaded AMBER coordinates; linked
+sources preserve the companion path and compression setting. Browser scene
+exports embed the loaded coordinates or surface so they remain portable.
 
 CCP4/MRC dialogs display the probed grid size and estimated quantized storage at
 the selected stride. They suggest a stride for large maps and offer Auto,
@@ -71,8 +85,12 @@ survive QSC save/reload. Map centering defaults to Auto: EM maps fit the whole
 volume, while crystallographic maps keep the current view and place the display
 region at its center. Explicit keep-view and fit-map choices override that
 default. Fitting uses the loaded map bounds and viewport aspect ratio.
-The browser currently uses default reader options;
-its equivalent file-options interface remains under implementation.
+These controls also apply to browser imports. Map inspection reads only the
+CCP4/MRC header; uncompressed MTZ inspection reads the prefix and header tail.
+Compressed MTZ inspection decodes the stream twice while retaining only metadata.
+It still reads the compressed input file. CIF inspection scans through long
+preambles without retaining the decoded body. The parser worker is cancelled
+when a request is superseded and releases its memory after idle retirement.
 
 ### Saved cameras
 
@@ -326,7 +344,7 @@ The native and browser frontends share the pane and editor.
 ### Density maps and volumes
 
 CCP4/MRC density maps support header inspection, strict grid subsampling and
-voxel limits through `CCP4MapReader` and the desktop file dialogs. Native reads
+voxel limits through `CCP4MapReader` and all three frontend file dialogs. Native reads
 use a row buffer and quantized voxel storage; compressed files spool to a
 temporary seekable file. MRC origins and crystallographic/EM map-kind evidence
 are preserved. QDF/QSC saves retain the reader's quantization range.

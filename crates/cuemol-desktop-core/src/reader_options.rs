@@ -123,10 +123,10 @@ impl GuiMapHeader {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn topology() -> String {
+    pub(crate) fn topology() -> String {
         let mut pointers = [0; 31];
         pointers[0] = 1;
         pointers[11] = 1;
@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(serde_json::to_string(&GuiMapType::Em).unwrap(), "\"em\"");
     }
 
-    fn test_map_bytes() -> Vec<u8> {
+    pub(crate) fn test_map_bytes() -> Vec<u8> {
         let mut bytes = vec![0u8; 1024];
         for (word, value) in [
             (0, 2i32),

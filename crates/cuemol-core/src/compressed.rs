@@ -18,6 +18,11 @@ pub fn copy_to(path: impl AsRef<Path>, output: &mut impl Write, limit: u64) -> R
     copy_decoded(BufReader::new(std::fs::File::open(path)?), output, limit)
 }
 
+/// Stream decoded in-memory bytes without collecting the decoded body.
+pub fn copy_bytes_to(bytes: &[u8], output: &mut impl Write, limit: u64) -> Result<u64> {
+    copy_decoded(Cursor::new(bytes), output, limit)
+}
+
 fn copy_decoded(mut input: impl BufRead, output: &mut impl Write, limit: u64) -> Result<u64> {
     let header = input.fill_buf()?;
     let limit = if limit == 0 { u64::MAX } else { limit };

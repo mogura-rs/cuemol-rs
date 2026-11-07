@@ -6,21 +6,33 @@ pub(super) enum Source {
         web_sys::File,
         Option<Rc<RefCell<cuemol_desktop_core::FileOpenBatch>>>,
     ),
+    Options(
+        web_sys::File,
+        Option<Rc<RefCell<cuemol_desktop_core::FileOpenBatch>>>,
+    ),
     Camera(web_sys::File, String),
     Pdb(cuemol_command::pdb::DownloadFile),
+}
+
+pub(super) struct PendingOptions {
+    file: web_sys::File,
+    dialog: cuemol_ui::file_options::FileOptions,
+    pub(super) companion: Option<web_sys::File>,
 }
 
 impl Source {
     fn name(&self) -> String {
         match self {
-            Self::File(file, _) | Self::Camera(file, _) => file.name(),
+            Self::File(file, _) | Self::Options(file, _) | Self::Camera(file, _) => file.name(),
             Self::Pdb(file) => file.filename.clone(),
         }
     }
 
     async fn open(self, signal: Option<web_sys::AbortSignal>) -> Result<web_sys::File, JsValue> {
         let download = match self {
-            Self::File(file, _) | Self::Camera(file, _) => return Ok(file),
+            Self::File(file, _) | Self::Options(file, _) | Self::Camera(file, _) => {
+                return Ok(file)
+            }
             Self::Pdb(download) => download,
         };
         let options = web_sys::RequestInit::new();
@@ -46,6 +58,14 @@ impl Source {
 extern "C" {
     #[wasm_bindgen(catch, js_namespace=cuemolLoader, js_name=parseFile)]
     async fn parse_file(file: web_sys::File, pdb_kind: Option<String>) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(catch, js_namespace=cuemolLoader, js_name=inspectFile)]
+    async fn inspect_file(file: web_sys::File) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(catch, js_namespace=cuemolLoader, js_name=parseFileWithOptions)]
+    async fn parse_file_options(
+        file: web_sys::File,
+        options: String,
+        companion: Option<web_sys::File>,
+    ) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_namespace=cuemolLoader, js_name=cancel)]
     fn cancel_worker();
 }
@@ -78,6 +98,9 @@ impl App {
         self.source_queue.clear();
         self.source_pdb = None;
         self.source_batch = None;
+        self.source_setup = None;
+        self.source_target = None;
+        self.source_options = None;
         if self.source_active {
             self.busy = false;
         }
@@ -157,10 +180,30 @@ impl App {
         let extension = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         self.message = format!("Loading {name}…");
         self.source_batch = None;
+        self.source_setup = None;
+        self.source_target = None;
         let (file, camera_replace) = match source {
             Source::File(file, batch) => {
                 self.source_batch = batch;
+                let plain = file.name().to_ascii_lowercase();
+                let plain = plain
+                    .strip_suffix(".gz")
+                    .or_else(|| plain.strip_suffix(".bz2"))
+                    .or_else(|| plain.strip_suffix(".xz"))
+                    .unwrap_or(&plain);
+                if [".coor", ".face", ".vert"]
+                    .iter()
+                    .any(|suffix| plain.ends_with(suffix))
+                {
+                    self.inspect_file_options(file, generation);
+                    return;
+                }
                 (file, None)
+            }
+            Source::Options(file, batch) => {
+                self.source_batch = batch;
+                self.inspect_file_options(file, generation);
+                return;
             }
             Source::Camera(file, name) => (file, Some(name)),
             remote => {
@@ -238,7 +281,149 @@ impl App {
         }
     }
 
+    fn inspect_file_options(&mut self, file: web_sys::File, generation: u64) {
+        self.message = format!("Reading options for {}…", file.name());
+        spawn_local(async move {
+            let result = async {
+                let info = inspect_file(file.clone()).await.map_err(js_error)?;
+                serde_json::from_str(
+                    &info
+                        .as_string()
+                        .ok_or_else(|| "Invalid file metadata response".to_string())?,
+                )
+                .map_err(|error| error.to_string())
+            }
+            .await;
+            enqueue(Event::FileOptions(generation, file, result));
+        });
+    }
+
+    pub(super) fn receive_file_options(
+        &mut self,
+        generation: u64,
+        file: web_sys::File,
+        result: Result<Option<cuemol_desktop_core::GuiFileOpenMetadata>, String>,
+    ) {
+        match result {
+            Ok(Some(metadata)) => {
+                let dialog =
+                    cuemol_ui::file_options::FileOptions::new(&file.name(), metadata, &self.state);
+                self.message = format!("Choose options for {}", file.name());
+                self.source_options = Some(PendingOptions {
+                    file,
+                    dialog,
+                    companion: None,
+                });
+                self.busy = false;
+            }
+            Ok(None) => {
+                self.source_active = false;
+                self.busy = false;
+                self.source_queue
+                    .push_front(Source::File(file, self.source_batch.take()));
+                self.start_next_source();
+            }
+            Err(error) => {
+                enqueue(Event::SourceError(generation, error));
+                enqueue(Event::SourceFinished(generation));
+            }
+        }
+    }
+
+    pub(super) fn file_options_ui(&mut self, ctx: &egui::Context) {
+        let Some(mut pending) = self.source_options.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut action = None;
+        egui::Window::new("Open file options")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(460.)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.label(pending.file.name());
+                egui::ScrollArea::vertical()
+                    .max_height((ctx.content_rect().height() - 150.).max(200.))
+                    .show(ui, |ui| {
+                        action = pending.dialog.show(
+                            ui,
+                            pending
+                                .companion
+                                .as_ref()
+                                .map(|file| file.name())
+                                .as_deref(),
+                        );
+                    });
+                action = pending
+                    .dialog
+                    .footer(
+                        ui,
+                        pending
+                            .companion
+                            .as_ref()
+                            .map(|file| file.name())
+                            .as_deref(),
+                    )
+                    .or(action);
+            });
+        self.ui_rects.extend(pending.dialog.rects.clone());
+        use cuemol_ui::file_options::Action;
+        if !open {
+            action = Some(Action::Cancel);
+        }
+        match action {
+            Some(Action::Open) => {
+                self.source_setup = Some(pending.dialog.setup);
+                self.source_target = Some(pending.dialog.metadata.target);
+                let reader = pending.dialog.metadata.reader;
+                let name = pending.file.name();
+                self.busy = true;
+                self.message = format!("Loading {name}…");
+                self.start_prepared_source_options(
+                    Source::File(pending.file, None),
+                    name,
+                    self.source_generation,
+                    Some((reader, pending.companion)),
+                );
+            }
+            Some(Action::Cancel) => {
+                self.message = format!("Skipped {}", pending.file.name());
+                enqueue(Event::SourceFinished(self.source_generation));
+            }
+            Some(Action::ChooseCompanion) => {
+                if let Some(input) = web_sys::window()
+                    .and_then(|window| window.document())
+                    .and_then(|document| document.get_element_by_id("companion-file"))
+                {
+                    let _ =
+                        input.set_attribute("data-generation", &self.source_generation.to_string());
+                }
+                choose_file_input("companion-file");
+                self.source_options = Some(pending);
+            }
+            Some(Action::ClearCompanion) => {
+                pending.companion = None;
+                self.source_options = Some(pending);
+            }
+            None => self.source_options = Some(pending),
+        }
+    }
+
     fn start_prepared_source(&mut self, source: Source, name: String, generation: u64) {
+        self.start_prepared_source_options(source, name, generation, None);
+    }
+
+    fn start_prepared_source_options(
+        &mut self,
+        source: Source,
+        name: String,
+        generation: u64,
+        options: Option<(
+            cuemol_desktop_core::GuiFileReaderOptions,
+            Option<web_sys::File>,
+        )>,
+    ) {
         self.source_pdb = match &source {
             Source::Pdb(file) => Some(file.clone()),
             _ => None,
@@ -271,7 +456,17 @@ impl App {
         spawn_local(async move {
             let result = async {
                 let file = source.open(signal).await.map_err(js_error)?;
-                let data = parse_file(file, pdb_kind).await.map_err(js_error)?;
+                let data = if let Some((options, companion)) = options {
+                    parse_file_options(
+                        file,
+                        serde_json::to_string(&options).map_err(|error| error.to_string())?,
+                        companion,
+                    )
+                    .await
+                } else {
+                    parse_file(file, pdb_kind).await
+                }
+                .map_err(js_error)?;
                 PreparedFile::decode(&js_sys::Uint8Array::new(&data).to_vec())
                     .map_err(|error| error.to_string())
             }
@@ -294,6 +489,10 @@ impl App {
         let style_name = file.style_name();
         let previous_selection = self.selected;
         let before = self.capture_history();
+        let batch_before = self
+            .source_batch
+            .as_ref()
+            .map(|batch| batch.borrow().clone());
         let _ = self.state.set_active_view_camera(&self.camera);
         let result = if let Some(batch) = &self.source_batch {
             batch.borrow_mut().open_prepared(&mut self.state, file)
@@ -301,6 +500,38 @@ impl App {
             self.state.open_prepared(file)
         }
         .and_then(|loaded| {
+            if let Some(setup) = &self.source_setup {
+                if self.source_target == Some(cuemol_desktop_core::GuiFileRendererTarget::Surface) {
+                    let scene = self
+                        .state
+                        .active_scene()
+                        .ok_or_else(|| cuemol_core::CueMolError::not_found("scene"))?;
+                    let surface = self
+                        .state
+                        .surface_summaries(scene)
+                        .last()
+                        .cloned()
+                        .ok_or_else(|| cuemol_core::CueMolError::not_found("loaded surface"))?;
+                    self.state
+                        .rename_surface(surface.uid, setup.object_name.clone())?;
+                    for renderer in &surface.renderers {
+                        self.state
+                            .destroy_surface_renderer(surface.uid, renderer.uid)?;
+                    }
+                    let renderer = self.state.add_surface_renderer(surface.uid)?;
+                    self.state.rename_surface_renderer(
+                        surface.uid,
+                        renderer,
+                        setup.renderer_name.clone(),
+                    )?;
+                } else {
+                    self.state.configure_loaded_bytes(
+                        &loaded,
+                        setup,
+                        Some(self.camera.center()),
+                    )?;
+                }
+            }
             if let Some(download) = &self.source_pdb {
                 cuemol_command::pdb::configure_downloaded(
                     &mut self.state,
@@ -356,12 +587,45 @@ impl App {
                     self.playing = false;
                     self.camera = self.state.active_view_camera().unwrap_or_default();
                 } else if self.source_pdb.is_none() {
-                    self.fit(false);
+                    if let GuiLoadedPath::Map { scene_uid, map_uid } = loaded {
+                        let policy = self
+                            .source_setup
+                            .as_ref()
+                            .and_then(|setup| setup.map_center_policy)
+                            .unwrap_or_default();
+                        let mut view = cuemol_qsys::View::new(Uid::new(1), scene_uid);
+                        view.set_camera(&self.camera);
+                        let size = self
+                            .ui_rects
+                            .get("Viewport")
+                            .copied()
+                            .unwrap_or([0., 0., 800., 600.]);
+                        view.set_view_size(size[2].max(1.) as u32, size[3].max(1.) as u32);
+                        if let Err(error) = self.state.apply_density_map_center_policy(
+                            map_uid,
+                            &[],
+                            policy,
+                            &mut view,
+                        ) {
+                            self.message = error.to_string();
+                        }
+                        self.camera = view.camera();
+                        self.dirty = true;
+                    } else if self
+                        .source_setup
+                        .as_ref()
+                        .is_none_or(|setup| setup.recenter)
+                    {
+                        self.fit(false);
+                    }
                 }
                 self.message = format!("Loaded {name}");
             }
             Err(error) => {
                 self.restore_history(before);
+                if let (Some(batch), Some(previous)) = (&self.source_batch, batch_before) {
+                    *batch.borrow_mut() = previous;
+                }
                 if self.source_pdb.is_some() {
                     self.source_queue.clear();
                 }
@@ -399,7 +663,9 @@ impl App {
                     }
                 }
             }
-            Err(error) => self.message = error.to_string(),
+            Err(error) => {
+                self.message = error.to_string();
+            }
         }
     }
 }

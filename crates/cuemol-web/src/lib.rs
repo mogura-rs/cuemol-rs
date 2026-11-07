@@ -65,6 +65,13 @@ enum Event {
     ImportActions(String, String),
     Source(web_sys::File),
     Files(Vec<web_sys::File>, bool),
+    FilesWithOptions(Vec<web_sys::File>),
+    FileOptions(
+        u64,
+        web_sys::File,
+        Result<Option<cuemol_desktop_core::GuiFileOpenMetadata>, String>,
+    ),
+    CompanionFile(u64, web_sys::File),
     CameraFile(u64, web_sys::File, String, Option<String>),
     SourceFinished(u64),
     SourceError(u64, String),
@@ -118,6 +125,20 @@ pub fn open_files(files: js_sys::Array, dropped: bool) -> Result<(), JsValue> {
         .collect::<std::result::Result<Vec<_>, _>>()?;
     enqueue(Event::Files(files, dropped));
     Ok(())
+}
+
+#[wasm_bindgen]
+pub fn open_files_with_options(files: js_sys::Array) -> Result<(), JsValue> {
+    let files = files
+        .iter()
+        .map(|file| file.dyn_into::<web_sys::File>())
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    enqueue(Event::FilesWithOptions(files));
+    Ok(())
+}
+#[wasm_bindgen]
+pub fn choose_companion_file(file: web_sys::File, generation: f64) {
+    enqueue(Event::CompanionFile(generation as u64, file));
 }
 
 #[wasm_bindgen]
@@ -213,9 +234,12 @@ fn download_parts(name: &str, array: &js_sys::Array, mime: &str) -> Result<(), J
     Ok(())
 }
 fn choose_file() {
+    choose_file_input("files");
+}
+fn choose_file_input(id: &str) {
     if let Some(input) = web_sys::window()
         .and_then(|w| w.document())
-        .and_then(|d| d.get_element_by_id("files"))
+        .and_then(|d| d.get_element_by_id(id))
         .and_then(|e| e.dyn_into::<web_sys::HtmlInputElement>().ok())
     {
         input.click();
@@ -299,6 +323,9 @@ struct App {
     future: Vec<HistoryEntry>,
     trajectories: BTreeMap<Uid, BrowserTrajectoryGroup>,
     source_queue: VecDeque<loading::Source>,
+    source_options: Option<loading::PendingOptions>,
+    source_setup: Option<cuemol_desktop_core::GuiRendererSetup>,
+    source_target: Option<cuemol_desktop_core::GuiFileRendererTarget>,
     source_active: bool,
     source_generation: u64,
     source_scene: Option<Uid>,
@@ -508,6 +535,9 @@ impl App {
             future: Vec::new(),
             trajectories: BTreeMap::new(),
             source_queue: VecDeque::new(),
+            source_options: None,
+            source_setup: None,
+            source_target: None,
             source_active: false,
             source_generation: 0,
             source_scene: None,
@@ -942,12 +972,38 @@ impl App {
                         }
                     }
                 }
+                Event::FilesWithOptions(files) => {
+                    self.cancel_console(
+                        "File opened outside the console; remaining commands cancelled.",
+                    );
+                    let batch = Rc::new(RefCell::new(cuemol_desktop_core::FileOpenBatch::new(
+                        cuemol_desktop_core::FileOpenTarget::Active,
+                    )));
+                    for file in files {
+                        self.queue_request(loading::Source::Options(file, Some(batch.clone())));
+                    }
+                }
+                Event::FileOptions(generation, file, result) => {
+                    if self.current_source(generation) && self.validate_source_scene() {
+                        self.receive_file_options(generation, file, result);
+                    }
+                }
+                Event::CompanionFile(generation, file) => {
+                    if self.current_source(generation) {
+                        if let Some(pending) = self.source_options.as_mut() {
+                            pending.companion = Some(file);
+                        }
+                    }
+                }
                 Event::SourceFinished(generation) => {
                     if self.current_source(generation) {
                         self.source_active = false;
                         self.source_abort = None;
                         self.source_pdb = None;
                         self.source_batch = None;
+                        self.source_setup = None;
+                        self.source_target = None;
+                        self.source_options = None;
                         self.busy = false;
                         if self.source_queue.is_empty() {
                             self.source_scene = None;
@@ -1561,6 +1617,6 @@ impl eframe::App for App {
                 [rect.min.x, rect.min.y, rect.width(), rect.height()]
             })
             .collect();
-        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"geometryRevision":self.renderer.revision(),"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.trajectory_info().map_or(self.frame,|(_,_,frame)|frame),"busy":self.busy,"loading":self.source_active,"lastCommand":self.last_command,"agent":self.agent.status(),"ui":{"keyboardInput":ctx.wants_keyboard_input(),"clipboardScope":format!("{:?}",self.clipboard_focus.scope),"modal":self.pending_close.is_some(),"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
+        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"geometryRevision":self.renderer.revision(),"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.trajectory_info().map_or(self.frame,|(_,_,frame)|frame),"busy":self.busy,"loading":self.source_active,"lastCommand":self.last_command,"agent":self.agent.status(),"ui":{"keyboardInput":ctx.wants_keyboard_input(),"clipboardScope":format!("{:?}",self.clipboard_focus.scope),"modal":self.pending_close.is_some() || self.source_options.is_some(),"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
     }
 }
