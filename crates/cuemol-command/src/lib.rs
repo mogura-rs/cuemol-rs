@@ -22,6 +22,7 @@ mod view_commands;
 pub use downloads::{advance_fetch, load_fetched, prepare_fetch, FetchPlan};
 pub use view_commands::{prepare_current_view, PreparedCurrentView};
 pub mod hatch_editor;
+pub mod image_export;
 pub mod movie;
 pub mod navigation;
 mod nodes;

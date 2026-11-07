@@ -7,6 +7,8 @@ mod actions;
 mod clipboard;
 #[path = "gui_history.rs"]
 mod history;
+#[path = "gui_image_export.rs"]
+mod image_export;
 #[path = "gui_movie.rs"]
 mod movie;
 #[path = "navigation.rs"]
@@ -86,12 +88,6 @@ const ATOM_INTR_COLUMN_MIN_WIDTH: f32 = 72.0;
 const ATOM_INTR_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
 const MORPH_NAME_COLUMN_DEFAULT_WIDTH: f32 = 180.0;
 const MORPH_COLUMN_MIN_WIDTH: f32 = 100.0;
-const RENDER_PRESETS: &[(&str, u32, u32)] = &[
-    ("HD 720", 1280, 720),
-    ("Full HD", 1920, 1080),
-    ("Square 2K", 2048, 2048),
-    ("Print 4K", 3840, 2160),
-];
 const ANIMATION_MOVIE_FORMATS: &[(&str, &str)] = &[
     ("mov_h264", "QuickTime/H.264"),
     ("mov_h265", "QuickTime/H.265"),
@@ -1003,70 +999,7 @@ impl Default for NativeMdTrajectoryDraft {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NativePngUnit {
-    Pixel,
-    Millimeter,
-    Centimeter,
-    Inch,
-}
-
-impl NativePngUnit {
-    const ALL: [Self; 4] = [Self::Pixel, Self::Millimeter, Self::Centimeter, Self::Inch];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Pixel => "pixel",
-            Self::Millimeter => "mm",
-            Self::Centimeter => "cm",
-            Self::Inch => "inch",
-        }
-    }
-
-    fn preference_value(self) -> &'static str {
-        match self {
-            Self::Pixel => "px",
-            Self::Millimeter => "mm",
-            Self::Centimeter => "cm",
-            Self::Inch => "in",
-        }
-    }
-
-    fn from_preference(value: &str) -> Option<Self> {
-        match value.trim() {
-            "px" => Some(Self::Pixel),
-            "mm" => Some(Self::Millimeter),
-            "cm" => Some(Self::Centimeter),
-            "in" => Some(Self::Inch),
-            _ => None,
-        }
-    }
-}
-
-fn png_pixels_to_unit(pixels: u32, unit: NativePngUnit, dpi: u32) -> f64 {
-    let pixels = f64::from(pixels);
-    let dpi = f64::from(dpi.max(1));
-    match unit {
-        NativePngUnit::Pixel => pixels,
-        NativePngUnit::Millimeter => pixels / dpi * 25.4,
-        NativePngUnit::Centimeter => pixels / dpi * 2.54,
-        NativePngUnit::Inch => pixels / dpi,
-    }
-}
-
-fn png_unit_to_pixels(value: f64, unit: NativePngUnit, dpi: u32) -> u32 {
-    let dpi = f64::from(dpi.max(1));
-    let pixels = match unit {
-        NativePngUnit::Pixel => value,
-        NativePngUnit::Millimeter => value / 25.4 * dpi,
-        NativePngUnit::Centimeter => value / 2.54 * dpi,
-        NativePngUnit::Inch => value * dpi,
-    };
-    if !pixels.is_finite() || pixels <= 0.0 {
-        return 1;
-    }
-    pixels.round().clamp(1.0, f64::from(u32::MAX)) as u32
-}
+use cuemol_ui::image_export::{png_pixels_to_unit, png_unit_to_pixels, Unit as NativePngUnit};
 
 #[derive(Debug, Clone)]
 struct NativePovRenderSettings {
@@ -1132,13 +1065,10 @@ impl Default for NativePovRenderSettings {
 #[derive(Debug, Clone)]
 struct NativePngExportDraft {
     path: PathBuf,
-    width: u32,
-    height: u32,
-    aspect: f64,
-    resolution_dpi: u32,
-    unit: NativePngUnit,
-    retain_aspect: bool,
-    transparent: bool,
+    target: cuemol_command::image_export::ImageExportTarget,
+    kind: cuemol_command::image_export::ImageExportKind,
+    selection: String,
+    editor: cuemol_ui::image_export::ImageExportEditor,
 }
 
 #[derive(Debug, Clone)]
@@ -1335,6 +1265,7 @@ struct GuiApplication {
     md_trajectory_draft: Option<NativeMdTrajectoryDraft>,
     molecule_edits: cuemol_ui::molecule_edit::Dialogs,
     png_export_draft: Option<NativePngExportDraft>,
+    image_export_job: Option<image_export::ImageExportJob>,
     scene_save_draft: Option<NativeSceneSaveDraft>,
     new_tab_draft: Option<NativeNewTabDraft>,
     new_camera_draft: Option<NativeNewCameraDraft>,
@@ -1473,7 +1404,6 @@ struct GuiApplication {
     trajectory_selected_block: Option<usize>,
     trajectory_scrub_preview: Option<usize>,
     trajectory_append_nevery: usize,
-    render_preset: String,
     render_backend: String,
     umbreon_denoise: UmbreonDenoiseMode,
     ray_size: [u32; 2],
@@ -2398,7 +2328,6 @@ enum NativeFileDialog {
     SaveStyle,
     SaveRenderedImage,
     SaveRmsdReport,
-    ExportScene,
     ExportGeometry(cuemol_command::scene_export::SceneExportFormat),
     OpenScript,
 }
@@ -4643,6 +4572,7 @@ impl GuiApplication {
             md_trajectory_draft: None,
             molecule_edits: Default::default(),
             png_export_draft: None,
+            image_export_job: None,
             scene_save_draft: None,
             new_tab_draft: None,
             new_camera_draft: None,
@@ -4746,7 +4676,6 @@ impl GuiApplication {
             trajectory_selected_block: None,
             trajectory_scrub_preview: None,
             trajectory_append_nevery: 1,
-            render_preset: RENDER_PRESETS[1].0.to_string(),
             render_backend: "POV-Ray".to_string(),
             umbreon_denoise: UmbreonDenoiseMode::default(),
             ray_size: [1200, 900],
@@ -5166,6 +5095,7 @@ impl GuiApplication {
         self.poll_apbs_calculation(camera);
         self.poll_pov_render();
         self.poll_native_render(ctx);
+        self.poll_image_export(ctx);
         self.pixels_per_point = ctx.pixels_per_point();
         cuemol_ui::shell::theme(ctx, self.light_theme);
         self.agent.docked = true;
@@ -5632,34 +5562,41 @@ impl GuiApplication {
                     }
                 });
                 ui.menu_button("Rendering", |ui| {
-                    if ui.button("Render image...").clicked() {
+                    if ui.button("Image rendering...").clicked() {
                         self.request_native_render(false);
                         ui.close();
                     }
-                    if ui.button("POV-Ray rendering...").clicked() {
-                        self.open_pov_render_tool();
-                        ui.close();
-                    }
-                    if ui.button("Animation rendering...").clicked() {
+                    if ui.button("Movie rendering...").clicked() {
                         self.request_native_render(true);
                         ui.close();
                     }
-                    if ui.button("Export scene...").clicked() {
-                        self.choose_export_scene(camera);
-                        ui.close();
-                    }
-                    ui.menu_button("Export geometry", |ui| {
+                    ui.menu_button("Export scene", |ui| {
+                        for (label, kind) in [
+                            (
+                                "PNG image...",
+                                cuemol_command::image_export::ImageExportKind::Png,
+                            ),
+                            (
+                                "Umbreon ray-traced image...",
+                                cuemol_command::image_export::ImageExportKind::Umbreon,
+                            ),
+                        ] {
+                            if ui.button(label).clicked() {
+                                self.choose_export_image(camera, kind);
+                                ui.close();
+                            }
+                        }
                         for (label, format) in [
                             (
-                                "POV-Ray SDL",
+                                "POV-Ray SDL...",
                                 cuemol_command::scene_export::SceneExportFormat::Pov,
                             ),
                             (
-                                "StereoLithography",
+                                "STL...",
                                 cuemol_command::scene_export::SceneExportFormat::Stl,
                             ),
                             (
-                                "Metasequoia object",
+                                "Metasequoia (MQO)...",
                                 cuemol_command::scene_export::SceneExportFormat::Mqo,
                             ),
                         ] {
@@ -16371,42 +16308,6 @@ impl GuiApplication {
         }
     }
 
-    fn choose_export_scene(&mut self, camera: &CameraController) {
-        if let Some(path) = native_file_dialog(NativeFileDialog::ExportScene, &self.export_path) {
-            self.export_path = path.to_string_lossy().into_owned();
-            if crate::DesktopAppState::path_has_extension(&self.export_path, "png") {
-                if !self.persist_export_camera(camera) {
-                    return;
-                }
-                self.open_png_export_dialog(path);
-            } else {
-                self.export_current_scene(camera);
-            }
-        }
-    }
-
-    fn open_png_export_dialog(&mut self, path: PathBuf) {
-        let (width, height) = self
-            .viewport_rect
-            .map(|rect| {
-                (
-                    (rect.width().round() as u32).max(1),
-                    (rect.height().round() as u32).max(1),
-                )
-            })
-            .unwrap_or((1280, 960));
-        self.png_export_draft = Some(NativePngExportDraft {
-            path,
-            width,
-            height,
-            aspect: f64::from(width) / f64::from(height),
-            resolution_dpi: 150,
-            unit: NativePngUnit::Pixel,
-            retain_aspect: true,
-            transparent: false,
-        });
-    }
-
     fn open_molecule_edit(&mut self, kind: cuemol_ui::molecule_edit::Kind) {
         self.molecule_edits
             .open(kind, &self.state, self.selected_object);
@@ -17395,106 +17296,6 @@ impl GuiApplication {
                 self.set_status(format!("Loaded view {}", path.to_string_lossy()));
             }
             Err(error) => self.set_error(error),
-        }
-    }
-
-    fn render_dimensions(&self) -> (u32, u32) {
-        RENDER_PRESETS
-            .iter()
-            .find(|(label, _, _)| *label == self.render_preset)
-            .map(|(_, width, height)| (*width, *height))
-            .unwrap_or((1920, 1080))
-    }
-
-    fn persist_export_camera(&mut self, camera: &CameraController) -> bool {
-        let camera = camera.to_qsys_camera("__current");
-        if self.state.active_view_summary().is_some()
-            && self
-                .state
-                .set_active_view_camera(&camera)
-                .inspect_err(|error| self.set_error(error.clone()))
-                .is_err()
-        {
-            return false;
-        }
-        match self.state.set_active_scene_camera(camera) {
-            Ok(()) => true,
-            Err(error) => {
-                self.set_error(error);
-                false
-            }
-        }
-    }
-
-    fn export_current_scene(&mut self, camera: &CameraController) {
-        let path = PathBuf::from(self.export_path.trim());
-        if let Ok(format) = cuemol_command::scene_export::SceneExportFormat::parse(
-            path.extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or(""),
-        ) {
-            self.write_geometry_scene(camera, &path, format);
-            return;
-        }
-        if !self.persist_export_camera(camera) {
-            return;
-        }
-        let path = self.export_path.trim().to_string();
-        if self.render_backend == "Umbreon" {
-            if !crate::DesktopAppState::path_has_extension(&path, "png") {
-                self.set_status("Umbreon output path must use the .png extension");
-                return;
-            }
-            let Some(scene_uid) = self.state.active_scene() else {
-                self.set_status("No active scene");
-                return;
-            };
-            let (width, height) = self.render_dimensions();
-            let mut exporter = UmbreonSceneExporter::new();
-            exporter.scene_mut().attach(scene_uid);
-            exporter.handler_mut().set_path(&path);
-            exporter.set_width(width.min(i32::MAX as u32) as i32);
-            exporter.set_height(height.min(i32::MAX as u32) as i32);
-            exporter.set_denoise_mode(self.umbreon_denoise);
-            match self
-                .state
-                .write_umbreon_exporter(&mut exporter, &self.selection_text)
-            {
-                Ok(_) => {
-                    self.set_status(format!("Rendered {width}x{height} Umbreon image to {path}"))
-                }
-                Err(error) => self.set_error(error),
-            }
-            return;
-        }
-
-        // Scene export remains extension-driven outside the Umbreon render
-        // backend: PNG uses the live wgpu path and other paths use POV-Ray.
-        if crate::DesktopAppState::path_has_extension(&path, "png") {
-            let (width, height) = self
-                .viewport_rect
-                .map(|rect| {
-                    (
-                        (rect.width().round() as u32).max(1),
-                        (rect.height().round() as u32).max(1),
-                    )
-                })
-                .unwrap_or((1280, 960));
-            match self
-                .state
-                .export_active_scene_png(&path, width, height, &self.selection_text)
-            {
-                Ok(()) => self.set_status(format!("Exported {width}x{height} image to {path}")),
-                Err(error) => self.set_error(error),
-            }
-        } else {
-            match self
-                .state
-                .export_active_scene_pov(&path, &self.selection_text)
-            {
-                Ok(count) => self.set_status(format!("Exported {count} atoms to {path}")),
-                Err(error) => self.set_error(error),
-            }
         }
     }
 
@@ -25276,148 +25077,6 @@ impl GuiApplication {
         }
     }
 
-    fn png_export_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut draft) = self.png_export_draft.take() else {
-            return;
-        };
-        let mut open = true;
-        let mut accept = false;
-        let mut cancel = false;
-        egui::Window::new("PNG options")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(360.0)
-            .show(ctx, |ui| {
-                ui.strong("Image size");
-                egui::Grid::new("png_export_size")
-                    .num_columns(2)
-                    .spacing([12.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.label("Resolution (DPI):");
-                        egui::ComboBox::from_id_salt("png_export_dpi")
-                            .selected_text(draft.resolution_dpi.to_string())
-                            .show_ui(ui, |ui| {
-                                for dpi in [72, 150, 300, 600] {
-                                    ui.selectable_value(
-                                        &mut draft.resolution_dpi,
-                                        dpi,
-                                        dpi.to_string(),
-                                    );
-                                }
-                            });
-                        ui.end_row();
-
-                        ui.label("Unit:");
-                        egui::ComboBox::from_id_salt("png_export_unit")
-                            .selected_text(draft.unit.label())
-                            .show_ui(ui, |ui| {
-                                for unit in NativePngUnit::ALL {
-                                    ui.selectable_value(&mut draft.unit, unit, unit.label());
-                                }
-                            });
-                        ui.end_row();
-
-                        ui.label("Width:");
-                        let mut width =
-                            png_pixels_to_unit(draft.width, draft.unit, draft.resolution_dpi);
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut width)
-                                    .range(0.01..=100_000.0)
-                                    .speed(if draft.unit == NativePngUnit::Pixel {
-                                        1.0
-                                    } else {
-                                        0.1
-                                    }),
-                            )
-                            .changed()
-                        {
-                            draft.width =
-                                png_unit_to_pixels(width, draft.unit, draft.resolution_dpi).max(1);
-                            if draft.retain_aspect {
-                                draft.height =
-                                    (f64::from(draft.width) / draft.aspect).round().max(1.0) as u32;
-                            }
-                        }
-                        ui.end_row();
-
-                        ui.label("Height:");
-                        let mut height =
-                            png_pixels_to_unit(draft.height, draft.unit, draft.resolution_dpi);
-                        if ui
-                            .add_enabled(
-                                !draft.retain_aspect,
-                                egui::DragValue::new(&mut height)
-                                    .range(0.01..=100_000.0)
-                                    .speed(if draft.unit == NativePngUnit::Pixel {
-                                        1.0
-                                    } else {
-                                        0.1
-                                    }),
-                            )
-                            .changed()
-                        {
-                            draft.height =
-                                png_unit_to_pixels(height, draft.unit, draft.resolution_dpi).max(1);
-                        }
-                        ui.end_row();
-
-                        ui.label("Retain aspect ratio:");
-                        if ui.checkbox(&mut draft.retain_aspect, "").changed()
-                            && draft.retain_aspect
-                        {
-                            draft.height =
-                                (f64::from(draft.width) / draft.aspect).round().max(1.0) as u32;
-                        }
-                        ui.end_row();
-                    });
-                ui.separator();
-                ui.strong("Output");
-                ui.label(format!("Pixel size: {} x {}", draft.width, draft.height));
-                ui.checkbox(&mut draft.transparent, "Transparent PNG");
-                ui.weak(draft.path.to_string_lossy());
-                ui.separator();
-                ui.horizontal(|ui| {
-                    let valid = draft.width > 0
-                        && draft.height > 0
-                        && draft.resolution_dpi > 0
-                        && draft.path.file_name().is_some();
-                    if ui.add_enabled(valid, egui::Button::new("OK")).clicked() {
-                        accept = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                    }
-                });
-            });
-
-        if accept {
-            let options = crate::GuiPngExportOptions {
-                width: draft.width,
-                height: draft.height,
-                resolution_dpi: f64::from(draft.resolution_dpi),
-                transparent: draft.transparent,
-            };
-            match self.state.export_active_scene_png_with_options(
-                &draft.path,
-                options,
-                &self.selection_text,
-            ) {
-                Ok(()) => self.set_status(format!(
-                    "Exported {}x{} PNG at {} DPI to {}",
-                    draft.width,
-                    draft.height,
-                    draft.resolution_dpi,
-                    draft.path.display()
-                )),
-                Err(error) => self.set_error(error),
-            }
-        } else if open && !cancel {
-            self.png_export_draft = Some(draft);
-        }
-    }
-
     fn new_tab_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         let Some(mut draft) = self.new_tab_draft.take() else {
             return;
@@ -30248,16 +29907,6 @@ const STYLE_FILE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "Style file (*.xml)",
     extensions: &["xml"],
 }];
-const EXPORT_FILTERS: &[NativeFileFilter] = &[
-    NativeFileFilter {
-        label: "POV-Ray scene",
-        extensions: &["pov"],
-    },
-    NativeFileFilter {
-        label: "PNG image",
-        extensions: &["png"],
-    },
-];
 const RENDERED_IMAGE_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "PNG image",
     extensions: &["png"],
@@ -30412,12 +30061,6 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
             title: "Save RMSD info file",
             filters: RMSD_REPORT_SAVE_FILTERS,
             default_extension: Some("txt"),
-            save: true,
-        },
-        NativeFileDialog::ExportScene => NativeFileDialogSpec {
-            title: "Select a file to export",
-            filters: EXPORT_FILTERS,
-            default_extension: Some("pov"),
             save: true,
         },
         NativeFileDialog::ExportGeometry(format) => NativeFileDialogSpec {
@@ -32203,16 +31846,30 @@ mod tests {
             egui::vec2(900.0, 600.0),
         ));
         let path = PathBuf::from("viewport.png");
-        app.open_png_export_dialog(path.clone());
+        let camera = CameraController {
+            ortho_scale: 73.,
+            ..Default::default()
+        };
+        let before = app.state.clone();
+        app.open_png_export_dialog(
+            path.clone(),
+            &camera,
+            cuemol_command::image_export::ImageExportKind::Png,
+        );
+        assert!(app.state.same_undo_state(&before));
 
         let draft = app.png_export_draft.expect("PNG export draft");
         assert_eq!(draft.path, path);
-        assert_eq!((draft.width, draft.height), (900, 600));
-        assert_eq!(draft.resolution_dpi, 150);
-        assert_eq!(draft.unit, NativePngUnit::Pixel);
-        assert!(draft.retain_aspect);
-        assert!(!draft.transparent);
-        assert!((draft.aspect - 1.5).abs() < 1.0e-9);
+        assert_eq!(
+            draft.target.camera.zoom(),
+            camera.to_qsys_camera("__current").zoom()
+        );
+        assert_eq!((draft.editor.width, draft.editor.height), (900, 600));
+        assert_eq!(draft.editor.resolution_dpi, 150);
+        assert_eq!(draft.editor.unit, NativePngUnit::Pixel);
+        assert!(draft.editor.retain_aspect);
+        assert!(!draft.editor.transparent);
+        assert!((draft.editor.aspect - 1.5).abs() < 1.0e-9);
     }
 
     #[test]
@@ -32545,8 +32202,7 @@ mod tests {
             cuemol_command::scene_export::SceneExportFormat::Mqo,
         ] {
             let path = dir.path().join(format!("geometry.{}", format.extension()));
-            app.export_path = path.to_string_lossy().into_owned();
-            app.export_current_scene(&camera);
+            app.write_geometry_scene(&camera, &path, format);
             let expected = cuemol_command::scene_export::prepare_scene_export(
                 &app.state,
                 &camera.to_qsys_camera("__current"),

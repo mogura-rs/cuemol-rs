@@ -863,7 +863,8 @@ the mock Inspector retain separate values; only Reset clears a modified flag.
 
 ### Scene geometry export
 
-Rendering > Export geometry writes the visible scene as binary STL,
+Native egui uses Rendering > Export scene; Tauri and browser currently use
+Rendering > Export geometry. These menus write the visible scene as binary STL,
 Metasequoia MQO or POV-Ray SDL. These exports use the live camera and scene
 color proofing without changing the scene or its Undo history. The selected
 image-rendering backend does not change the geometry format.
@@ -873,6 +874,16 @@ Native applications use a save picker for the chosen format. Keep the generated
 with its geometry included; POV-Ray's standard include library is still needed
 to render it. STL and MQO downloads use the same shared serializers as the native
 application.
+
+For native egui image output, choose Rendering > Export scene > PNG image or
+Umbreon ray-traced image. Select the destination first, then set the dimensions,
+unit, DPI and transparency in PNG options. Both start from the viewport size,
+150 DPI and a locked aspect ratio. PNG uses wgpu; Umbreon uses the scene's
+Umbreon quality settings independently of its saved backend. Image generation
+runs in a worker and leaves the scene, saved cameras and Undo history unchanged.
+Cancel stops a running export; the destination is replaced only after a complete
+image is ready. Switching scenes while options are open retains the original
+target and camera, while deleting that target prevents the export.
 
 Browser Save PNG and `export_scene` with `format: "png"` use the GPU scene
 renderer, independently of the Rendering window's saved backend. PNG export

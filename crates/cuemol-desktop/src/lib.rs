@@ -11,6 +11,8 @@
 
 pub use cuemol_desktop_core::*;
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+mod image_job;
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 mod native_clipboard;
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]

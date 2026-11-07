@@ -87,6 +87,9 @@ pub mod settings;
 pub mod file_options;
 
 #[cfg(feature = "egui")]
+pub mod image_export;
+
+#[cfg(feature = "egui")]
 pub mod interaction;
 #[cfg(feature = "egui")]
 pub mod secondary;

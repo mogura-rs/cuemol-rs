@@ -558,17 +558,27 @@ pub fn prepare_umbreon_export(
     target: &Value,
     options: cuemol_desktop_core::GuiPngExportOptions,
 ) -> Result<PreparedRender> {
+    crate::image_export::ImageExportTarget::capture(state, camera, target)?
+        .prepare_umbreon(state, options)
+}
+
+pub(crate) fn prepare_umbreon_export_target(
+    state: &DesktopAppState,
+    target: &crate::image_export::ImageExportTarget,
+    options: cuemol_desktop_core::GuiPngExportOptions,
+) -> Result<PreparedRender> {
     options.validate()?;
-    let mut args = target.clone();
-    if !args.is_object() {
-        return Err(CueMolError::invalid_argument(
-            "image export target must be an object",
-        ));
-    }
+    let mut args = target.args();
     args["width"] = json!(options.width);
     args["height"] = json!(options.height);
     args["style"] = json!("umbreon");
-    prepare_render_inner(state, camera, "export_umbreon", &args, Some(options))
+    prepare_render_inner(
+        state,
+        &target.camera,
+        "export_umbreon",
+        &args,
+        Some((options, target)),
+    )
 }
 
 fn prepare_render_inner(
@@ -576,9 +586,13 @@ fn prepare_render_inner(
     camera: &Camera,
     name: &str,
     args: &Value,
-    image_export: Option<cuemol_desktop_core::GuiPngExportOptions>,
+    image_export: Option<(
+        cuemol_desktop_core::GuiPngExportOptions,
+        &crate::image_export::ImageExportTarget,
+    )>,
 ) -> Result<PreparedRender> {
     let (scene_uid, view_uid, camera) = render_target(state, camera, args)?;
+    let camera = image_export.map_or(camera, |(_, target)| target.camera.clone());
     let settings = crate::properties::scene_render_settings(state, scene_uid)?;
     let size = |key: &str, default: usize| -> Result<usize> {
         if !args[key].is_null() {
@@ -633,7 +647,7 @@ fn prepare_render_inner(
         None
     };
     let dpi = image_export
-        .map(|options| options.resolution_dpi)
+        .map(|(options, _)| options.resolution_dpi)
         .unwrap_or_else(|| {
             settings
                 .get("dpi")
@@ -676,7 +690,7 @@ fn prepare_render_inner(
         .and_then(Value::as_str)
         .map(|v| v == "perspective")
         .unwrap_or(camera.is_perspective());
-    if let Some(options) = image_export {
+    if let Some((options, _)) = image_export {
         params.perspective = camera.is_perspective();
         params.transparent_background = options.transparent;
     }
@@ -702,6 +716,9 @@ fn prepare_render_inner(
         .command_manager()
         .view(view_uid)
         .is_some_and(|view| view.swap_stereo_eyes());
+    if let Some((_, target)) = image_export {
+        params.swap_stereo_eyes = target.swap_stereo_eyes;
+    }
     let background = state.scene_background_color(scene_uid)?;
     let hatch = if npr {
         Some(hatch_params(&settings, prefix)?)
@@ -916,6 +933,22 @@ impl PreparedRender {
     }
 
     pub fn run_with_cancel(self, cancel: &std::sync::atomic::AtomicBool) -> Result<Value> {
+        let frame = self.render_frame(cancel)?;
+        self.encode(frame)
+    }
+
+    pub fn run_png_with_cancel(self, cancel: &std::sync::atomic::AtomicBool) -> Result<Vec<u8>> {
+        let frame = self.render_frame(cancel)?;
+        self.encode_png(&frame)
+    }
+
+    fn render_frame(
+        &self,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<cuemol_render::UmbreonFrame> {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(CueMolError::invalid_argument("Render cancelled"));
+        }
         let frame = match &self.backend {
             PreparedBackend::Umbreon {
                 snapshot,
@@ -937,7 +970,7 @@ impl PreparedRender {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(CueMolError::invalid_argument("Render cancelled"));
         }
-        self.encode(frame)
+        Ok(frame)
     }
 
     pub fn run(self) -> Result<Value> {
@@ -971,11 +1004,9 @@ impl PreparedRender {
         .await?;
         self.encode(frame)
     }
-    fn encode(self, frame: cuemol_render::UmbreonFrame) -> Result<Value> {
+    fn encode_png(&self, frame: &cuemol_render::UmbreonFrame) -> Result<Vec<u8>> {
         let width = frame.width;
         let height = frame.height;
-        #[cfg(not(target_arch = "wasm32"))]
-        let log = self.pov_progress().map(|progress| progress.text());
         let mut png = Vec::new();
         {
             let mut encoder = png::Encoder::new(&mut png, width as u32, height as u32);
@@ -998,6 +1029,15 @@ impl PreparedRender {
                 .write_image_data(&frame.pixels)
                 .map_err(|e| CueMolError::Io(e.to_string()))?;
         }
+        Ok(png)
+    }
+
+    fn encode(self, frame: cuemol_render::UmbreonFrame) -> Result<Value> {
+        let width = frame.width;
+        let height = frame.height;
+        let png = self.encode_png(&frame)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let log = self.pov_progress().map(|progress| progress.text());
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(path) = self.output {
             std::fs::write(&path, &png)?;

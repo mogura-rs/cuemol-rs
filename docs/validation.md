@@ -1,5 +1,34 @@
 # Validation evidence
 
+## Native image-export workflow
+
+The native export options previously stored the live camera before opening the
+dialog, so cancelling could still change scene state. Image export now retains
+the selected scene/view, camera, stereo order and selection separately. PNG and
+Umbreon have explicit entries under Rendering > Export scene. Both choose a
+destination before opening the shared PNG options form. Rendering runs in a
+worker, and a completed image replaces its destination atomically. Cancelling
+the options or worker preserves an existing file. Deleted targets are rejected;
+switching scenes does not retarget an export or restore old application state.
+
+All 237 native GUI tests pass, including actual options cancellation, captured
+camera/target behavior after a scene switch, worker output and preservation of
+existing files on cancellation. The shared command suite passes 99 cases with
+four explicit ignores. The Tauri suite passes 207 cases with six explicit ignores.
+The native CLI and optimized WASM builds pass, and both
+WebGL/WebGPU PNG export cases pass after the shared encoding changes.
+
+An actual Linux egui window also passes OS mouse/keyboard checks with real save
+pickers. Picker cancellation and options cancellation preserve scene, camera
+and history. Both menu choices save distinct 64-by-48 RGBA images with 150-DPI
+metadata and transparent backgrounds, despite a saved POV-Ray backend. Output
+pixels and the final window screenshot were inspected. The test environment
+needed GTK4 schemas compiled for its isolated Zenity fallback; this was a test
+environment repair, not an application change.
+
+The Tauri and browser interactive save/options workflows still need integration.
+The shared image target, encoder and options form are available for that work.
+
 ## Prepared PNG and Umbreon image exports
 
 The image-export audit found that the browser's PNG action selected the saved
@@ -37,9 +66,8 @@ Chromium processes using software WebGL measure the 96-by-64 export at
 unbatched diagnostic took 36.79 seconds in one process; it is a single diagnostic
 sample, not a platform-wide benchmark.
 
-These checks cover image preparation and output. The common save/options
-workflow, explicit image-export menu choices and native dialog cancellation
-audit remain open. Image sizes are validated against the 32-megapixel limit and
+These checks cover image preparation and output. Subsequent native workflow
+validation is recorded above. Image sizes are validated against the 32-megapixel limit and
 the active GPU's texture/buffer limits; this path does not yet tile oversized
 GPU exports.
 
