@@ -40,6 +40,45 @@ fn initial_state() -> (DesktopAppState, Camera) {
 }
 
 #[test]
+fn density_panel_creates_internal_unit_cell_without_changing_the_view() {
+    let (mut state, mut camera) = initial_state();
+    let scene = state.active_scene().unwrap();
+    let map = state.add_density_map(
+        scene,
+        "Grid",
+        cuemol_xtal::DensityMap::from_grid_map(cuemol_xtal::GridMap {
+            counts: [2, 2, 2],
+            origin: Vector4::ZERO,
+            delta: [
+                Vector4::new3(1., 0., 0.),
+                Vector4::new3(0., 1., 0.),
+                Vector4::new3(0., 0., 1.),
+            ],
+            values: vec![0.; 8],
+        }),
+    );
+    let before = camera.clone();
+    call_tool(
+        &mut state,
+        &mut camera,
+        "create_renderer",
+        &json!({"objId":map.get(),"rendererType":"*unitcell","name":"unitcell"}),
+    )
+    .unwrap();
+    assert_eq!(camera, before);
+    assert_eq!(
+        state
+            .density_map_summary(map)
+            .unwrap()
+            .renderers
+            .iter()
+            .filter(|renderer| renderer.renderer_type == "*unitcell")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn symmetry_unit_cell_supports_maps_and_reuses_the_existing_renderer() {
     let (mut state, mut camera) = initial_state();
     let before = camera.clone();

@@ -274,14 +274,15 @@ pub fn call_tool(
             let object=uid(args,"objId")?;
             let kind=text(args,if name=="create_renderer" {"rendererType"} else {"preset"})?;
             let target=cuemol_desktop_core::renderer_setup::Target::for_object(state,object)?;
-            let option=target.options.iter().find(|option|option.name==kind)
+            let preset=target.options.iter().find(|option|option.name==kind).map(|option|option.preset)
+                .or_else(|| (name=="create_renderer" && target.kind==cuemol_desktop_core::renderer_setup::Kind::Map && matches!(kind,"*unitcell"|"unitcell"|"gpu_mapmesh")).then_some(false))
                 .ok_or_else(||CueMolError::invalid_argument("incompatible renderer type"))?;
             let group=args["group"].as_str().map(str::trim).filter(|name|!name.is_empty());
             if let Some(group)=group {
-                if option.preset {return Err(CueMolError::invalid_argument("preset renderers cannot be nested in another group"));}
+                if preset {return Err(CueMolError::invalid_argument("preset renderers cannot be nested in another group"));}
                 if !target.groups.iter().any(|name|name==group) {return Err(CueMolError::not_found("renderer group in target object"));}
             }
-            if !option.preset && target.kind==cuemol_desktop_core::renderer_setup::Kind::Molecule {
+            if !preset && target.kind==cuemol_desktop_core::renderer_setup::Kind::Molecule {
                 if let Some(selection)=args["selection"].as_str() {state.parse_object_selector(object,selection)?;}
             }
             let label=args["name"].as_str().map(str::to_string).unwrap_or(state.suggest_renderer_name(target.scene,kind)?);
