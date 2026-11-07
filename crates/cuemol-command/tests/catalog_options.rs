@@ -78,6 +78,70 @@ fn new_renderer_framing_uses_its_selection_instead_of_the_current_molecule_selec
     assert_eq!([camera.center().x, camera.center().y], [4., 0.]);
 }
 
+#[test]
+fn renderer_creation_uses_short_preset_names_and_keeps_empty_geometry_view() {
+    let (mut state, mut camera, object) = fixture();
+    for index in 1..=2 {
+        let result = call_tool(
+            &mut state,
+            &mut camera,
+            "create_renderer",
+            &json!({
+                "objId":object.get(), "rendererType":"Default1RendPreset", "centerView":true,
+            }),
+        )
+        .unwrap();
+        assert_eq!(result["name"], format!("default1_{index}"));
+    }
+    let scene = state.active_scene().unwrap();
+    let style = state.create_scene_style(scene, "presets").unwrap();
+    state
+        .update_scene_style(
+            scene,
+            style,
+            "presets",
+            false,
+            r#"<styles id="presets"><style id="CustomShort" type="MolCoord-rendpreset"/></styles>"#,
+        )
+        .unwrap();
+    assert_eq!(
+        state.suggest_renderer_name(scene, "CustomShort").unwrap(),
+        "customshort_1"
+    );
+    let lw = state
+        .scene_manager_mut()
+        .scene_mut(scene)
+        .unwrap()
+        .add_loaded_lw_object(cuemol_molstr::LoadedLWObject {
+            uid: Uid::new(0),
+            name: "empty".into(),
+            srctype: "qdflwobj".into(),
+            raw_data: Vec::new(),
+            visible: true,
+            xform: Matrix4::IDENTITY,
+            renderers: Vec::new(),
+            qsc_node: None,
+        });
+    camera.set_center(Vector4::new3(50., 40., 30.));
+    let before = camera.clone();
+    let result = call_tool(
+        &mut state,
+        &mut camera,
+        "create_renderer",
+        &json!({
+            "objId":lw.get(), "rendererType":"lwrend", "centerView":true,
+        }),
+    )
+    .unwrap();
+    assert_eq!(camera, before);
+    assert!(state
+        .lw_object_summary(lw)
+        .unwrap()
+        .renderers
+        .iter()
+        .any(|r| Some(r.uid.get()) == result["rendererId"].as_u64()));
+}
+
 fn copy_and_paste(
     state: &mut DesktopAppState,
     camera: &mut Camera,

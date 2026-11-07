@@ -119,7 +119,6 @@ const inspectorAddRenderer = document.getElementById("inspector-add-renderer");
 const workspaceProperties = document.getElementById("workspace-properties");
 const workspaceDelete = document.getElementById("workspace-delete");
 const workspaceZoom = document.getElementById("workspace-zoom");
-const rendererType = document.getElementById("renderer-type");
 
 const tauri = window.__TAURI__;
 const invoke = tauri?.core?.invoke;
@@ -4460,20 +4459,15 @@ function styleSetAddRow(placeholder, disabled, onAdd, value, onInput) {
   return row;
 }
 
-function suggestedRendererName(rendererType) {
-  const prefix = rendererType.replace(/^\*/, "");
-  const activeSceneUid = snapshot.activeSceneUid;
-  const rendererNames = [
-    ...snapshot.objects,
-    ...snapshot.densityMaps,
-    ...snapshot.surfaces,
-  ]
-    .filter((object) => object.sceneUid === activeSceneUid)
-    .flatMap((object) => object.renderers || [])
-    .map((renderer) => renderer.name);
+function suggestedRendererName(rendererType, preset = false, sceneUid = snapshot.activeSceneUid) {
+  const prefix = preset ? `${(rendererType.replace(/RendPreset$/, "") || rendererType).toLowerCase()}_`
+    : rendererType.replace(/^\*/, "");
+  const names = new Set([snapshot.objects, snapshot.densityMaps, snapshot.surfaces, snapshot.lwObjects]
+    .flatMap(items => items || []).filter(object => object.sceneUid === sceneUid)
+    .flatMap(object => [...(object.renderers || []), ...(object.rendererGroups || [])]).map(renderer => renderer.name));
   for (let index = 1; ; index += 1) {
     const candidate = `${prefix}${index}`;
-    if (!rendererNames.includes(candidate)) return candidate;
+    if (!names.has(candidate)) return candidate;
   }
 }
 
@@ -4826,13 +4820,13 @@ function showRendererSetup(setup) {
   rendererType.addEventListener("change", () => {
     rendererName.disabled = rendererType.value === "auto";
     if (rendererNameDefault) {
-      rendererName.value = suggestedRendererName(rendererType.value);
+      rendererName.value = suggestedRendererName(rendererType.value, setup.options.some(option => option.name === rendererType.value && option.preset));
     }
   });
   rendererName.addEventListener("change", () => {
     rendererNameDefault = !rendererName.value.trim();
     if (rendererNameDefault) {
-      rendererName.value = suggestedRendererName(rendererType.value);
+      rendererName.value = suggestedRendererName(rendererType.value, setup.options.some(option => option.name === rendererType.value && option.preset));
     }
   });
   return new Promise((resolve) => {
@@ -11794,139 +11788,127 @@ function workspacePaintMenuChildren(action) {
 }
 
 async function showNewWorkspaceRendererDialog(scene, kind, object, groupName = null) {
-  if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
   if (referenceDialog.open) referenceDialog.close();
-  dialogTitle.textContent = "Setup renderer";
+  dialogTitle.textContent = groupName ? `New Renderer (group: ${groupName})` : "New Renderer";
   dialogContent.replaceChildren();
   dialogFooter.hidden = false;
   referenceDialog.className = "reference-dialog renderer-setup-dialog";
-
-  const fallbackTypes =
-    kind === "renderer"
-      ? MOLECULE_RENDERER_TYPES
-      : kind === "densityRenderer"
-        ? DENSITY_RENDERER_TYPES
-        : kind === "surfaceRenderer"
-          ? SURFACE_RENDERER_TYPES
-          : LIGHTWEIGHT_RENDERER_TYPES;
+  const fields = dialogGroup("Renderer");
+  const loading = dialogParagraph("Loading renderer types…");
+  fields.append(loading);
+  const errorMessage = dialogParagraph("");
+  errorMessage.setAttribute("role", "alert");
+  dialogContent.append(errorMessage);
+  const current = () => fields.isConnected && referenceDialog.open;
+  const collection = () => (kind === "renderer" ? snapshot.objects
+    : kind === "densityRenderer" ? snapshot.densityMaps
+    : kind === "surfaceRenderer" ? snapshot.surfaces : snapshot.lwObjects) || [];
+  const currentObject = () => collection().find(item => item.uid === object.uid && item.sceneUid === scene.uid);
+  const targetError = () => {
+    if (snapshot.activeSceneUid !== scene.uid) return "The active scene changed. Reopen New Renderer.";
+    const target = currentObject();
+    if (!target) return "The target object was removed. Reopen New Renderer.";
+    if (groupName && ![...(target.rendererGroups || []), ...(target.renderers || []).filter(item => item.rendererType === "*group")]
+      .some(item => item.name === groupName)) return "The target group was removed or renamed. Reopen New Renderer.";
+    return "";
+  };
+  const cancel = button("Cancel", "", () => referenceDialog.close());
+  dialogActions(cancel);
+  if (!referenceDialog.open && referenceDialog.showModal) referenceDialog.showModal();
+  if (!scene.active && !(await mutate("activate_scene", {sceneUid: scene.uid}, renderShell, true,
+    error => { if (current()) errorMessage.textContent = String(error); }))) return;
+  if (!current()) return;
+  if (targetError()) { loading.remove(); errorMessage.textContent = targetError(); return; }
   let setupDefaults;
   try {
     setupDefaults = await invoke("get_workspace_renderer_setup_options", {
-      sceneUid: scene.uid,
-      objectUid: object.uid,
-      kind,
+      sceneUid: scene.uid, objectUid: object.uid, kind,
     });
   } catch (error) {
-    showError(error);
+    if (current()) { loading.remove(); errorMessage.textContent = String(error); }
     return;
   }
-  let compatibleOptions = setupDefaults?.options;
-  if (!Array.isArray(compatibleOptions) || compatibleOptions.length === 0) {
-    compatibleOptions = fallbackTypes.map((name) => ({ name, description: name }));
-  }
-  const compatibleTypes = compatibleOptions.map((option) => option.name);
-  const selectedType = compatibleTypes.includes(setupDefaults?.rendererType)
-    ? setupDefaults.rendererType
-    : compatibleTypes[0];
-  const objectName = dialogField("Object:", object.name);
-  objectName.disabled = true;
-  const type = dialogSelect(
-    "Renderer type:",
-    compatibleOptions.map((option) => [option.name, option.description || option.name]),
-    selectedType,
-  );
-  const existingNames = new Set(
-    [snapshot.objects, snapshot.densityMaps, snapshot.surfaces, snapshot.lwObjects]
-      .flat()
-      .filter((candidate) => candidate.sceneUid === scene.uid)
-      .flatMap((candidate) => candidate.renderers || [])
-      .map((candidate) => candidate.name),
-  );
-  const suggestName = () => {
-    const base = type.value.replace(/^\*/, "");
-    let serial = 1;
-    while (existingNames.has(`${base}${serial}`)) serial += 1;
-    return `${base}${serial}`;
-  };
-  const name = dialogField("Renderer name:", suggestName());
-  let automaticName = name.value;
-  type.addEventListener("change", () => {
-    if (name.value === automaticName || !name.value.trim()) {
-      automaticName = suggestName();
-      name.value = automaticName;
+  if (!current()) return;
+  loading.remove();
+  if (targetError()) { errorMessage.textContent = targetError(); return; }
+  const compatibleOptions = (setupDefaults?.options || []).filter(option => !groupName || !option.preset);
+  if (!compatibleOptions.length) { errorMessage.textContent = "No compatible renderer types are available."; return; }
+  const compatibleTypes = compatibleOptions.map(option => option.name);
+  const selectedType = compatibleTypes.includes(setupDefaults?.rendererType) ? setupDefaults.rendererType
+    : compatibleTypes.includes("simple") ? "simple" : compatibleOptions.find(option => !option.preset)?.name || compatibleTypes[0];
+  dialogField("Object name", object.name, "text", fields);
+  const type = dialogSelect("Renderer type", [], selectedType, fields);
+  for (const preset of [true, false]) {
+    const options = compatibleOptions.filter(option => Boolean(option.preset) === preset);
+    if (!options.length) continue;
+    const group = document.createElement("optgroup");
+    group.label = preset ? "Presets" : "Renderer types";
+    for (const option of options) {
+      const element = document.createElement("option");
+      element.value = option.name; element.textContent = option.description || option.name;
+      group.append(element);
     }
-  });
-  name.addEventListener("input", () => {
-    create.disabled = !name.value.trim();
-  });
-
-  let useSelection = null;
-  let selection = null;
-  if (kind === "renderer") {
-    useSelection = dialogCheckbox("Selection:", Boolean(object.selection));
-    selection = dialogField("Selection", object.selection || "*");
-    selection.disabled = !useSelection.checked;
-    useSelection.addEventListener("change", () => {
-      selection.disabled = !useSelection.checked;
-    });
+    type.append(group);
   }
-  const recenter =
-    kind === "densityRenderer"
-      ? dialogSelect(
-          "Centering:",
-          [
-            ["map", "Set map center"],
-            ["view", "Move view center"],
-          ],
-          "map",
-        )
-      : dialogCheckbox("Recenter view", setupDefaults?.recenter ?? true);
-
-  const cancel = button("Cancel", "", () => referenceDialog.close());
-  const create = button("OK", "dialog-primary", async () => {
-    const rendererName = name.value.trim();
-    if (!rendererName) return;
-    const changed = await mutate("create_workspace_renderer", {
-      input: {
-        kind,
-        objectUid: object.uid,
-        rendererType: type.value,
-        rendererName,
-        selection: useSelection?.checked ? selection.value : null,
-        groupName,
-        densityCentering: kind === "densityRenderer" ? recenter.value : null,
-        recenter: kind === "densityRenderer" ? null : recenter.checked,
-      },
-    });
-    if (!changed) return;
-    const collection =
-      kind === "renderer"
-        ? snapshot.objects
-        : kind === "densityRenderer"
-          ? snapshot.densityMaps
-          : kind === "surfaceRenderer"
-            ? snapshot.surfaces
-            : snapshot.lwObjects;
-    const target = collection
-      .find((candidate) => candidate.uid === object.uid)
-      ?.renderers.find((candidate) => candidate.name === rendererName);
+  type.value = selectedType;
+  const isPreset = () => compatibleOptions.some(option => option.name === type.value && option.preset);
+  const suggestName = () => suggestedRendererName(type.value, isPreset(), scene.uid);
+  const name = dialogField("Renderer name", suggestName(), "text", fields);
+  let nameEdited = false;
+  let useSelection, picker;
+  if (kind === "renderer") {
+    const selected = (object.selection || "").trim();
+    useSelection = dialogCheckbox("Use selection", Boolean(selected), fields);
+    picker = dialogSelectionField("Selection", selected || "*", () => object.uid, fields);
+  }
+  const recenter = kind === "densityRenderer"
+    ? dialogSelect("View after loading", [["auto", "Auto (by map kind)"], ["map", "Set map center (keep the view)"], ["view", "Move view center (fit the map)"]], "auto", fields)
+    : dialogCheckbox("Recenter view", true, fields);
+  let submitting = false;
+  const validate = () => targetError() || (!name.value.trim() || name.value.includes(":") ? "Enter a renderer name without a colon." : "");
+  const sync = (clearError = true) => {
+    fields.disabled = submitting;
+    if (useSelection) useSelection.disabled = submitting || isPreset();
+    picker?.setEnabled(!submitting && !isPreset() && useSelection.checked);
+    create.disabled = submitting || Boolean(validate());
+    cancel.disabled = submitting;
+    if (clearError) errorMessage.textContent = validate();
+  };
+  const create = button("Create", "dialog-primary", async () => {
+    const error = validate();
+    if (error || submitting) { if (error) errorMessage.textContent = error; return; }
+    const before = new Set((currentObject()?.renderers || []).map(item => item.uid));
+    const input = {
+      sceneUid: scene.uid, kind, objectUid: object.uid, rendererType: type.value,
+      rendererName: name.value.trim(), selection: !isPreset() && useSelection?.checked ? picker.input.value.trim() || "*" : null,
+      groupName, densityCentering: kind === "densityRenderer" ? recenter.value : null,
+      recenter: kind === "densityRenderer" ? null : recenter.checked,
+    };
+    submitting = true; sync();
+    const changed = await mutate("create_workspace_renderer", {input}, renderShell, true,
+      error => { if (current()) errorMessage.textContent = String(error); });
+    submitting = false;
+    if (!current()) return;
+    if (!changed) { sync(false); return; }
+    const target = currentObject()?.renderers.find(candidate => !before.has(candidate.uid) && candidate.name === input.rendererName);
     if (kind === "renderer") {
       selectedObjectUid = object.uid;
       selectedRendererUid = target?.uid ?? null;
       workspaceSelectionKind = target ? "renderer" : "object";
-    } else {
-      selectWorkspaceAuxItem(kind, object.uid, target?.uid ?? null);
-    }
-    renderShell();
-    referenceDialog.close();
-    const shouldRecenter =
-      kind === "densityRenderer" ? recenter.value === "view" : recenter.checked;
-    if (shouldRecenter) await fitWorkspaceItem();
+    } else selectWorkspaceAuxItem(kind, object.uid, target?.uid ?? null);
+    if (input.selection) rememberSelection(input.selection);
+    picker?.close();
+    renderShell(); referenceDialog.close();
   });
+  type.addEventListener("change", () => { if (!nameEdited) name.value = suggestName(); sync(); });
+  name.addEventListener("input", () => {
+    nameEdited = Boolean(name.value.trim());
+    if (!nameEdited) name.value = suggestName();
+    sync();
+  });
+  useSelection?.addEventListener("change", () => sync());
   dialogActions(cancel, create);
-  if (!referenceDialog.open && referenceDialog.showModal) referenceDialog.showModal();
-  name.focus();
-  name.select();
+  sync(); name.focus(); name.select();
 }
 
 async function workspaceRendererContextItems(scene, object, renderer) {
@@ -13944,25 +13926,7 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
   objectStats.querySelectorAll("dd").forEach((node, index) => {
     node.textContent = String(values[index]);
   });
-  const rendererChoices = map
-    ? [
-        ["contour", "Contour"],
-        ["isosurf", "Isosurface"],
-        ["gpu_mapvol", "Volume"],
-      ]
-    : surface
-      ? [["molsurf", "Molecular surface"]]
-    : lwObject
-      ? [["lwrend", "Lightweight"]]
-      : MOLECULE_RENDERER_TYPES.map((rendererType) => [rendererType, rendererType]);
   inspectorAddRenderer.disabled = !object && !map && !surface && !lwObject;
-  rendererType.replaceChildren();
-  for (const [value, label] of rendererChoices) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    rendererType.append(option);
-  }
   rendererList.replaceChildren();
   if (!object && !map && !surface && !lwObject) {
     const empty = document.createElement("div");

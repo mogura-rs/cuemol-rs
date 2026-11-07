@@ -230,7 +230,7 @@ struct RendererSetupOptionDto {
 struct WorkspaceRendererSetupOptionsDto {
     renderer_type: Option<String>,
     recenter: bool,
-    options: Vec<RendererStyleOptionDto>,
+    options: Vec<RendererSetupOptionDto>,
 }
 
 #[derive(Serialize)]
@@ -1293,9 +1293,20 @@ struct WorkspaceRendererTypeInput {
     renderer_type: String,
 }
 
+fn workspace_renderer_kind(kind: cuemol_desktop_core::renderer_setup::Kind) -> &'static str {
+    use cuemol_desktop_core::renderer_setup::Kind;
+    match kind {
+        Kind::Molecule => "renderer",
+        Kind::Map => "densityRenderer",
+        Kind::Surface => "surfaceRenderer",
+        Kind::Lightweight => "lwRenderer",
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceNewRendererInput {
+    scene_uid: Option<u64>,
     kind: String,
     object_uid: u64,
     renderer_type: String,
@@ -3719,150 +3730,64 @@ impl AppModel {
         &mut self,
         input: WorkspaceNewRendererInput,
     ) -> Result<(), String> {
-        let object_uid = Uid::new(input.object_uid);
+        let target = cuemol_desktop_core::renderer_setup::Target::for_object(
+            &self.desktop,
+            Uid::new(input.object_uid),
+        )
+        .map_err(|error| error.to_string())?;
+        if self.desktop.active_scene() != Some(target.scene)
+            || input
+                .scene_uid
+                .is_some_and(|scene| scene != target.scene.get())
+        {
+            return Err("The target scene changed. Reopen New Renderer.".into());
+        }
+        if input.kind != workspace_renderer_kind(target.kind) {
+            return Err("The target object kind changed. Reopen New Renderer.".into());
+        }
         let renderer_type = input.renderer_type.trim();
         let renderer_name = input.renderer_name.trim();
         if renderer_name.is_empty() || renderer_name.contains(':') {
-            return Err("renderer name must be non-empty and cannot contain ':'".to_string());
+            return Err("renderer name must be non-empty and cannot contain ':'".into());
         }
-        if let Some(group_name) = input.group_name.as_deref() {
-            let group_exists = match input.kind.as_str() {
-                "renderer" => self
-                    .desktop
-                    .renderer_summaries(object_uid)
-                    .iter()
-                    .any(|renderer| {
-                        renderer.renderer_type == "*group" && renderer.name == group_name
-                    }),
-                "densityRenderer" => {
-                    self.desktop
-                        .density_map_summary(object_uid)
-                        .is_some_and(|map| {
-                            map.renderer_groups
-                                .iter()
-                                .any(|group| group.name == group_name)
-                        })
-                }
-                "surfaceRenderer" => {
-                    self.desktop
-                        .surface_summary(object_uid)
-                        .is_some_and(|surface| {
-                            surface
-                                .renderer_groups
-                                .iter()
-                                .any(|group| group.name == group_name)
-                        })
-                }
-                "lwRenderer" => self
-                    .desktop
-                    .lw_object_summary(object_uid)
-                    .is_some_and(|object| {
-                        object
-                            .renderer_groups
-                            .iter()
-                            .any(|group| group.name == group_name)
-                    }),
-                _ => false,
-            };
-            if !group_exists {
-                return Err(format!("renderer group not found: {group_name}"));
-            }
-        }
-
-        let _renderer_uid = match input.kind.as_str() {
-            "renderer" => {
-                let scene_uid = self
-                    .desktop
-                    .scene_manager()
-                    .scene_uid_for_object(object_uid)
-                    .ok_or_else(|| format!("object {} not found", input.object_uid))?;
-                let renderer_uid = self
-                    .desktop
-                    .new_renderer_from_setup(
-                        scene_uid,
-                        object_uid,
-                        renderer_type,
-                        renderer_name,
-                        input.selection.as_deref(),
-                    )
-                    .map_err(|error| error.to_string())?;
-                if let Some(group_name) = input.group_name.as_deref() {
-                    self.desktop
-                        .set_renderer_property(object_uid, renderer_uid, "group", group_name)
-                        .map_err(|error| error.to_string())?;
-                }
-                renderer_uid
-            }
-            "densityRenderer" => {
-                let density_centering = input.density_centering.as_deref().unwrap_or("map");
-                if !matches!(density_centering, "map" | "view") {
-                    return Err(format!(
-                        "unsupported density renderer centering: {density_centering}"
-                    ));
-                }
-                let renderer_uid = self
-                    .desktop
-                    .add_density_renderer(object_uid, renderer_type)
-                    .map_err(|error| error.to_string())?;
-                self.desktop
-                    .rename_density_renderer(object_uid, renderer_uid, renderer_name)
-                    .map_err(|error| error.to_string())?;
-                self.desktop
-                    .set_workspace_renderer_group_name(
-                        object_uid,
-                        renderer_uid,
-                        input.group_name.as_deref(),
-                    )
-                    .map_err(|error| error.to_string())?;
-                if density_centering == "map" {
-                    self.desktop
-                        .set_density_renderer_center(object_uid, renderer_uid, self.camera.center())
-                        .map_err(|error| error.to_string())?;
-                }
-                renderer_uid
-            }
-            "surfaceRenderer" => {
-                if renderer_type != "molsurf" {
-                    return Err(format!("unsupported surface renderer: {renderer_type}"));
-                }
-                let renderer_uid = self
-                    .desktop
-                    .add_surface_renderer(object_uid)
-                    .map_err(|error| error.to_string())?;
-                self.desktop
-                    .rename_surface_renderer(object_uid, renderer_uid, renderer_name)
-                    .map_err(|error| error.to_string())?;
-                self.desktop
-                    .set_workspace_renderer_group_name(
-                        object_uid,
-                        renderer_uid,
-                        input.group_name.as_deref(),
-                    )
-                    .map_err(|error| error.to_string())?;
-                renderer_uid
-            }
-            "lwRenderer" => {
-                if renderer_type != "lwrend" {
-                    return Err(format!("unsupported lightweight renderer: {renderer_type}"));
-                }
-                let renderer_uid = self
-                    .desktop
-                    .add_lw_renderer(object_uid)
-                    .map_err(|error| error.to_string())?;
-                self.desktop
-                    .rename_lw_renderer(object_uid, renderer_uid, renderer_name)
-                    .map_err(|error| error.to_string())?;
-                self.desktop
-                    .set_workspace_renderer_group_name(
-                        object_uid,
-                        renderer_uid,
-                        input.group_name.as_deref(),
-                    )
-                    .map_err(|error| error.to_string())?;
-                renderer_uid
-            }
-            kind => return Err(format!("unsupported renderer target: {kind}")),
+        let map_policy = match input.density_centering.as_deref().unwrap_or("auto") {
+            "auto" => "auto",
+            "map" => "setMapCenter",
+            "view" => "moveViewCenter",
+            other => return Err(format!("unsupported density renderer centering: {other}")),
         };
+        let is_preset = target
+            .options
+            .iter()
+            .any(|option| option.name == renderer_type && option.preset);
+        let selection = input
+            .selection
+            .as_deref()
+            .filter(|_| {
+                !is_preset && target.kind == cuemol_desktop_core::renderer_setup::Kind::Molecule
+            })
+            .map(|value| {
+                if value.trim().is_empty() {
+                    "*"
+                } else {
+                    value.trim()
+                }
+            });
+        let args = serde_json::json!({
+            "objId": input.object_uid, "rendererType": renderer_type,
+            "name": renderer_name, "selection": selection, "group": input.group_name,
+            "centerView": input.recenter.unwrap_or(true), "mapCenterPolicy": map_policy,
+        });
+        cuemol_command::call_tool(
+            &mut self.desktop,
+            &mut self.camera,
+            "create_renderer",
+            &args,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(selection) = selection {
+            self.desktop.remember_selection(selection);
+        }
         self.status = format!("Added {renderer_type} renderer: {renderer_name}");
         self.invalidate_snapshot(false);
         Ok(())
@@ -10345,6 +10270,14 @@ fn handle_model_request(
                 .collect(),
         )),
         ModelRequest::GetWorkspaceRendererSetupOptions { scene_uid, kind, object_uid } => {
+            let target = object_uid.map(|uid|
+                cuemol_desktop_core::renderer_setup::Target::for_object(&model.desktop, Uid::new(uid))
+                    .map_err(|error| error.to_string())
+            ).transpose()?;
+            if target.as_ref().is_some_and(|target| target.scene.get() != scene_uid
+                || workspace_renderer_kind(target.kind) != kind) {
+                return Err("The renderer target changed. Reopen New Renderer.".into());
+            }
             let options = match kind.as_str() {
                 "renderer" => model
                     .desktop
@@ -10365,8 +10298,8 @@ fn handle_model_request(
                 .or_else(|| cuemol_desktop_core::renderer_history::default_type(&options));
             Ok(ModelResponse::WorkspaceRendererSetupOptions(WorkspaceRendererSetupOptionsDto {
                 renderer_type, recenter: true,
-                options: options.into_iter().map(|option| RendererStyleOptionDto {
-                    name: option.name, description: option.description,
+                options: options.into_iter().map(|option| RendererSetupOptionDto {
+                    name: option.name, description: option.description, preset: option.preset,
                 }).collect(),
             }))
         }
@@ -18313,6 +18246,7 @@ mod tests {
         handle_model_request(
             &mut model,
             ModelRequest::CreateWorkspaceRenderer(WorkspaceNewRendererInput {
+                scene_uid: None,
                 kind: "renderer".into(),
                 object_uid: molecule.get(),
                 renderer_type: "cpk".into(),
@@ -20067,12 +20001,109 @@ mod tests {
     }
 
     #[test]
+    fn workspace_new_renderer_rejects_stale_targets_and_frames_selection_in_one_undo() {
+        let mut model = model_without_gpu();
+        model.desktop.open_bytes("target.pdb", b"ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\nATOM      2  CA  GLY A   2       8.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let object = model.desktop.active_object_summaries()[0].uid;
+        let scene = model.desktop.active_scene().unwrap();
+        model
+            .desktop
+            .create_renderer_group(object, "bundle")
+            .unwrap();
+        model
+            .camera
+            .set_center(cuemol_core::Vector4::new3(50., 40., 30.));
+        let initial = model.desktop.clone();
+        let camera = model.camera.clone();
+        let request = || WorkspaceNewRendererInput {
+            scene_uid: Some(scene.get()),
+            kind: "renderer".into(),
+            object_uid: object.get(),
+            renderer_type: "cpk".into(),
+            renderer_name: "selected".into(),
+            selection: Some("aid 2".into()),
+            group_name: Some("bundle".into()),
+            density_centering: None,
+            recenter: Some(true),
+        };
+        for input in [
+            WorkspaceNewRendererInput {
+                scene_uid: Some(u64::MAX),
+                ..request()
+            },
+            WorkspaceNewRendererInput {
+                kind: "densityRenderer".into(),
+                ..request()
+            },
+            WorkspaceNewRendererInput {
+                group_name: Some("missing".into()),
+                ..request()
+            },
+            WorkspaceNewRendererInput {
+                renderer_type: "Default1RendPreset".into(),
+                ..request()
+            },
+            WorkspaceNewRendererInput {
+                selection: Some("invalid (((".into()),
+                ..request()
+            },
+        ] {
+            assert!(
+                handle_model_request(&mut model, ModelRequest::CreateWorkspaceRenderer(input))
+                    .is_err()
+            );
+            assert!(initial.same_undo_state(&model.desktop));
+            assert_eq!(model.camera, camera);
+            assert!(model.undo_stack.is_empty());
+        }
+        assert!(handle_model_request(
+            &mut model,
+            ModelRequest::GetWorkspaceRendererSetupOptions {
+                scene_uid: u64::MAX,
+                object_uid: Some(object.get()),
+                kind: "renderer".into(),
+            }
+        )
+        .is_err());
+        handle_model_request(&mut model, ModelRequest::CreateWorkspaceRenderer(request())).unwrap();
+        assert_eq!(model.undo_stack.len(), 1);
+        assert_eq!(model.camera.center().x, 8.);
+        assert!(model
+            .desktop
+            .selection_history()
+            .iter()
+            .any(|value| value == "aid 2"));
+        let renderer = model
+            .desktop
+            .renderer_summaries(object)
+            .into_iter()
+            .find(|value| value.name == "selected")
+            .unwrap();
+        assert_eq!(renderer.group.as_deref(), Some("bundle"));
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model
+            .desktop
+            .renderer_summaries(object)
+            .iter()
+            .all(|value| value.name != "selected"));
+        assert_eq!(model.camera.center().x, 8.);
+        handle_model_request(&mut model, ModelRequest::Redo(0)).unwrap();
+        assert_eq!(model.camera.center().x, 8.);
+        assert!(model
+            .desktop
+            .renderer_summaries(object)
+            .iter()
+            .any(|value| value.name == "selected"));
+    }
+
+    #[test]
     fn workspace_renderer_setup_creates_named_selected_renderer_and_rolls_back_errors() {
         let (mut model, object_uid, _) = model_with_renderer();
         let initial_count = model.snapshot().objects[0].renderers.len();
         let invalid = handle_model_request(
             &mut model,
             ModelRequest::CreateWorkspaceRenderer(WorkspaceNewRendererInput {
+                scene_uid: None,
                 kind: "renderer".to_string(),
                 object_uid: object_uid.get(),
                 renderer_type: "cpk".to_string(),
@@ -20090,6 +20121,7 @@ mod tests {
         let response = handle_model_request(
             &mut model,
             ModelRequest::CreateWorkspaceRenderer(WorkspaceNewRendererInput {
+                scene_uid: None,
                 kind: "renderer".to_string(),
                 object_uid: object_uid.get(),
                 renderer_type: "cpk".to_string(),
@@ -20138,6 +20170,7 @@ mod tests {
         let response = handle_model_request(
             &mut model,
             ModelRequest::CreateWorkspaceRenderer(WorkspaceNewRendererInput {
+                scene_uid: None,
                 kind: "renderer".to_string(),
                 object_uid: object_uid.get(),
                 renderer_type: "Default1RendPreset".to_string(),
@@ -20169,6 +20202,7 @@ mod tests {
         handle_model_request(
             &mut model,
             ModelRequest::CreateWorkspaceRenderer(WorkspaceNewRendererInput {
+                scene_uid: None,
                 kind: "densityRenderer".to_string(),
                 object_uid: map_uid.get(),
                 renderer_type: "isosurf".to_string(),

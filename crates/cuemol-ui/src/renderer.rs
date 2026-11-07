@@ -13,6 +13,7 @@ pub enum Action {
     Cancel,
 }
 
+#[derive(Debug)]
 pub struct RendererDialog {
     pub target: Target,
     pub renderer_type: String,

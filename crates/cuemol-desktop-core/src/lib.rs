@@ -8850,12 +8850,25 @@ impl DesktopAppState {
     }
 
     /// Suggest the first scene-unique renderer name using CueMol2's
-    /// `<type><number>` convention (`simple1`, `simple2`, ...).
+    /// type/number convention and short lowercase preset prefixes.
     pub fn suggest_renderer_name(&self, target_scene: Uid, renderer_type: &str) -> Result<String> {
         let prefix = renderer_type.trim().trim_start_matches('*');
         if prefix.is_empty() {
             return Err(CueMolError::invalid_argument("renderer type is empty"));
         }
+        let is_preset = self
+            .molecule_renderer_setup_options(target_scene)?
+            .iter()
+            .any(|option| option.name == prefix && option.preset);
+        let prefix = if is_preset {
+            let base = prefix
+                .strip_suffix("RendPreset")
+                .filter(|base| !base.is_empty())
+                .unwrap_or(prefix);
+            format!("{}_", base.to_lowercase())
+        } else {
+            prefix.to_string()
+        };
         let scene = self
             .scene_manager()
             .scene(target_scene)

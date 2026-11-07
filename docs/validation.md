@@ -1,5 +1,54 @@
 # Validation evidence
 
+## Native and Tauri New Renderer controls
+
+Native egui now uses the browser's shared renderer form. Tauri mirrors its
+compatible types and preset groups, editable object-name field, selection builder,
+name following, group context, recenter default and Auto/preserve-view/fit-map
+choices. Presets disable selection and cannot be nested inside another group.
+Only successful creation updates type and selection history. The reference saves
+history before dispatching creation; retaining the previous history on a failed
+operation is a deliberate failure-safety difference.
+
+Both hosts now use the shared create command. Creation and group assignment form
+one undo step, failed drafts keep their input and inline error, and missing or
+changed targets are rejected. Tauri validates the expected scene and object class
+in the model, discards late option replies after cancellation/replacement, and
+fits the camera inside the creation request instead of sending a second request.
+Normal scene undo retains the current camera, matching the existing history
+policy; failed creation leaves the camera unchanged. Native group creation keeps
+its dedicated name form and uses the shared group command.
+
+A native regression exposed an empty-lightweight-object issue: recentering tried
+to decode absent QDF data after adding a renderer and rejected the entire action.
+Creation now leaves the camera unchanged when the object has no geometry. Invalid
+nonempty geometry still reports an error. Preset naming also now follows the
+reference's short lowercase prefix (`Default1RendPreset` becomes `default1_1`),
+including custom presets without that suffix. Scene-wide collision checks include
+lightweight objects and auxiliary renderer groups. The old `<type><number>`-only
+source comment was corrected. Tauri file options use the same naming rule.
+
+Tauri's Inspector previously displayed a renderer-type selector that its Add
+handler never read. It now exposes a single New Renderer button that opens the
+actual options form. The obsolete native per-kind form and creation branches
+were removed. The usage and status documents no longer limit the dedicated form
+to the browser.
+
+Validation: 222 native model tests, 192 Tauri model tests (five existing tests
+remain ignored), six shared command-option tests, four browser renderer cases and
+four Tauri DOM cases pass. Browser cases include WebGL/WebGPU creation, map/surface
+groups and presets. DOM cases cover Inspector entry, history and name editing,
+selection building, error retention, disabled preset selection, group restrictions,
+map-policy payloads, stale scenes, cancelled asynchronous replies and file/preset
+name collisions. Linux OS input against the current native build confirms invalid
+selector retention, selection-builder use, corrected creation, selected-atom
+framing, single-step undo/redo and reopening with saved history. Native and Tauri
+screenshots were inspected. Formatting and whitespace checks pass. An initial
+DOM assertion used an absent `h2` instead of the actual dialog-title element; the
+corrected case passes. An initial model expectation attempted to undo camera
+framing despite the established camera-preserving scene history policy; the test
+now checks that policy explicitly.
+
 ## Browser renderer setup and scalar-map centering
 
 The browser scene tree now opens New Renderer from objects, renderers and groups.
@@ -47,9 +96,9 @@ harness errors used a nonexistent query tool and sampled status before startup;
 these were corrected. A map expectation also initially used voxel sample centers
 instead of the established grid extent.
 
-Native/Tauri renderer form controls remain a separate open checklist item; the
-native suite passing here confirms shared changes did not regress its current
-behavior. The old browser quick-add-only limitation is superseded by this entry.
+At this stage native/Tauri renderer form controls remained open; the subsequent
+cross-frontend entry above supersedes that limitation. The old browser
+quick-add-only limitation is superseded by this entry.
 
 ## Renderer history per object class
 

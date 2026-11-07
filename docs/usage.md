@@ -87,16 +87,19 @@ history. A removed preset or unsupported stored type falls back to the default.
 Confirming a file dialog remembers the offered choice; cancelling does not.
 Undo preserves these preferences, and the next application/browser session
 restores them. Renderer names follow type changes until edited by hand; clearing
-the name lets the next type change propose a default again.
+the name restores automatic suggestions. Presets use short lowercase names, such
+as `default1_1`, with collision checks across all object and group types.
 
-In the browser, choose **New Renderer…** from an object, renderer or group context
-menu, or use the button below the scene tree. The form offers compatible types,
+Choose **New Renderer…** from an object, renderer or group context menu. The
+browser also has a button below the scene tree, and Tauri has one in the Inspector. The form offers compatible types,
 presets, a scene-wide unique name, a selection builder and view centering.
 Opening it from a group or grouped renderer inherits that group and hides presets,
 since presets create their own group. A preset disables the selection input;
 its children retain the selections defined by the preset. The object-name field
 does not rename an existing object. Errors retain the draft, Cancel leaves the
-scene and preferences unchanged, and Create adds one undo entry.
+scene and preferences unchanged, and Create adds one undo entry. Reopening starts
+from the object's current selection and enables recentering again. Stale targets
+are rejected, and cancelled Tauri dialogs discard late renderer-option replies.
 
 Map forms offer Auto, keep the current view, or fit the map. Explicit centering
 also works for electrostatic potential maps; Auto keeps their current view.

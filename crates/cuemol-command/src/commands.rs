@@ -82,6 +82,34 @@ pub fn view_json(camera: &Camera) -> Value {
         "center":[center.x,center.y,center.z],"rotation":[q.x,q.y,q.z,q.w],"perspective":camera.is_perspective()})
 }
 
+fn fit_geometry_bounds(
+    state: &DesktopAppState,
+    camera: &mut Camera,
+    min: Vector4,
+    max: Vector4,
+    zoom: bool,
+) {
+    if zoom {
+        let points = [min.x, max.x].into_iter().flat_map(|x| {
+            [min.y, max.y].into_iter().flat_map(move |y| {
+                [min.z, max.z]
+                    .into_iter()
+                    .map(move |z| Vector4::new3(x, y, z))
+            })
+        });
+        let aspect = state
+            .active_view_summary()
+            .and_then(|view| state.command_manager().view(view.uid))
+            .filter(|view| view.width() > 0 && view.height() > 0)
+            .map_or(1.0, |view| {
+                f64::from(view.width()) / f64::from(view.height())
+            });
+        camera.fit_positions(points, aspect);
+    } else {
+        camera.set_center((min + max).scale(0.5));
+    }
+}
+
 pub(crate) fn fit(
     state: &DesktopAppState,
     camera: &mut Camera,
@@ -105,25 +133,7 @@ pub(crate) fn fit(
         let (min, max) = snapshot
             .bounds
             .ok_or_else(|| CueMolError::not_found("object geometry"))?;
-        if zoom {
-            let points = [min.x, max.x].into_iter().flat_map(|x| {
-                [min.y, max.y].into_iter().flat_map(move |y| {
-                    [min.z, max.z]
-                        .into_iter()
-                        .map(move |z| Vector4::new3(x, y, z))
-                })
-            });
-            let aspect = state
-                .active_view_summary()
-                .and_then(|view| state.command_manager().view(view.uid))
-                .filter(|view| view.width() > 0 && view.height() > 0)
-                .map_or(1.0, |view| {
-                    f64::from(view.width()) / f64::from(view.height())
-                });
-            camera.fit_positions(points, aspect);
-        } else {
-            camera.set_center((min + max).scale(0.5));
-        }
+        fit_geometry_bounds(state, camera, min, max, zoom);
         return Ok(());
     }
     let ids = object.map(|id| vec![id]).unwrap_or_else(|| {
@@ -297,7 +307,16 @@ pub fn call_tool(
                     let mut view=crate::properties::current_fit_view(state,camera)?;
                     state.fit_molecule_view(object,Some(renderer),&mut view)?;
                     *camera=view.camera();
-                } else {fit(state,camera,Some(object),None,true)?;}
+                } else {
+                    let has_data=state.scene_manager().scene(target.scene)
+                        .and_then(|scene|scene.loaded_lw_object(object))
+                        .is_none_or(|object| !object.raw_data.is_empty());
+                    if has_data {
+                        if let Some((min,max))=state.workspace_object_render_snapshot(object)?.bounds {
+                            fit_geometry_bounds(state,camera,min,max,true);
+                        }
+                    }
+                }
             }
             Ok(json!({"objectId":object.get(),"rendererId":renderer.get(),"name":label}))
         }

@@ -188,9 +188,22 @@ async function openShell(page, storage = {}, options = {}) {
         snapshot.status=args.selection1 === 'none' ? 'No interaction was found' : 'Defined 1 interaction(s) in measure';
         return structuredClone(snapshot);
       }
-      if (options.rendererHistory && command === 'get_workspace_renderer_setup_options') {
-        if (args.objectUid !== 3) throw new Error('Renderer history needs the selected object class');
-        return {rendererType:'ribbon', recenter:true, options:['simple','cpk','ribbon'].map(name=>({name,description:name}))};
+      if ((options.rendererHistory || options.rendererSetup) && command === 'get_workspace_renderer_setup_options') {
+        if (![3,10].includes(args.objectUid)) throw new Error('Renderer history needs the selected object class');
+        const result = args.kind === 'densityRenderer'
+          ? {rendererType:'isosurf',recenter:true,options:['contour','isosurf'].map(name=>({name,description:name,preset:false}))}
+          : {rendererType:'ribbon',recenter:true,options:[...['simple','cpk','ribbon'].map(name=>({name,description:name,preset:false})),{name:'Default1RendPreset',description:'Default preset',preset:true}]};
+        if (window.__holdRendererOptions) return new Promise(resolve => { window.__releaseRendererOptions = () => resolve(result); });
+        return result;
+      }
+      if (options.rendererSetup && command === 'create_workspace_renderer') {
+        const input = args.input;
+        if (input.selection === 'invalid (((') throw new Error('Invalid selection');
+        const objects = input.kind === 'densityRenderer' ? snapshot.densityMaps : snapshot.objects;
+        const object = objects.find(item => item.uid === input.objectUid);
+        object.renderers.push({...renderer,uid:40+object.renderers.length,name:input.rendererName,rendererType:input.rendererType,
+          group:input.groupName,selection:input.selection || '*'});
+        return structuredClone(snapshot);
       }
       if(options.fileDefaults && command==='get_file_renderer_setup')return {
         targetKind:'molecule',objectName:args.path.replace(/\.[^.]+$/,''),rendererType:'auto',rendererName:'auto1',recenter:true,
@@ -2753,20 +2766,115 @@ test('surface dialogs match defaults, reset drafts and keep failed input', async
 test('Tauri new renderer uses the selected object history and follows only default names', async ({page}, testInfo) => {
   const errors = await openShell(page, {}, {rendererHistory:true});
   const open = () => page.evaluate(() => showNewWorkspaceRendererDialog(snapshot.scenes[0], 'renderer', snapshot.objects[0]));
-  await open();
+  await page.locator("#inspector-add-renderer").click();
   const dialog = page.locator('#reference-dialog');
-  await expect(dialog.getByLabel('Renderer type:', {exact:true})).toHaveValue('ribbon');
-  await expect(dialog.getByLabel('Renderer name:', {exact:true})).toHaveValue('ribbon1');
-  await dialog.getByLabel('Renderer type:', {exact:true}).selectOption('cpk');
-  await expect(dialog.getByLabel('Renderer name:', {exact:true})).toHaveValue('cpk1');
-  await dialog.getByLabel('Renderer name:', {exact:true}).fill('custom');
-  await dialog.getByLabel('Renderer type:', {exact:true}).selectOption('simple');
-  await expect(dialog.getByLabel('Renderer name:', {exact:true})).toHaveValue('custom');
+  await expect(dialog.getByLabel('Renderer type', {exact:true})).toHaveValue('ribbon');
+  await expect(dialog.getByLabel('Renderer name', {exact:true})).toHaveValue('ribbon1');
+  await dialog.getByLabel('Renderer type', {exact:true}).selectOption('cpk');
+  await expect(dialog.getByLabel('Renderer name', {exact:true})).toHaveValue('cpk1');
+  await dialog.getByLabel('Renderer name', {exact:true}).fill('custom');
+  await dialog.getByLabel('Renderer type', {exact:true}).selectOption('simple');
+  await expect(dialog.getByLabel('Renderer name', {exact:true})).toHaveValue('custom');
+  await dialog.getByLabel('Renderer name', {exact:true}).fill('');
+  await expect(dialog.getByLabel('Renderer name', {exact:true})).toHaveValue('simple1');
+  await dialog.getByLabel('Renderer type', {exact:true}).selectOption('Default1RendPreset');
+  await expect(dialog.getByLabel('Renderer name', {exact:true})).toHaveValue('default1_1');
+  await expect(dialog.getByLabel('Use selection', {exact:true})).toBeDisabled();
+  await expect(dialog.getByLabel('Selection', {exact:true})).toBeDisabled();
   await page.screenshot({path:testInfo.outputPath('tauri-renderer-history.png')});
   await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
   await open();
-  await expect(dialog.getByLabel('Renderer type:', {exact:true})).toHaveValue('ribbon');
+  await expect(dialog.getByLabel('Renderer type', {exact:true})).toHaveValue('ribbon');
   await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
   expect(await page.evaluate(() => window.__shellCalls.filter(call=>call.command==='create_workspace_renderer').length)).toBe(0);
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri new renderer keeps failed edits, gates presets in groups and passes map centering', async ({page}, testInfo) => {
+  const errors = await openShell(page, {}, {rendererSetup:true,density:true,interactions:true});
+  const dialog = page.locator('#reference-dialog');
+  const open = () => page.evaluate(() => showNewWorkspaceRendererDialog(snapshot.scenes[0], 'renderer', snapshot.objects[0]));
+  await open();
+  await expect(dialog.getByLabel('Recenter view', {exact:true})).toBeChecked();
+  await dialog.getByLabel('Object name', {exact:true}).fill('Ignored object rename');
+  await dialog.getByRole('button', {name:'Choose Selection', exact:true}).click();
+  await dialog.getByRole('button', {name:'Selection choice *', exact:true}).click();
+  await dialog.getByLabel('Selection', {exact:true}).fill('invalid (((');
+  await dialog.getByLabel('Renderer name', {exact:true}).fill('custom');
+  await dialog.getByRole('button', {name:'Create', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('Invalid selection');
+  await expect(dialog.getByLabel('Selection', {exact:true})).toHaveValue('invalid (((');
+  await expect(page.locator('#error-alert-dialog')).not.toBeVisible();
+  await dialog.getByLabel('Renderer type', {exact:true}).selectOption('Default1RendPreset');
+  await dialog.getByRole('button', {name:'Create', exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  let input = await page.evaluate(() => window.__shellCalls.filter(call=>call.command==='create_workspace_renderer').at(-1).args.input);
+  expect(input).toMatchObject({sceneUid:1,objectUid:3,rendererType:'Default1RendPreset',rendererName:'custom',selection:null,recenter:true});
+  expect(await page.evaluate(()=>snapshot.objects[0].name)).toBe('Probe');
+  await page.evaluate(() => {
+    snapshot.objects[0].renderers.push({uid:99,name:'bundle',rendererType:'*group'});
+    return showNewWorkspaceRendererDialog(snapshot.scenes[0], 'renderer', snapshot.objects[0], 'bundle');
+  });
+  await expect(page.locator('#dialog-title')).toHaveText('New Renderer (group: bundle)');
+  await expect(dialog.getByLabel('Renderer type', {exact:true}).locator('option[value="Default1RendPreset"]')).toHaveCount(0);
+  await page.screenshot({path:testInfo.outputPath('tauri-new-renderer-group.png')});
+  await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
+  await page.evaluate(() => showNewWorkspaceRendererDialog(snapshot.scenes[0], 'densityRenderer', snapshot.densityMaps[0]));
+  await expect(dialog.getByLabel('Renderer type', {exact:true})).toHaveValue('isosurf');
+  await expect(dialog.getByLabel('View after loading', {exact:true})).toHaveValue('auto');
+  await dialog.getByLabel('View after loading', {exact:true}).selectOption('view');
+  const fitCalls = await page.evaluate(() => window.__shellCalls.filter(call=>call.command==='fit_workspace_nodes').length);
+  await dialog.getByRole('button', {name:'Create', exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  input = await page.evaluate(() => window.__shellCalls.filter(call=>call.command==='create_workspace_renderer').at(-1).args.input);
+  expect(input).toMatchObject({sceneUid:1,objectUid:10,densityCentering:'view',recenter:null});
+  expect(await page.evaluate(() => window.__shellCalls.filter(call=>call.command==='fit_workspace_nodes').length)).toBe(fitCalls);
+  await open();
+  const count = await page.evaluate(() => window.__shellCalls.filter(call=>call.command==='create_workspace_renderer').length);
+  await page.evaluate(async () => { window.__interactionSceneChanged(); await mutate('get_snapshot'); });
+  await dialog.getByRole('button', {name:'Create', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('active scene changed');
+  expect(await page.evaluate(() => window.__shellCalls.filter(call=>call.command==='create_workspace_renderer').length)).toBe(count);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri new renderer discards late options after cancel or another dialog', async ({page}) => {
+  const errors = await openShell(page, {}, {rendererSetup:true});
+  const start = () => page.evaluate(() => {
+    window.__holdRendererOptions = true;
+    void showNewWorkspaceRendererDialog(snapshot.scenes[0], 'renderer', snapshot.objects[0]);
+  });
+  await start();
+  await expect.poll(() => page.evaluate(() => typeof window.__releaseRendererOptions)).toBe('function');
+  await page.locator('#reference-dialog').getByRole('button', {name:'Cancel', exact:true}).click();
+  await page.evaluate(() => window.__releaseRendererOptions());
+  await expect(page.locator('#reference-dialog')).not.toBeVisible();
+  await page.evaluate(() => { window.__releaseRendererOptions = null; });
+  await start();
+  await expect.poll(() => page.evaluate(() => typeof window.__releaseRendererOptions)).toBe('function');
+  await page.evaluate(() => {
+    referenceDialog.close(); dialogContent.replaceChildren(); dialogTitle.textContent='Another dialog'; referenceDialog.showModal();
+    window.__releaseRendererOptions();
+  });
+  await expect(page.locator('#dialog-title')).toHaveText('Another dialog');
+  await expect(page.locator('#dialog-content')).toBeEmpty();
+  expect(errors).toEqual([]);
+});
+
+test('Tauri renderer preset names share file and object collision rules', async ({page}) => {
+  const errors = await openShell(page, {}, {rendererSetup:true});
+  await page.evaluate(() => {
+    snapshot.lwObjects = [{sceneUid:1,renderers:[{name:'default1_1'}],rendererGroups:[{name:'customshort_1'}]}];
+    void showRendererSetup({targetKind:'molecule',objectName:'file',rendererType:'cpk',rendererName:'cpk1',recenter:true,
+      options:[{name:'cpk',description:'CPK',preset:false},{name:'Default1RendPreset',description:'Default',preset:true},
+        {name:'CustomShort',description:'Custom',preset:true}]});
+  });
+  const dialog = page.locator('#reference-dialog');
+  await dialog.getByLabel('Renderer type:', {exact:true}).selectOption('CustomShort');
+  await expect(dialog.getByLabel('Renderer name:', {exact:true})).toHaveValue('customshort_2');
+  await dialog.getByLabel('Renderer type:', {exact:true}).selectOption('Default1RendPreset');
+  await expect(dialog.getByLabel('Renderer name:', {exact:true})).toHaveValue('default1_2');
+  await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
   expect(errors).toEqual([]);
 });
