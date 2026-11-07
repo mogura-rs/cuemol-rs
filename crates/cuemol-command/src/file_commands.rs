@@ -153,6 +153,7 @@ pub fn load_file(
         renderer_name: args["rendererName"].as_str().unwrap_or(kind).into(),
         selection: args["selection"].as_str().map(str::to_owned),
         recenter: args["centerView"] != false,
+        map_center_policy: None,
     };
     let loaded = match options.target {
         GuiFileRendererTarget::Molecule => state.open_path_with_file_reader_and_renderer_setup(
@@ -238,40 +239,14 @@ pub(crate) fn apply_map_renderer_center_policy(
     renderers: &[Uid],
     args: &Value,
 ) -> Result<()> {
-    let policy = map_center_policy(args)?;
-    if state.density_map_kind(map_uid).is_none() {
-        return Ok(());
-    }
-    let summary = state
-        .density_map_summary(map_uid)
-        .ok_or_else(|| CueMolError::not_found("density map"))?;
-    let is_unit_cell = |id: &Uid| {
-        summary.renderers.iter().any(|renderer| {
-            renderer.uid == *id
-                && matches!(renderer.renderer_type.as_str(), "*unitcell" | "unitcell")
-        })
+    let policy = match map_center_policy(args)? {
+        "auto" => cuemol_desktop_core::GuiMapCenterPolicy::Auto,
+        "moveViewCenter" => cuemol_desktop_core::GuiMapCenterPolicy::MoveViewCenter,
+        _ => cuemol_desktop_core::GuiMapCenterPolicy::SetMapCenter,
     };
-    if !renderers.is_empty() && renderers.iter().all(is_unit_cell) {
-        return Ok(());
-    }
-    let move_view = match policy {
-        "auto" => state
-            .density_map_kind(map_uid)
-            .is_some_and(|(_, kind)| kind == "em"),
-        "moveViewCenter" => true,
-        _ => false,
-    };
-    if move_view {
-        let mut view = crate::properties::current_fit_view(state, camera)?;
-        state.fit_density_map_view(map_uid, &mut view)?;
-        *camera = view.camera();
-    } else {
-        for &renderer in renderers {
-            if !is_unit_cell(&renderer) {
-                state.set_density_renderer_center(map_uid, renderer, camera.center())?;
-            }
-        }
-    }
+    let mut view = crate::properties::current_fit_view(state, camera)?;
+    state.apply_density_map_center_policy(map_uid, renderers, policy, &mut view)?;
+    *camera = view.camera();
     Ok(())
 }
 

@@ -2306,7 +2306,9 @@ test('Tauri file options retain AMBER coordinates and map kind before submission
   await dialog.getByLabel('Coordinate file:',{exact:true}).fill('coordinates/sample.rst7');
   await dialog.getByRole('button',{name:'OK',exact:true}).click();
   await expect.poll(()=>page.evaluate(()=>window.__readerResult?.amberPrmtopOptions)).toEqual({coordinatePath:'coordinates/sample.rst7'});
-  await show({...common,targetKind:'densityMap',rendererType:'isosurf',options:[{name:'isosurf',description:'Isosurface',preset:false}],mapHeader:{counts:[1025,1025,257],voxels:1025*1025*257},ccp4MapOptions:{normalize:false,truncateMin:false,min:0,truncateMax:false,max:5,subsample:1,maxVoxels:0,useHeaderStats:true,mapType:'auto'}});
+  await show({...common,targetKind:'densityMap',mapCenterPolicy:'auto',rendererType:'isosurf',options:[{name:'isosurf',description:'Isosurface',preset:false}],mapHeader:{counts:[1025,1025,257],voxels:1025*1025*257},ccp4MapOptions:{normalize:false,truncateMin:false,min:0,truncateMax:false,max:5,subsample:1,maxVoxels:0,useHeaderStats:true,mapType:'auto'}});
+  await expect(dialog.getByRole('radio',{name:'Auto (from map type)',exact:true})).toBeChecked();
+  await dialog.getByRole('radio',{name:'Move view center (fit the map)',exact:true}).check();
   await dialog.getByRole('tab',{name:'CCP4Map options',exact:true}).click();
   await expect(dialog).toContainText('Grid 1025 × 1025 × 257');
   await expect(dialog).toContainText('suggested subsample: 2');
@@ -2316,5 +2318,6 @@ test('Tauri file options retain AMBER coordinates and map kind before submission
   await page.screenshot({path:testInfo.outputPath('map-reader.png')});
   await dialog.getByRole('button',{name:'OK',exact:true}).click();
   await expect.poll(()=>page.evaluate(()=>window.__readerResult?.ccp4MapOptions)).toMatchObject({mapType:'em',subsample:2});
+  await expect.poll(()=>page.evaluate(()=>window.__readerResult?.rendererSetup)).toMatchObject({mapCenterPolicy:'moveViewCenter',recenter:false});
   expect(errors).toEqual([]);
 });

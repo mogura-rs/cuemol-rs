@@ -1,5 +1,26 @@
 # Validation evidence
 
+## Shared file-open map centering
+
+Native egui and Tauri now offer Auto, keep-view and fit-map policies. Auto
+resolves after reader map-kind overrides: EM fits the loaded volume; crystalline
+map regions follow the existing view. The shared typed policy also backs command
+loading and renderer creation. Unit-cell renderers do not move the camera.
+Legacy callers without a policy retain their previous recenter behavior.
+
+Four reader tests pass, including all map-kind/policy combinations and portrait
+viewport fitting. All 209 native tests pass; an extended native load/undo test
+also passes. All 186 Tauri model tests pass with five optional cases ignored.
+The Tauri load regression covers legacy requests, explicit Auto/fit behavior and
+one-step undo. The focused DOM case checks the default Auto selection and
+explicit fit submission alongside map-kind and stride choices. All 69 command
+unit tests pass; two optional tests remain ignored.
+
+The earlier file-options implementation only represented map centering as a
+boolean, and the guide therefore lacked the current reference Auto behavior.
+The native interfaces and guide now describe the resolved policy. Browser
+file-option and remaining dialog comparisons stay open.
+
 ## AMBER companion coordinates and map-reader controls
 
 The shared file setup now exposes optional AMBER coordinates, CCP4/MRC map kind
@@ -22,8 +43,8 @@ loads that companion relative to the scene when necessary. New file imports
 record a resolved companion source and the topology compression mode so later
 scene saves do not silently relocate a relative coordinate path. The previous
 guide omitted these reader controls; it now describes them and explicitly
-identifies browser options as unfinished. Current map-center policy and the
-remaining reader/dialog comparisons are still open.
+identifies browser options as unfinished. The later map-centering checks above supersede that part of this snapshot;
+the remaining reader/dialog comparisons are still open.
 
 ## Component Catalog examples
 

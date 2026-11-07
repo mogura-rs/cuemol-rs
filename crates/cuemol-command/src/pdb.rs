@@ -205,6 +205,7 @@ pub fn configure_downloaded(
                     renderer_name: renderer_type.into(),
                     selection: None,
                     recenter: false,
+                    map_center_policy: None,
                 },
                 None,
             )?;

@@ -3,7 +3,9 @@ mod clipboard;
 mod config_io;
 mod file_open;
 mod reader_options;
-pub use reader_options::{GuiAmberPrmtopReaderOptions, GuiMapHeader, GuiMapType};
+pub use reader_options::{
+    GuiAmberPrmtopReaderOptions, GuiMapCenterPolicy, GuiMapHeader, GuiMapType,
+};
 pub mod plugins;
 #[cfg(feature = "scripting")]
 pub mod preferences;
@@ -1468,6 +1470,7 @@ pub struct GuiRendererSetup {
     pub renderer_name: String,
     pub selection: Option<String>,
     pub recenter: bool,
+    pub map_center_policy: Option<GuiMapCenterPolicy>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8016,6 +8019,7 @@ impl DesktopAppState {
             renderer_name: renderer_type.to_string(),
             selection: None,
             recenter: true,
+            map_center_policy: None,
         };
         self.load_md_trajectory_with_renderer_setup(
             scene_uid,
@@ -13986,6 +13990,14 @@ impl DesktopAppState {
             .get_mut(&map_uid)
             .expect("density map and renderer were just added");
         let volume_center = map.map.fit_view_center_and_radius().0;
+        let renderer_center = if setup
+            .map_center_policy
+            .is_some_and(|policy| policy.fits_map(map.map.is_em()))
+        {
+            None
+        } else {
+            renderer_center
+        };
         let renderer = map
             .renderers
             .iter_mut()
@@ -14104,6 +14116,7 @@ impl DesktopAppState {
                                 renderer_name: "isosurf".into(),
                                 selection: None,
                                 recenter: false,
+                                map_center_policy: None,
                             };
                             self.configure_loaded_bytes(&loaded, &setup, None)?;
                         }
@@ -65326,6 +65339,7 @@ end_header
             renderer_name: "atoms".to_string(),
             selection: None,
             recenter: true,
+            map_center_policy: None,
         };
         let error = app
             .load_md_trajectory_with_renderer_setup(
@@ -65347,6 +65361,7 @@ end_header
             renderer_name: "atoms".to_string(),
             selection: Some("name N".to_string()),
             recenter: true,
+            map_center_policy: None,
         };
         let summary = app
             .load_md_trajectory_with_renderer_setup(
@@ -71220,6 +71235,7 @@ end_header
             renderer_name: "ballstick1".to_string(),
             selection: Some("name CA".to_string()),
             recenter: true,
+            map_center_policy: None,
         };
         let GuiLoadedPath::Object { object_uid, .. } =
             app.open_path_with_renderer_setup(&path, &setup).unwrap()
@@ -71281,6 +71297,7 @@ end_header
             renderer_name: "atoms".to_string(),
             selection: None,
             recenter: false,
+            map_center_policy: None,
         };
         let GuiLoadedPath::Object { object_uid, .. } = app
             .open_path_with_reader_and_renderer_setup(&path, Some(&options), &setup)
@@ -71366,6 +71383,7 @@ end_header
             renderer_name: "atoms".to_string(),
             selection: None,
             recenter: true,
+            map_center_policy: None,
         };
         let GuiLoadedPath::Object { object_uid, .. } = app
             .open_path_with_file_reader_and_renderer_setup(&coor_path, None, Some(&options), &setup)
@@ -71809,6 +71827,7 @@ attribute \"dep\" string \"positions\"
             renderer_name: "surface1".to_string(),
             selection: None,
             recenter: false,
+            map_center_policy: None,
         };
         let GuiLoadedPath::Map { map_uid, .. } = app
             .open_density_map_path_with_renderer_setup(
@@ -71901,6 +71920,7 @@ attribute \"dep\" string \"positions\"
             renderer_name: "contour1".to_string(),
             selection: None,
             recenter: true,
+            map_center_policy: None,
         };
         let GuiLoadedPath::Map { map_uid, .. } = app
             .open_density_map_path_with_renderer_setup(
@@ -71964,6 +71984,7 @@ attribute \"dep\" string \"positions\"
             renderer_name: "atoms".to_string(),
             selection: Some("name CA".to_string()),
             recenter: false,
+            map_center_policy: None,
         };
         let summary = app
             .open_pdb_files(
@@ -72039,6 +72060,7 @@ attribute \"dep\" string \"positions\"
             renderer_name: "view".to_string(),
             selection: None,
             recenter: true,
+            map_center_policy: None,
         };
         let preset_summary = preset_app
             .open_pdb_files(
@@ -72969,6 +72991,7 @@ attribute \"dep\" string \"positions\"
             renderer_name: "surface1".to_string(),
             selection: None,
             recenter: true,
+            map_center_policy: None,
         };
         let GuiLoadedPath::Scene { scene_uid } = app
             .open_surface_path_with_renderer_setup(&face_path, Some(&options), &setup)
@@ -74771,6 +74794,7 @@ attribute \"dep\" string \"positions\"
                         renderer_name: "simple-smiles".to_string(),
                         selection: None,
                         recenter: true,
+                        map_center_policy: None,
                     },
                 )
                 .unwrap();

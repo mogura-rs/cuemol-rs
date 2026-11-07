@@ -203,6 +203,7 @@ pub fn load_fetched(
                 renderer_name: "isosurf".into(),
                 selection: None,
                 recenter: true,
+                map_center_policy: None,
             };
             state.configure_loaded_bytes(&loaded, &setup, None)?;
             if let Some(level) = args["level"].as_f64() {
@@ -233,6 +234,7 @@ pub fn load_fetched(
             renderer_name: args["rendererName"].as_str().unwrap_or(kind).into(),
             selection: args["selection"].as_str().map(str::to_string),
             recenter: args["centerView"] != false,
+            map_center_policy: None,
         };
         state.configure_loaded_bytes(&loaded, &setup, None)?;
         match loaded {

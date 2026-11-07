@@ -41,6 +41,14 @@ impl DesktopAppState {
                 let uid = self.add_density_renderer(map_uid, &setup.renderer_type)?;
                 let map = self.density_maps.get_mut(&map_uid).unwrap();
                 let center = map.map.fit_view_center_and_radius().0;
+                let map_center = if setup
+                    .map_center_policy
+                    .is_some_and(|policy| policy.fits_map(map.map.is_em()))
+                {
+                    None
+                } else {
+                    map_center
+                };
                 let renderer = map.renderers.iter_mut().find(|r| r.uid == uid).unwrap();
                 renderer.name = setup.renderer_name.clone();
                 renderer.center = map_center.unwrap_or(center);

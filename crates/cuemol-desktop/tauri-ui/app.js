@@ -4567,7 +4567,7 @@ function showRendererSetup(setup) {
   const recenter = densityMapTarget
     ? null
     : dialogCheckbox("Recenter view", setup.recenter, rendererPage);
-  let moveViewCenter = null;
+  let mapCenterPolicy = null;
   if (densityMapTarget) {
     const centerOptions = document.createElement("div");
     centerOptions.setAttribute("role", "radiogroup");
@@ -4586,8 +4586,11 @@ function showRendererSetup(setup) {
       centerOptions.append(wrapper);
       return input;
     };
-    addCenterOption("Set map center", "map", !setup.recenter);
-    moveViewCenter = addCenterOption("Move view center", "view", setup.recenter);
+    const policy = setup.mapCenterPolicy ?? (setup.recenter ? "moveViewCenter" : "setMapCenter");
+    addCenterOption("Auto (from map type)", "auto", policy === "auto");
+    addCenterOption("Set map center (keep the view)", "setMapCenter", policy === "setMapCenter");
+    addCenterOption("Move view center (fit the map)", "moveViewCenter", policy === "moveViewCenter");
+    mapCenterPolicy = () => centerOptions.querySelector("input:checked")?.value || "auto";
     rendererPage.append(centerOptions);
   }
   let readerControls = null;
@@ -4882,7 +4885,8 @@ function showRendererSetup(setup) {
             selectionAllowed && selection.enabled.checked
               ? selection.input.value.trim()
               : null,
-          recenter: densityMapTarget ? moveViewCenter.checked : recenter.checked,
+          recenter: densityMapTarget ? false : recenter.checked,
+          mapCenterPolicy: densityMapTarget ? mapCenterPolicy() : null,
         },
         readerOptions: readerControls
           ? {

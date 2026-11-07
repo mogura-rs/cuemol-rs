@@ -1288,6 +1288,7 @@ struct NativeRendererSetupDraft {
     selection: String,
     recenter: bool,
     options: Vec<crate::GuiRendererSetupOption>,
+    map_center_policy: crate::GuiMapCenterPolicy,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -16635,7 +16636,7 @@ impl GuiApplication {
     ) {
         let recenter = setup.recenter;
         let undo = self.capture_undo();
-        let map_renderer_center = (!recenter).then(|| {
+        let map_renderer_center = (setup.map_center_policy.is_some() || !recenter).then(|| {
             Vector4::new3(
                 camera.target.x as f64,
                 camera.target.y as f64,
@@ -16699,7 +16700,24 @@ impl GuiApplication {
                 self.add_recent_path(path.clone());
                 self.sync_active_scene_properties();
                 self.rebuild_snapshot();
-                if recenter {
+                if let Some(policy) = setup.map_center_policy {
+                    let mut view = View::new(cuemol_core::Uid::new(1), scene_uid);
+                    view.set_camera(&camera.to_qsys_camera("__current"));
+                    let size = self
+                        .viewport_rect
+                        .map(|rect| rect.size())
+                        .unwrap_or_else(|| egui::vec2(800.0, 600.0));
+                    view.set_view_size(size.x.max(1.0) as u32, size.y.max(1.0) as u32);
+                    if let Err(error) =
+                        self.state
+                            .apply_density_map_center_policy(map_uid, &[], policy, &mut view)
+                    {
+                        self.set_error(error);
+                        return;
+                    }
+                    camera.apply_qsys_camera(&view.camera());
+                    self.rebuild_snapshot();
+                } else if recenter {
                     camera.fit_snapshot(&self.snapshot);
                 }
                 self.set_status(format!("File: [{}] is loaded.", path.display()));
@@ -25976,6 +25994,7 @@ impl GuiApplication {
                         renderer_name: "auto".into(),
                         selection: None,
                         recenter: true,
+                        map_center_policy: None,
                     },
                     camera,
                 );
@@ -27004,6 +27023,7 @@ impl GuiApplication {
             selection_enabled: false,
             selection: String::new(),
             recenter: target != crate::GuiFileRendererTarget::DensityMap && preferences.recenter,
+            map_center_policy: crate::GuiMapCenterPolicy::Auto,
             options,
         });
     }
@@ -27112,8 +27132,19 @@ impl GuiApplication {
                         ui.checkbox(&mut draft.recenter, "Recenter view");
                     }
                     crate::GuiFileRendererTarget::DensityMap => {
-                        ui.radio_value(&mut draft.recenter, false, "Set map center");
-                        ui.radio_value(&mut draft.recenter, true, "Move view center");
+                        for (policy, label) in [
+                            (crate::GuiMapCenterPolicy::Auto, "Auto (from map type)"),
+                            (
+                                crate::GuiMapCenterPolicy::SetMapCenter,
+                                "Set map center (keep the view)",
+                            ),
+                            (
+                                crate::GuiMapCenterPolicy::MoveViewCenter,
+                                "Move view center (fit the map)",
+                            ),
+                        ] {
+                            ui.radio_value(&mut draft.map_center_policy, policy, label);
+                        }
                     }
                     crate::GuiFileRendererTarget::Surface => {
                         ui.checkbox(&mut draft.recenter, "Recenter view");
@@ -27431,6 +27462,8 @@ impl GuiApplication {
                     && draft.selection_enabled)
                     .then(|| draft.selection.trim().to_string()),
                 recenter: draft.recenter,
+                map_center_policy: (draft.target == crate::GuiFileRendererTarget::DensityMap)
+                    .then_some(draft.map_center_policy),
             };
             if let Some(selection) = setup.selection.as_deref() {
                 self.remember_selection_history(selection);
@@ -38281,6 +38314,63 @@ mod tests {
         assert_eq!(setup.renderer_type, "contour");
         assert!(!setup.recenter);
         assert!(setup.reader_options.is_none());
+        assert_eq!(setup.map_center_policy, crate::GuiMapCenterPolicy::Auto);
+        for policy in [
+            crate::GuiMapCenterPolicy::Auto,
+            crate::GuiMapCenterPolicy::MoveViewCenter,
+        ] {
+            let mut app = GuiApplication::new();
+            app.viewport_rect = Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 800.0),
+            ));
+            let mut camera = CameraController::default();
+            camera.target = Vec3::new(40.0, 50.0, 60.0);
+            let original = camera.to_qsys_camera("__current");
+            app.open_path_with_renderer_setup(
+                path.clone(),
+                crate::GuiFileRendererTarget::DensityMap,
+                NativeFileReaderOptions {
+                    molecule: None,
+                    namd_coor: None,
+                    amber_prmtop: None,
+                    density_map: None,
+                    msms: None,
+                },
+                crate::GuiRendererSetup {
+                    object_name: "density".into(),
+                    renderer_type: "contour".into(),
+                    renderer_name: "contour".into(),
+                    selection: None,
+                    recenter: false,
+                    map_center_policy: Some(policy),
+                },
+                &mut camera,
+            );
+            let scene = app.state.active_scene().unwrap();
+            let map = app.state.density_map_summaries(scene)[0].uid;
+            let mut expected = View::new(cuemol_core::Uid::new(1), scene);
+            expected.set_camera(&original);
+            expected.set_view_size(400, 800);
+            if policy == crate::GuiMapCenterPolicy::MoveViewCenter {
+                app.state.fit_density_map_view(map, &mut expected).unwrap();
+            }
+            let actual = camera.to_qsys_camera("__current");
+            let delta = actual.center() - expected.camera().center();
+            assert!(
+                delta.x.abs() < 1e-5 && delta.y.abs() < 1e-5 && delta.z.abs() < 1e-5,
+                "{policy:?}: actual={:?} expected={:?}",
+                actual.center(),
+                expected.camera().center()
+            );
+            assert!((actual.zoom() - expected.camera().zoom()).abs() < 1e-5);
+            assert_eq!(app.undo_stack.len(), 1);
+            app.undo(&mut camera);
+            assert!(app
+                .state
+                .density_map_summaries(app.state.active_scene().unwrap())
+                .is_empty());
+        }
         fs::remove_file(path).unwrap();
     }
 

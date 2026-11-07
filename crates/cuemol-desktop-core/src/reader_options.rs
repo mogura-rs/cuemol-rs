@@ -1,6 +1,62 @@
 use super::*;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GuiMapCenterPolicy {
+    #[default]
+    Auto,
+    SetMapCenter,
+    MoveViewCenter,
+}
+
+impl GuiMapCenterPolicy {
+    pub fn fits_map(self, is_em: bool) -> bool {
+        match self {
+            Self::Auto => is_em,
+            Self::SetMapCenter => false,
+            Self::MoveViewCenter => true,
+        }
+    }
+}
+
+impl DesktopAppState {
+    pub fn apply_density_map_center_policy(
+        &mut self,
+        map_uid: Uid,
+        renderer_uids: &[Uid],
+        policy: GuiMapCenterPolicy,
+        view: &mut View,
+    ) -> Result<()> {
+        let Some((_, kind)) = self.density_map_kind(map_uid) else {
+            return Ok(());
+        };
+        let fit = policy.fits_map(kind == "em");
+        let renderers = self
+            .density_map_summary(map_uid)
+            .ok_or_else(|| CueMolError::not_found("density map"))?
+            .renderers
+            .into_iter()
+            .filter(|renderer| {
+                !matches!(renderer.renderer_type.as_str(), "*unitcell" | "unitcell")
+                    && (renderer_uids.is_empty() || renderer_uids.contains(&renderer.uid))
+            })
+            .map(|renderer| renderer.uid)
+            .collect::<Vec<_>>();
+        if renderers.is_empty() {
+            return Ok(());
+        }
+        if fit {
+            self.fit_density_map_view(map_uid, view)?;
+        } else {
+            for renderer in renderers {
+                self.set_density_renderer_center(map_uid, renderer, view.camera().center())?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GuiMapType {
     #[default]
@@ -121,6 +177,7 @@ mod tests {
             renderer_name: "atoms".into(),
             selection: None,
             recenter: true,
+            map_center_policy: None,
         };
         let GuiLoadedPath::Object { object_uid, .. } = app
             .open_path_with_molecule_reader_setup(&path, &options, &setup)
@@ -214,10 +271,7 @@ mod tests {
         assert_eq!(serde_json::to_string(&GuiMapType::Em).unwrap(), "\"em\"");
     }
 
-    #[test]
-    fn file_map_kind_override_precedes_renderer_creation_and_survives_save() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("density.mrc");
+    fn test_map_bytes() -> Vec<u8> {
         let mut bytes = vec![0u8; 1024];
         for (word, value) in [
             (0, 2i32),
@@ -251,6 +305,14 @@ mod tests {
         for value in 0..8 {
             bytes.extend_from_slice(&(value as f32).to_le_bytes());
         }
+        bytes
+    }
+
+    #[test]
+    fn file_map_kind_override_precedes_renderer_creation_and_survives_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("density.mrc");
+        let bytes = test_map_bytes();
         std::fs::write(&path, bytes).unwrap();
         let mut app = DesktopAppState::new();
         let defaults = app.file_renderer_setup_for_path(&path).unwrap().unwrap();
@@ -265,6 +327,7 @@ mod tests {
             renderer_name: "surface".into(),
             selection: None,
             recenter: true,
+            map_center_policy: None,
         };
         let GuiLoadedPath::Map { map_uid, .. } = app
             .open_density_map_path_with_renderer_setup(&path, Some(&options), None, &setup)
@@ -285,5 +348,92 @@ mod tests {
         restored.open_bytes("map.qsc", &scene).unwrap();
         let map_uid = restored.density_map_summaries(restored.active_scene().unwrap())[0].uid;
         assert_eq!(restored.density_map_kind(map_uid), Some(("em", "em")));
+    }
+    #[test]
+    fn map_center_policy_resolves_after_reader_override_and_fits_only_the_loaded_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("density.mrc");
+        std::fs::write(&path, test_map_bytes()).unwrap();
+        for kind in [GuiMapType::Xtal, GuiMapType::Em] {
+            for policy in [
+                GuiMapCenterPolicy::Auto,
+                GuiMapCenterPolicy::SetMapCenter,
+                GuiMapCenterPolicy::MoveViewCenter,
+            ] {
+                let mut app = DesktopAppState::new();
+                let current_center = Vector4::new3(70., -25., 41.);
+                let setup = GuiRendererSetup {
+                    object_name: "loaded".into(),
+                    renderer_type: "contour".into(),
+                    renderer_name: "density".into(),
+                    selection: None,
+                    recenter: false,
+                    map_center_policy: Some(policy),
+                };
+                let options = GuiDensityMapReaderOptions::Ccp4(GuiCcp4MapReaderOptions {
+                    map_type: kind,
+                    ..Default::default()
+                });
+                let GuiLoadedPath::Map { scene_uid, map_uid } = app
+                    .open_density_map_path_with_renderer_setup(
+                        &path,
+                        Some(&options),
+                        Some(current_center),
+                        &setup,
+                    )
+                    .unwrap()
+                else {
+                    panic!("map")
+                };
+                let mut view = View::new(Uid::new(1), scene_uid);
+                let mut camera = view.camera();
+                camera.set_center(current_center);
+                camera.set_zoom(150.);
+                view.set_camera(&camera);
+                view.set_view_size(400, 800);
+                let mut expected = view.clone();
+                let should_fit = policy == GuiMapCenterPolicy::MoveViewCenter
+                    || (policy == GuiMapCenterPolicy::Auto && kind == GuiMapType::Em);
+                if should_fit {
+                    app.fit_density_map_view(map_uid, &mut expected).unwrap();
+                }
+                let renderer_uid = app.density_map_summary(map_uid).unwrap().renderers[0].uid;
+                let before_center = app.density_map_summary(map_uid).unwrap().renderers[0].specific
+                    ["center"]
+                    .clone();
+                if should_fit {
+                    assert_ne!(before_center, current_center.to_string());
+                }
+                app.apply_density_map_center_policy(map_uid, &[], policy, &mut view)
+                    .unwrap();
+                assert_eq!(
+                    view.camera().center(),
+                    expected.camera().center(),
+                    "{kind:?} {policy:?}"
+                );
+                assert_eq!(
+                    view.camera().zoom(),
+                    expected.camera().zoom(),
+                    "{kind:?} {policy:?}"
+                );
+                let summary = app.density_map_summary(map_uid).unwrap();
+                let renderer = summary
+                    .renderers
+                    .iter()
+                    .find(|r| r.uid == renderer_uid)
+                    .unwrap();
+                assert_eq!(renderer.specific["center"], before_center);
+                let unitcell = app.add_density_renderer(map_uid, "*unitcell").unwrap();
+                let before = view.camera();
+                app.apply_density_map_center_policy(
+                    map_uid,
+                    &[unitcell],
+                    GuiMapCenterPolicy::MoveViewCenter,
+                    &mut view,
+                )
+                .unwrap();
+                assert_eq!(view.camera(), before);
+            }
+        }
     }
 }

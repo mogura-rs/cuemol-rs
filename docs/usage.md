@@ -67,7 +67,11 @@ the companion path and compression setting.
 CCP4/MRC dialogs display the probed grid size and estimated quantized storage at
 the selected stride. They suggest a stride for large maps and offer Auto,
 Crystallographic and Cryo-EM map kinds before renderer creation. Map-kind choices
-survive QSC save/reload. The browser currently uses default reader options;
+survive QSC save/reload. Map centering defaults to Auto: EM maps fit the whole
+volume, while crystallographic maps keep the current view and place the display
+region at its center. Explicit keep-view and fit-map choices override that
+default. Fitting uses the loaded map bounds and viewport aspect ratio.
+The browser currently uses default reader options;
 its equivalent file-options interface remains under implementation.
 
 ### Saved cameras

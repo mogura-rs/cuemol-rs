@@ -249,6 +249,7 @@ struct RendererSetupDto {
     msms_options: Option<MsmsReaderOptionsDto>,
     ccp4_map_options: Option<Ccp4MapReaderOptionsDto>,
     mtz_map_options: Option<MtzMapReaderOptionsDto>,
+    map_center_policy: Option<crate::GuiMapCenterPolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -512,6 +513,7 @@ struct RendererSetupInput {
     renderer_name: String,
     selection: Option<String>,
     recenter: bool,
+    map_center_policy: Option<crate::GuiMapCenterPolicy>,
 }
 
 #[derive(Deserialize)]
@@ -535,6 +537,7 @@ impl From<RendererSetupInput> for crate::GuiRendererSetup {
             renderer_name: value.renderer_name,
             selection: value.selection,
             recenter: value.recenter,
+            map_center_policy: value.map_center_policy,
         }
     }
 }
@@ -9702,6 +9705,7 @@ fn renderer_setup_defaults(
         .suggest_renderer_name(scene_uid, &renderer_type)
         .map_err(|error| error.to_string())?;
     Ok(RendererSetupDto {
+        map_center_policy: Some(crate::GuiMapCenterPolicy::Auto),
         map_header: None,
         amber_prmtop_options: None,
         target_kind: "molecule".to_string(),
@@ -9756,6 +9760,7 @@ fn density_map_renderer_setup_defaults(
         None => (None, None),
     };
     Ok(RendererSetupDto {
+        map_center_policy: Some(crate::GuiMapCenterPolicy::Auto),
         map_header: None,
         amber_prmtop_options: None,
         target_kind: "densityMap".to_string(),
@@ -9800,6 +9805,7 @@ fn surface_renderer_setup_defaults(
         .suggest_renderer_name(scene_uid, &renderer_type)
         .map_err(|error| error.to_string())?;
     Ok(RendererSetupDto {
+        map_center_policy: Some(crate::GuiMapCenterPolicy::Auto),
         map_header: None,
         amber_prmtop_options: None,
         target_kind: "surface".to_string(),
@@ -10731,7 +10737,7 @@ fn handle_model_request(
             model.start_renderer_warmup();
             let undo = model.capture_undo();
             let recenter = renderer_setup.recenter;
-            let map_renderer_center = (!recenter).then(|| model.camera.center());
+            let map_renderer_center = (renderer_setup.map_center_policy.is_some() || !recenter).then(|| model.camera.center());
             model.sync_view_camera()?;
             let result = open_context.batch(&model.desktop).open_object(&mut model.desktop, |desktop| match target {
                 crate::GuiFileRendererTarget::Molecule
@@ -10788,16 +10794,32 @@ fn handle_model_request(
                     )
                 }
             });
-            if let Err(error) = result {
-                model.restore_undo(undo)?;
-                return Err(error.to_string());
-            }
+            let loaded = match result {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    model.restore_undo(undo)?;
+                    return Err(error.to_string());
+                }
+            };
+            let map_policy = if let crate::GuiLoadedPath::Map { scene_uid, map_uid } = loaded {
+                if let Some(policy) = renderer_setup.map_center_policy {
+                    let mut view = View::new(Uid::new(1), scene_uid);
+                    view.set_camera(&model.camera);
+                    view.set_view_size(width.max(1), height.max(1));
+                    if let Err(error) = model.desktop.apply_density_map_center_policy(map_uid, &[], policy, &mut view) {
+                        model.restore_undo(undo)?;
+                        return Err(error.to_string());
+                    }
+                    model.camera = view.camera();
+                    true
+                } else { false }
+            } else { false };
             model.opened_paths.clear();
             model.opened_paths.push(path.clone());
             model.selection.clear();
             model.sync_active_scene_properties();
             model.status = format!("File: [{path}] is loaded.");
-            model.invalidate_snapshot(recenter);
+            model.invalidate_snapshot(recenter && !map_policy);
             model.push_undo(undo);
             model.touch_structure_details();
             Ok(ModelResponse::MolStructUpdate(Box::new(
@@ -18187,6 +18209,7 @@ mod tests {
                     renderer_name: "atoms".into(),
                     selection: None,
                     recenter: false,
+                    map_center_policy: None,
                 },
                 width: 800,
                 height: 600,
@@ -18285,6 +18308,7 @@ mod tests {
                     renderer_name: "atoms".to_string(),
                     selection: None,
                     recenter: true,
+                    map_center_policy: None,
                 },
                 width: 800,
                 height: 600,
@@ -18318,6 +18342,7 @@ mod tests {
                     renderer_name: "atoms".to_string(),
                     selection: Some("name CA".to_string()),
                     recenter: false,
+                    map_center_policy: None,
                 },
                 width: 800,
                 height: 600,
@@ -18385,6 +18410,7 @@ mod tests {
                     renderer_name: "contour1".to_string(),
                     selection: None,
                     recenter: false,
+                    map_center_policy: None,
                 },
                 width: 800,
                 height: 600,
@@ -18408,6 +18434,65 @@ mod tests {
             Some(&Vector4::new3(4.0, 5.0, 6.0).to_string())
         );
         assert!(!model.snapshot_refit_pending);
+        assert_eq!(
+            defaults.map_center_policy,
+            Some(crate::GuiMapCenterPolicy::Auto)
+        );
+        for policy in [
+            crate::GuiMapCenterPolicy::Auto,
+            crate::GuiMapCenterPolicy::MoveViewCenter,
+        ] {
+            let mut model = model_without_gpu();
+            let original = Vector4::new3(40.0, 50.0, 60.0);
+            model.camera.set_center(original);
+            model.camera.set_zoom(200.0);
+            handle_model_request(
+                &mut model,
+                ModelRequest::OpenPathWithRendererSetup {
+                    open_context: FileOpenContext::default(),
+                    path: path.to_string_lossy().into_owned(),
+                    target: crate::GuiFileRendererTarget::DensityMap,
+                    reader_options: None,
+                    namd_coor_options: None,
+                    amber_prmtop_options: None,
+                    density_map_options: None,
+                    msms_options: None,
+                    renderer_setup: crate::GuiRendererSetup {
+                        object_name: "map".into(),
+                        renderer_type: "contour".into(),
+                        renderer_name: "contour".into(),
+                        selection: None,
+                        recenter: false,
+                        map_center_policy: Some(policy),
+                    },
+                    width: 400,
+                    height: 800,
+                },
+            )
+            .unwrap();
+            assert!(!model.snapshot_refit_pending);
+            if policy == crate::GuiMapCenterPolicy::Auto {
+                assert_eq!(model.camera.center(), original);
+                assert_eq!(model.camera.zoom(), 200.0);
+            } else {
+                let scene = model.desktop.active_scene().unwrap();
+                let map = model.desktop.density_map_summaries(scene)[0].uid;
+                let mut expected = View::new(Uid::new(1), scene);
+                expected.set_camera(&model.camera);
+                expected.set_view_size(400, 800);
+                model
+                    .desktop
+                    .fit_density_map_view(map, &mut expected)
+                    .unwrap();
+                assert_eq!(model.camera.center(), expected.camera().center());
+                assert_eq!(model.camera.zoom(), expected.camera().zoom());
+            }
+            handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+            assert!(model
+                .desktop
+                .density_map_summaries(model.desktop.active_scene().unwrap())
+                .is_empty());
+        }
         fs::remove_file(path).unwrap();
     }
 
@@ -18463,6 +18548,7 @@ mod tests {
                     renderer_name: "surface1".to_string(),
                     selection: None,
                     recenter: true,
+                    map_center_policy: None,
                 },
                 width: 800,
                 height: 600,
@@ -21447,6 +21533,7 @@ mod tests {
                     renderer_name: "lines".to_string(),
                     selection: None,
                     recenter: false,
+                    map_center_policy: None,
                 }),
                 width: 640,
                 height: 480,
@@ -21499,6 +21586,7 @@ mod tests {
                         renderer_name: "atoms".into(),
                         selection: None,
                         recenter: true,
+                        map_center_policy: None,
                     },
                     width: 800,
                     height: 600,
@@ -25722,6 +25810,7 @@ mod tests {
                     renderer_name: "simple-smiles".to_string(),
                     selection: None,
                     recenter: true,
+                    map_center_policy: None,
                 },
             },
         )
