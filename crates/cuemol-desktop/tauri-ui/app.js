@@ -4514,6 +4514,7 @@ function showRendererSetup(setup) {
   referenceDialog.className = "reference-dialog";
   const readerDefaults = setup.readerOptions || null;
   const namdDefaults = setup.namdCoorOptions || null;
+  const amberDefaults = setup.amberPrmtopOptions || null;
   const msmsDefaults = setup.msmsOptions || null;
   const ccp4Defaults = setup.ccp4MapOptions || null;
   const mtzDefaults = setup.mtzMapOptions || null;
@@ -4523,6 +4524,8 @@ function showRendererSetup(setup) {
       : "PDB options"
     : namdDefaults
       ? "NAMD Coor file options"
+    : amberDefaults
+      ? "AMBER topology options"
     : msmsDefaults
       ? "MSMS surface file options"
     : ccp4Defaults
@@ -4649,7 +4652,22 @@ function showRendererSetup(setup) {
     truncateMax.input.step = "0.1";
     truncateMax.enabled.checked = ccp4Defaults.truncateMax;
     truncateMax.input.disabled = !truncateMax.enabled.checked;
+    const mapType = dialogSelect("Map type:", [["auto","Auto (from header)"],["xtal","Crystallographic (periodic)"],["em","Cryo-EM (whole map)"]], ccp4Defaults.mapType || "auto", readerPage);
+    const headerInfo=document.createElement("p"), warning=document.createElement("p");
+    if(setup.mapHeader){
+      readerPage.prepend(headerInfo,warning);
+      const updateHeader=()=>{
+        const stride=Math.max(1,Number(ccp4Controls.subsample.value)||1),counts=setup.mapHeader.counts;
+        const stored=counts.reduce((total,count)=>total*Math.ceil(count/stride),1),limit=256*1024*1024;
+        let suggested=1;while(counts.reduce((total,count)=>total*Math.ceil(count/suggested),1)>limit&&suggested<8)suggested*=2;
+        headerInfo.textContent=`Grid ${counts.join(' × ')} (${(stored/1048576).toFixed(1)} MiB at stride ${stride})`;
+        warning.textContent=stored>limit?`Large map; suggested subsample: ${suggested}`:'';
+        warning.hidden=stored<=limit;
+      };
+      queueMicrotask(()=>{updateHeader();ccp4Controls.subsample.addEventListener('input',updateHeader);});
+    }
     ccp4Controls = {
+      mapType,
       normalize: dialogCheckbox(
         "Normalize by mean and stdev",
         ccp4Defaults.normalize,
@@ -4690,6 +4708,20 @@ function showRendererSetup(setup) {
     });
     topologyPath.closest("label").append(changeTopology);
     namdControls = { topologyPath };
+  }
+  let amberControls = null;
+  if (amberDefaults) {
+    const readerPage = pages.panes[1];
+    const coordinatePath = dialogField("Coordinate file:", amberDefaults.coordinatePath || "", "text", readerPage);
+    const change = button("Change ...", "", async () => {
+      if (!dialog?.open) { showError("The Tauri dialog plugin is unavailable."); return; }
+      const path = await dialog.open({title:"Select AMBER coordinate file",multiple:false,directory:false,defaultPath:coordinatePath.value||undefined,filters:[{name:"AMBER coordinates",extensions:["inpcrd","rst7","restrt","rst","crd"]}]});
+      if(path){coordinatePath.value=path;coordinatePath.dispatchEvent(new Event("input",{bubbles:true}));}
+    });
+    coordinatePath.setAttribute("aria-label", "Coordinate file:");
+    coordinatePath.closest("label").append(change);
+    const hint=document.createElement("p");hint.textContent="Leave empty to load topology only.";readerPage.append(hint);
+    amberControls={coordinatePath};
   }
   let msmsControls = null;
   if (msmsDefaults) {
@@ -4867,11 +4899,13 @@ function showRendererSetup(setup) {
         namdCoorOptions: namdControls
           ? { topologyPath: namdControls.topologyPath.value.trim() }
           : null,
+        amberPrmtopOptions: amberControls ? {coordinatePath: amberControls.coordinatePath.value.trim()} : null,
         msmsOptions: msmsControls
           ? { vertexPath: msmsControls.vertexPath.value.trim() }
           : null,
         ccp4MapOptions: ccp4Controls
           ? {
+              mapType: ccp4Controls.mapType.value,
               normalize: ccp4Controls.normalize.checked,
               truncateMin: ccp4Controls.truncateMin.enabled.checked,
               min: Number(ccp4Controls.truncateMin.input.value),
@@ -17505,6 +17539,7 @@ async function openSelectedPathsBatch(paths, dropped) {
           rendererSetup: setup.rendererSetup,
           readerOptions: setup.readerOptions,
           namdCoorOptions: setup.namdCoorOptions,
+          amberPrmtopOptions: setup.amberPrmtopOptions,
           msmsOptions: setup.msmsOptions,
           ccp4MapOptions: setup.ccp4MapOptions,
           mtzMapOptions: setup.mtzMapOptions,

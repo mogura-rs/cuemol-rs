@@ -1,5 +1,30 @@
 # Validation evidence
 
+## AMBER companion coordinates and map-reader controls
+
+The shared file setup now exposes optional AMBER coordinates, CCP4/MRC map kind
+and bounded header metadata. Native egui and Tauri pass these choices to the
+readers before creating renderers. Header inspection reads only the prefix;
+storage estimates round each sampled grid dimension separately. Large-map
+suggestions remain bounded to strides 1, 2, 4 and 8.
+
+Three shared tests cover AMBER coordinates, linked/embedded scene round trips,
+failed-load rollback, map-kind effects on renderer regions, map save/reload and
+stride estimates. The AMBER test includes compressed topology input and relative
+companion paths. The existing 209 native GUI tests pass. The Tauri suite passes
+185 cases with five optional tests ignored; an added model test also passes for
+AMBER input, coordinates and one-step Undo/Redo. The focused Tauri DOM test
+checks coordinate-path submission, map kind, metadata and stride warnings. Its
+final screenshot was inspected.
+
+The audit found that the QSC AMBER callback ignored `subPath_coord`. It now
+loads that companion relative to the scene when necessary. New file imports
+record a resolved companion source and the topology compression mode so later
+scene saves do not silently relocate a relative coordinate path. The previous
+guide omitted these reader controls; it now describes them and explicitly
+identifies browser options as unfinished. Current map-center policy and the
+remaining reader/dialog comparisons are still open.
+
 ## Component Catalog examples
 
 The native and browser frontends share three collapsible Catalog panes. Tauri

@@ -236,6 +236,7 @@ struct WorkspaceRendererSetupOptionsDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RendererSetupDto {
+    map_header: Option<crate::GuiMapHeader>,
     target_kind: String,
     object_name: String,
     renderer_type: String,
@@ -244,6 +245,7 @@ struct RendererSetupDto {
     options: Vec<RendererSetupOptionDto>,
     reader_options: Option<MoleculeReaderOptionsDto>,
     namd_coor_options: Option<NamdCoorReaderOptionsDto>,
+    amber_prmtop_options: Option<crate::GuiAmberPrmtopReaderOptions>,
     msms_options: Option<MsmsReaderOptionsDto>,
     ccp4_map_options: Option<Ccp4MapReaderOptionsDto>,
     mtz_map_options: Option<MtzMapReaderOptionsDto>,
@@ -383,6 +385,7 @@ impl From<MsmsReaderOptionsDto> for crate::GuiMsmsReaderOptions {
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
 struct Ccp4MapReaderOptionsDto {
+    map_type: crate::GuiMapType,
     normalize: bool,
     truncate_min: bool,
     min: f64,
@@ -396,6 +399,7 @@ struct Ccp4MapReaderOptionsDto {
 impl From<crate::GuiCcp4MapReaderOptions> for Ccp4MapReaderOptionsDto {
     fn from(value: crate::GuiCcp4MapReaderOptions) -> Self {
         Self {
+            map_type: value.map_type,
             normalize: value.normalize,
             truncate_min: value.truncate_min,
             min: value.min,
@@ -411,6 +415,7 @@ impl From<crate::GuiCcp4MapReaderOptions> for Ccp4MapReaderOptionsDto {
 impl From<Ccp4MapReaderOptionsDto> for crate::GuiCcp4MapReaderOptions {
     fn from(value: Ccp4MapReaderOptionsDto) -> Self {
         Self {
+            map_type: value.map_type,
             normalize: value.normalize,
             truncate_min: value.truncate_min,
             min: value.min,
@@ -515,6 +520,7 @@ struct FileRendererSetupInput {
     target_kind: String,
     reader_options: Option<MoleculeReaderOptionsDto>,
     namd_coor_options: Option<NamdCoorReaderOptionsDto>,
+    amber_prmtop_options: Option<crate::GuiAmberPrmtopReaderOptions>,
     msms_options: Option<MsmsReaderOptionsDto>,
     ccp4_map_options: Option<Ccp4MapReaderOptionsDto>,
     mtz_map_options: Option<MtzMapReaderOptionsDto>,
@@ -8091,6 +8097,7 @@ enum ModelRequest {
         target: crate::GuiFileRendererTarget,
         reader_options: Option<crate::GuiMoleculeReaderOptions>,
         namd_coor_options: Option<crate::GuiNamdCoorReaderOptions>,
+        amber_prmtop_options: Option<crate::GuiAmberPrmtopReaderOptions>,
         density_map_options: Option<crate::GuiDensityMapReaderOptions>,
         msms_options: Option<crate::GuiMsmsReaderOptions>,
         renderer_setup: crate::GuiRendererSetup,
@@ -9695,6 +9702,8 @@ fn renderer_setup_defaults(
         .suggest_renderer_name(scene_uid, &renderer_type)
         .map_err(|error| error.to_string())?;
     Ok(RendererSetupDto {
+        map_header: None,
+        amber_prmtop_options: None,
         target_kind: "molecule".to_string(),
         object_name,
         renderer_type,
@@ -9747,6 +9756,8 @@ fn density_map_renderer_setup_defaults(
         None => (None, None),
     };
     Ok(RendererSetupDto {
+        map_header: None,
+        amber_prmtop_options: None,
         target_kind: "densityMap".to_string(),
         object_name,
         renderer_type,
@@ -9789,6 +9800,8 @@ fn surface_renderer_setup_defaults(
         .suggest_renderer_name(scene_uid, &renderer_type)
         .map_err(|error| error.to_string())?;
     Ok(RendererSetupDto {
+        map_header: None,
+        amber_prmtop_options: None,
         target_kind: "surface".to_string(),
         object_name,
         renderer_type,
@@ -10680,7 +10693,7 @@ fn handle_model_request(
                 .and_then(|name| name.to_str())
                 .filter(|name| !name.trim().is_empty())
                 .ok_or_else(|| "the file name is invalid".to_string())?;
-            let setup = match file_setup.target {
+            let mut setup = match file_setup.target {
                 crate::GuiFileRendererTarget::Molecule => renderer_setup_defaults(
                     model,
                     object_name,
@@ -10698,6 +10711,8 @@ fn handle_model_request(
                     file_setup.msms_reader_options,
                 )?,
             };
+            setup.amber_prmtop_options = file_setup.amber_prmtop_reader_options;
+            setup.map_header = file_setup.map_header;
             Ok(ModelResponse::FileRendererSetup(Some(setup)))
         }
         ModelRequest::OpenPathWithRendererSetup {
@@ -10706,6 +10721,7 @@ fn handle_model_request(
             target,
             reader_options,
             namd_coor_options,
+            amber_prmtop_options,
             density_map_options,
             msms_options,
             renderer_setup,
@@ -10726,16 +10742,20 @@ fn handle_model_request(
                     ))
                 }
                 crate::GuiFileRendererTarget::Molecule => {
-                    desktop.open_path_with_file_reader_and_renderer_setup(
+                    desktop.open_path_with_molecule_reader_setup(
                         &path,
-                        reader_options.as_ref(),
-                        namd_coor_options.as_ref(),
+                        &crate::GuiMoleculeFileSetup {
+                            reader_options: reader_options.clone(),
+                            namd_coor_reader_options: namd_coor_options.clone(),
+                            amber_prmtop_reader_options: amber_prmtop_options.clone(),
+                        },
                         &renderer_setup,
                     )
                 }
                 crate::GuiFileRendererTarget::DensityMap
                     if reader_options.is_some()
                         || namd_coor_options.is_some()
+                        || amber_prmtop_options.is_some()
                         || msms_options.is_some() =>
                 {
                     Err(cuemol_core::CueMolError::invalid_argument(
@@ -10753,6 +10773,7 @@ fn handle_model_request(
                 crate::GuiFileRendererTarget::Surface
                     if reader_options.is_some()
                         || namd_coor_options.is_some()
+                        || amber_prmtop_options.is_some()
                         || density_map_options.is_some() =>
                 {
                     Err(cuemol_core::CueMolError::invalid_argument(
@@ -15012,6 +15033,7 @@ fn open_path_with_renderer_setup(
             target,
             reader_options,
             namd_coor_options,
+            amber_prmtop_options: file_setup.amber_prmtop_options,
             density_map_options,
             msms_options,
             renderer_setup,
@@ -18112,6 +18134,98 @@ mod tests {
     }
 
     #[test]
+    fn amber_reader_dialog_loads_coordinates_and_uses_gui_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.prmtop");
+        let coords = dir.path().join("sample.rst7");
+        let mut pointers = [0; 31];
+        pointers[0] = 1;
+        pointers[11] = 1;
+        let mut topology =
+            "%VERSION VERSION_STAMP = V0001.000\n%FLAG POINTERS\n%FORMAT(10I8)\n".to_string();
+        for row in pointers.chunks(10) {
+            for value in row {
+                topology.push_str(&format!("{value:8}"));
+            }
+            topology.push('\n');
+        }
+        topology.push_str("%FLAG ATOM_NAME\n%FORMAT(20a4)\nC1  \n%FLAG ATOMIC_NUMBER\n%FORMAT(10I8)\n       6\n%FLAG RESIDUE_LABEL\n%FORMAT(20a4)\nLIG \n%FLAG RESIDUE_POINTER\n%FORMAT(10I8)\n       1\n");
+        fs::write(&path, topology).unwrap();
+        fs::write(
+            &coords,
+            format!("Coordinates\n1\n{:12.7}{:12.7}{:12.7}\n", 1.25, -2.5, 3.75),
+        )
+        .unwrap();
+        let mut model = model_without_gpu();
+        let defaults = handle_model_request(
+            &mut model,
+            ModelRequest::GetFileRendererSetup {
+                path: path.to_string_lossy().into_owned(),
+            },
+        )
+        .unwrap();
+        let ModelResponse::FileRendererSetup(Some(defaults)) = defaults else {
+            panic!("reader setup")
+        };
+        assert!(defaults.amber_prmtop_options.is_some());
+        let options: crate::GuiAmberPrmtopReaderOptions =
+            serde_json::from_value(serde_json::json!({"coordinatePath":coords})).unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::OpenPathWithRendererSetup {
+                open_context: FileOpenContext::default(),
+                path: path.to_string_lossy().into_owned(),
+                target: crate::GuiFileRendererTarget::Molecule,
+                reader_options: None,
+                namd_coor_options: None,
+                amber_prmtop_options: Some(options),
+                density_map_options: None,
+                msms_options: None,
+                renderer_setup: crate::GuiRendererSetup {
+                    object_name: "coordinates".into(),
+                    renderer_type: "ballstick".into(),
+                    renderer_name: "atoms".into(),
+                    selection: None,
+                    recenter: false,
+                },
+                width: 800,
+                height: 600,
+            },
+        )
+        .unwrap();
+        let ModelResponse::MolStructUpdate(update) = response else {
+            panic!("molecule update")
+        };
+        let uid = Uid::new(update.snapshot.objects[0].uid);
+        assert_eq!(
+            model
+                .desktop
+                .scene_manager()
+                .object(uid)
+                .unwrap()
+                .mol()
+                .atoms()[0]
+                .position,
+            Vector4::new3(1.25, -2.5, 3.75)
+        );
+        assert_eq!(model.undo_stack.len(), 1);
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model.snapshot().objects.is_empty());
+        handle_model_request(&mut model, ModelRequest::Redo(0)).unwrap();
+        assert_eq!(
+            model
+                .desktop
+                .scene_manager()
+                .object(uid)
+                .unwrap()
+                .mol()
+                .atoms()[0]
+                .position,
+            Vector4::new3(1.25, -2.5, 3.75)
+        );
+    }
+
+    #[test]
     fn file_open_renderer_setup_precedes_molecule_loading() {
         let path = std::env::temp_dir().join(format!(
             "cuemol-renderer-setup-open-{}.pdb",
@@ -18162,6 +18276,7 @@ mod tests {
                     .transpose()
                     .unwrap(),
                 namd_coor_options: None,
+                amber_prmtop_options: None,
                 density_map_options: None,
                 msms_options: None,
                 renderer_setup: crate::GuiRendererSetup {
@@ -18194,6 +18309,7 @@ mod tests {
                     .transpose()
                     .unwrap(),
                 namd_coor_options: None,
+                amber_prmtop_options: None,
                 density_map_options: None,
                 msms_options: None,
                 renderer_setup: crate::GuiRendererSetup {
@@ -18260,6 +18376,7 @@ mod tests {
                 target: crate::GuiFileRendererTarget::DensityMap,
                 reader_options: None,
                 namd_coor_options: None,
+                amber_prmtop_options: None,
                 density_map_options: None,
                 msms_options: None,
                 renderer_setup: crate::GuiRendererSetup {
@@ -18337,6 +18454,7 @@ mod tests {
                 target: crate::GuiFileRendererTarget::Surface,
                 reader_options: None,
                 namd_coor_options: None,
+                amber_prmtop_options: None,
                 density_map_options: None,
                 msms_options: defaults.msms_options.map(crate::GuiMsmsReaderOptions::from),
                 renderer_setup: crate::GuiRendererSetup {
@@ -21372,6 +21490,7 @@ mod tests {
                     target: crate::GuiFileRendererTarget::Molecule,
                     reader_options: None,
                     namd_coor_options: None,
+                    amber_prmtop_options: None,
                     density_map_options: None,
                     msms_options: None,
                     renderer_setup: crate::GuiRendererSetup {

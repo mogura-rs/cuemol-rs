@@ -2294,3 +2294,27 @@ test('Tauri catalog keeps property flags, mock resets, and sample edits local',a
   await page.screenshot({path:testInfo.outputPath('catalog.png')});
   expect(errors).toEqual([]);
 });
+
+test('Tauri file options retain AMBER coordinates and map kind before submission',async({page},testInfo)=>{
+  const errors=await openShell(page);
+  const dialog=page.locator('#reference-dialog');
+  const show=async setup=>page.evaluate(setup=>{window.__readerResult=undefined;void showRendererSetup(setup).then(result=>{window.__readerResult=result;});},setup);
+  const common={objectName:'sample',rendererName:'atoms',rendererType:'ballstick',recenter:true,options:[{name:'ballstick',description:'Ball and stick',preset:false}]};
+  await show({...common,targetKind:'molecule',amberPrmtopOptions:{coordinatePath:''}});
+  await dialog.getByRole('tab',{name:'AMBER topology options',exact:true}).click();
+  await expect(dialog.getByLabel('Coordinate file:',{exact:true})).toHaveValue('');
+  await dialog.getByLabel('Coordinate file:',{exact:true}).fill('coordinates/sample.rst7');
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.__readerResult?.amberPrmtopOptions)).toEqual({coordinatePath:'coordinates/sample.rst7'});
+  await show({...common,targetKind:'densityMap',rendererType:'isosurf',options:[{name:'isosurf',description:'Isosurface',preset:false}],mapHeader:{counts:[1025,1025,257],voxels:1025*1025*257},ccp4MapOptions:{normalize:false,truncateMin:false,min:0,truncateMax:false,max:5,subsample:1,maxVoxels:0,useHeaderStats:true,mapType:'auto'}});
+  await dialog.getByRole('tab',{name:'CCP4Map options',exact:true}).click();
+  await expect(dialog).toContainText('Grid 1025 × 1025 × 257');
+  await expect(dialog).toContainText('suggested subsample: 2');
+  await dialog.getByLabel('Grid sampling stride:',{exact:true}).fill('2');
+  await expect(dialog).not.toContainText('Large map');
+  await dialog.getByLabel('Map type:',{exact:true}).selectOption('em');
+  await page.screenshot({path:testInfo.outputPath('map-reader.png')});
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.__readerResult?.ccp4MapOptions)).toMatchObject({mapType:'em',subsample:2});
+  expect(errors).toEqual([]);
+});

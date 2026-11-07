@@ -1276,6 +1276,8 @@ struct NativeRendererSetupDraft {
     target: crate::GuiFileRendererTarget,
     reader_options: Option<crate::GuiMoleculeReaderOptions>,
     namd_coor_options: Option<crate::GuiNamdCoorReaderOptions>,
+    amber_prmtop_options: Option<crate::GuiAmberPrmtopReaderOptions>,
+    map_header: Option<crate::GuiMapHeader>,
     density_map_options: Option<crate::GuiDensityMapReaderOptions>,
     msms_options: Option<crate::GuiMsmsReaderOptions>,
     object_name: String,
@@ -1292,6 +1294,8 @@ struct NativeRendererSetupDraft {
 struct NativeRendererReaderOptions {
     molecule: Option<crate::GuiMoleculeReaderOptions>,
     namd_coor: Option<crate::GuiNamdCoorReaderOptions>,
+    amber_prmtop: Option<crate::GuiAmberPrmtopReaderOptions>,
+    map_header: Option<crate::GuiMapHeader>,
     density_map: Option<crate::GuiDensityMapReaderOptions>,
     msms: Option<crate::GuiMsmsReaderOptions>,
 }
@@ -1300,6 +1304,7 @@ struct NativeRendererReaderOptions {
 struct NativeFileReaderOptions<'a> {
     molecule: Option<&'a crate::GuiMoleculeReaderOptions>,
     namd_coor: Option<&'a crate::GuiNamdCoorReaderOptions>,
+    amber_prmtop: Option<&'a crate::GuiAmberPrmtopReaderOptions>,
     density_map: Option<&'a crate::GuiDensityMapReaderOptions>,
     msms: Option<&'a crate::GuiMsmsReaderOptions>,
 }
@@ -2433,6 +2438,7 @@ enum NativeFileDialog {
     OpenTrajectoryTopology,
     OpenTrajectoryBlock,
     OpenPsf,
+    OpenAmberCoordinate,
     OpenMsmsVertex,
     OpenPovExecutable,
     OpenFfmpegExecutable,
@@ -16374,7 +16380,8 @@ impl GuiApplication {
         match self.state.file_renderer_setup_for_path(&path) {
             Ok(Some(file_setup))
                 if file_setup.target == crate::GuiFileRendererTarget::Molecule
-                    && file_setup.namd_coor_reader_options.is_none() =>
+                    && file_setup.namd_coor_reader_options.is_none()
+                    && file_setup.amber_prmtop_reader_options.is_none() =>
             {
                 self.open_current_path(camera);
             }
@@ -16391,6 +16398,8 @@ impl GuiApplication {
                     NativeRendererReaderOptions {
                         molecule: file_setup.molecule_reader_options,
                         namd_coor: file_setup.namd_coor_reader_options,
+                        amber_prmtop: file_setup.amber_prmtop_reader_options,
+                        map_header: file_setup.map_header,
                         density_map: file_setup.density_map_reader_options,
                         msms: file_setup.msms_reader_options,
                     },
@@ -16635,10 +16644,13 @@ impl GuiApplication {
         });
         let result = match target {
             crate::GuiFileRendererTarget::Molecule => {
-                self.state.open_path_with_file_reader_and_renderer_setup(
+                self.state.open_path_with_molecule_reader_setup(
                     &path,
-                    reader_options.molecule,
-                    reader_options.namd_coor,
+                    &crate::GuiMoleculeFileSetup {
+                        reader_options: reader_options.molecule.cloned(),
+                        namd_coor_reader_options: reader_options.namd_coor.cloned(),
+                        amber_prmtop_reader_options: reader_options.amber_prmtop.cloned(),
+                    },
                     &setup,
                 )
             }
@@ -26981,6 +26993,8 @@ impl GuiApplication {
             target,
             reader_options: reader_options.molecule,
             namd_coor_options: reader_options.namd_coor,
+            amber_prmtop_options: reader_options.amber_prmtop,
+            map_header: reader_options.map_header,
             density_map_options: reader_options.density_map,
             msms_options: reader_options.msms,
             object_name,
@@ -27151,6 +27165,26 @@ impl GuiApplication {
                         }
                     });
                 }
+                if let Some(options) = draft.amber_prmtop_options.as_mut() {
+                    ui.separator();
+                    ui.strong("AMBER topology options");
+                    ui.horizontal(|ui| {
+                        ui.label("Coordinate file:");
+                        ui.add_sized(
+                            [240., 22.],
+                            egui::TextEdit::singleline(&mut options.coordinate_path),
+                        );
+                        if ui.button("Change ...").clicked() {
+                            if let Some(path) = native_file_dialog(
+                                NativeFileDialog::OpenAmberCoordinate,
+                                &options.coordinate_path,
+                            ) {
+                                options.coordinate_path = path.to_string_lossy().into_owned();
+                            }
+                        }
+                    });
+                    ui.label("Leave empty to load topology only.");
+                }
                 if let Some(options) = draft.msms_options.as_mut() {
                     ui.separator();
                     ui.strong("MSMS surface file options");
@@ -27175,6 +27209,43 @@ impl GuiApplication {
                     match options {
                         crate::GuiDensityMapReaderOptions::Ccp4(options) => {
                             ui.strong("CCP4Map options");
+                            if let Some(header) = draft.map_header {
+                                let stored = header.stored_voxels(options.subsample);
+                                ui.label(format!(
+                                    "Grid {} × {} × {} ({:.1} MiB at stride {})",
+                                    header.counts[0],
+                                    header.counts[1],
+                                    header.counts[2],
+                                    stored as f64 / 1_048_576.,
+                                    options.subsample
+                                ));
+                                if stored > crate::GuiMapHeader::LARGE_MAP_VOXELS {
+                                    ui.colored_label(
+                                        ui.visuals().warn_fg_color,
+                                        format!(
+                                            "Large map; suggested subsample: {}",
+                                            header.suggested_subsample()
+                                        ),
+                                    );
+                                }
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label("Map type");
+                                egui::ComboBox::from_id_salt("reader-map-type")
+                                    .selected_text(options.map_type.as_str())
+                                    .show_ui(ui, |ui| {
+                                        for (kind, label) in [
+                                            (crate::GuiMapType::Auto, "Auto (from header)"),
+                                            (
+                                                crate::GuiMapType::Xtal,
+                                                "Crystallographic (periodic)",
+                                            ),
+                                            (crate::GuiMapType::Em, "Cryo-EM (whole map)"),
+                                        ] {
+                                            ui.selectable_value(&mut options.map_type, kind, label);
+                                        }
+                                    });
+                            });
                             ui.horizontal(|ui| {
                                 ui.label("Grid sampling stride");
                                 ui.add(
@@ -27376,6 +27447,7 @@ impl GuiApplication {
                         NativeFileReaderOptions {
                             molecule: draft.reader_options.as_ref(),
                             namd_coor: draft.namd_coor_options.as_ref(),
+                            amber_prmtop: draft.amber_prmtop_options.as_ref(),
                             density_map: draft.density_map_options.as_ref(),
                             msms: draft.msms_options.as_ref(),
                         },
@@ -31156,6 +31228,15 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
         NativeFileDialog::OpenTrajectoryBlock => NativeFileDialogSpec {
             title: "Select trajectory files",
             filters: TRAJECTORY_BLOCK_OPEN_FILTERS,
+            default_extension: None,
+            save: false,
+        },
+        NativeFileDialog::OpenAmberCoordinate => NativeFileDialogSpec {
+            title: "Select AMBER coordinate file",
+            filters: &[NativeFileFilter {
+                label: "AMBER coordinates",
+                extensions: &["inpcrd", "rst7", "restrt", "rst", "crd"],
+            }],
             default_extension: None,
             save: false,
         },

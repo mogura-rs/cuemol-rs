@@ -497,7 +497,26 @@ pub(super) fn read_extra_qsc_molecule_with_options(
                     .as_deref()
                     .unwrap_or("file"),
             )?;
-            cuemol_mdtools::read_amber_prmtop_str_with_bond_mode(text, mode)
+            let coordinate = options
+                .map(|node| node.str_attr("subPath_coord").to_string())
+                .filter(|path| !path.trim().is_empty());
+            let restart = coordinate
+                .map(|coordinate| {
+                    let path = Path::new(&coordinate);
+                    let path = if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        base_path.unwrap_or_else(|| Path::new(".")).join(path)
+                    };
+                    cuemol_molstr::read_text_maybe_compressed(path)
+                })
+                .transpose()?;
+            cuemol_mdtools::read_amber_prmtop_with_restart_str_and_bond_mode(
+                text,
+                restart.as_deref(),
+                mode,
+            )
+            .map(|loaded| loaded.molecule)
         }
         _ => Err(CueMolError::invalid_argument(format!(
             "unsupported QSC molecule source type {format}"

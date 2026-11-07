@@ -57,6 +57,19 @@ QSC and PyMOL scene files use the scene-opening rule independently of these
 object-file preferences. Browser file access uses the selected `File` objects;
 it does not require filesystem paths.
 
+### Reader options
+
+The native egui and Tauri file dialogs accept an optional AMBER coordinate file
+when opening a topology. An empty coordinate path loads topology only. Linked
+and embedded QSC saves retain loaded coordinates; linked AMBER sources preserve
+the companion path and compression setting.
+
+CCP4/MRC dialogs display the probed grid size and estimated quantized storage at
+the selected stride. They suggest a stride for large maps and offer Auto,
+Crystallographic and Cryo-EM map kinds before renderer creation. Map-kind choices
+survive QSC save/reload. The browser currently uses default reader options;
+its equivalent file-options interface remains under implementation.
+
 ### Saved cameras
 
 The View activity contains the Camera pane. Select a row, then use the down-arrow

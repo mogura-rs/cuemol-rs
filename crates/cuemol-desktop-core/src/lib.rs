@@ -2,6 +2,8 @@ mod animation;
 mod clipboard;
 mod config_io;
 mod file_open;
+mod reader_options;
+pub use reader_options::{GuiAmberPrmtopReaderOptions, GuiMapHeader, GuiMapType};
 pub mod plugins;
 #[cfg(feature = "scripting")]
 pub mod preferences;
@@ -1489,6 +1491,7 @@ pub struct GuiMoleculeReaderOptions {
 pub struct GuiMoleculeFileSetup {
     pub reader_options: Option<GuiMoleculeReaderOptions>,
     pub namd_coor_reader_options: Option<GuiNamdCoorReaderOptions>,
+    pub amber_prmtop_reader_options: Option<GuiAmberPrmtopReaderOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1498,6 +1501,7 @@ pub struct GuiNamdCoorReaderOptions {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GuiCcp4MapReaderOptions {
+    pub map_type: GuiMapType,
     pub normalize: bool,
     pub truncate_min: bool,
     pub min: f64,
@@ -1510,6 +1514,7 @@ pub struct GuiCcp4MapReaderOptions {
 impl Default for GuiCcp4MapReaderOptions {
     fn default() -> Self {
         Self {
+            map_type: GuiMapType::Auto,
             normalize: false,
             truncate_min: false,
             min: 0.,
@@ -1562,9 +1567,11 @@ pub enum GuiFileRendererTarget {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GuiFileRendererSetup {
+    pub map_header: Option<GuiMapHeader>,
     pub target: GuiFileRendererTarget,
     pub molecule_reader_options: Option<GuiMoleculeReaderOptions>,
     pub namd_coor_reader_options: Option<GuiNamdCoorReaderOptions>,
+    pub amber_prmtop_reader_options: Option<GuiAmberPrmtopReaderOptions>,
     pub density_map_reader_options: Option<GuiDensityMapReaderOptions>,
     pub msms_reader_options: Option<GuiMsmsReaderOptions>,
 }
@@ -13444,10 +13451,12 @@ impl DesktopAppState {
                 target: GuiFileRendererTarget::Molecule,
                 molecule_reader_options,
                 namd_coor_reader_options,
+                amber_prmtop_reader_options,
                 ..
             }) => Some(GuiMoleculeFileSetup {
                 reader_options: molecule_reader_options,
                 namd_coor_reader_options,
+                amber_prmtop_reader_options,
             }),
             _ => None,
         })
@@ -13462,8 +13471,15 @@ impl DesktopAppState {
             let namd_coor_reader_options = (format == "namdcoor")
                 .then(|| self.namd_coor_reader_options_for_path(path.as_ref()));
             return Ok(Some(GuiFileRendererSetup {
+                map_header: None,
                 target: GuiFileRendererTarget::Molecule,
                 molecule_reader_options: molecule_reader_options_for_format(format),
+                amber_prmtop_reader_options: (format == "amberprm").then(|| {
+                    GuiAmberPrmtopReaderOptions {
+                        coordinate_path: self
+                            .config_value("cuemol2.ui.histories.amberprm.coordpath"),
+                    }
+                }),
                 namd_coor_reader_options,
                 density_map_reader_options: None,
                 msms_reader_options: None,
@@ -13485,9 +13501,15 @@ impl DesktopAppState {
                 _ => None,
             };
             return Ok(Some(GuiFileRendererSetup {
+                map_header: if format == "ccp4map" {
+                    Some(GuiMapHeader::from_path(path.as_ref())?)
+                } else {
+                    None
+                },
                 target: GuiFileRendererTarget::DensityMap,
                 molecule_reader_options: None,
                 namd_coor_reader_options: None,
+                amber_prmtop_reader_options: None,
                 density_map_reader_options,
                 msms_reader_options: None,
             }));
@@ -13503,9 +13525,11 @@ impl DesktopAppState {
                 },
             });
             return Ok(Some(GuiFileRendererSetup {
+                map_header: None,
                 target: GuiFileRendererTarget::Surface,
                 molecule_reader_options: None,
                 namd_coor_reader_options: None,
+                amber_prmtop_reader_options: None,
                 density_map_reader_options: None,
                 msms_reader_options,
             }));
@@ -13546,11 +13570,29 @@ impl DesktopAppState {
         namd_coor_reader_options: Option<&GuiNamdCoorReaderOptions>,
         setup: &GuiRendererSetup,
     ) -> Result<GuiLoadedPath> {
+        self.open_path_with_molecule_reader_setup(
+            path,
+            &GuiMoleculeFileSetup {
+                reader_options: reader_options.cloned(),
+                namd_coor_reader_options: namd_coor_reader_options.cloned(),
+                amber_prmtop_reader_options: None,
+            },
+            setup,
+        )
+    }
+
+    pub fn open_path_with_molecule_reader_setup(
+        &mut self,
+        path: impl AsRef<Path>,
+        options: &GuiMoleculeFileSetup,
+        setup: &GuiRendererSetup,
+    ) -> Result<GuiLoadedPath> {
         let previous = self.clone();
         let result = self.open_molecule_path_with_setup_inner(
             path.as_ref(),
-            reader_options,
-            namd_coor_reader_options,
+            options.reader_options.as_ref(),
+            options.namd_coor_reader_options.as_ref(),
+            options.amber_prmtop_reader_options.as_ref(),
             setup,
         );
         if result.is_err() {
@@ -13564,6 +13606,7 @@ impl DesktopAppState {
         path: &Path,
         reader_options: Option<&GuiMoleculeReaderOptions>,
         namd_coor_reader_options: Option<&GuiNamdCoorReaderOptions>,
+        amber_prmtop_reader_options: Option<&GuiAmberPrmtopReaderOptions>,
         setup: &GuiRendererSetup,
     ) -> Result<GuiLoadedPath> {
         let format = guess_path_format(path, &self.stream_manager)?;
@@ -13572,7 +13615,16 @@ impl DesktopAppState {
                 "the file does not support molecular renderer setup",
             ));
         }
-        if reader_options.is_some() && namd_coor_reader_options.is_some() {
+        if [
+            reader_options.is_some(),
+            namd_coor_reader_options.is_some(),
+            amber_prmtop_reader_options.is_some(),
+        ]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count()
+            > 1
+        {
             return Err(CueMolError::invalid_argument(
                 "only one molecule reader option set is allowed",
             ));
@@ -13637,6 +13689,51 @@ impl DesktopAppState {
                 setup.object_name.trim(),
                 options.topology_path.trim(),
             )?;
+            (scene_uid, object_uid)
+        } else if let Some(options) = amber_prmtop_reader_options {
+            if format != "amberprm" {
+                return Err(CueMolError::invalid_argument(
+                    "AMBER reader options require an AMBER topology",
+                ));
+            }
+            let coordinate_path = options.coordinate_path.trim();
+            let molecule = if coordinate_path.is_empty() {
+                cuemol_mdtools::read_amber_prmtop_file(path)?
+            } else {
+                cuemol_mdtools::read_amber_prmtop_with_restart_files(path, coordinate_path)?
+                    .molecule
+            };
+            let scene_uid = self.ensure_active_scene();
+            let object_uid = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .unwrap()
+                .add_molecule_with_source_type(setup.object_name.trim(), molecule, "amberprm");
+            let object = self.scene_manager_mut().object_mut(object_uid).unwrap();
+            object.set_source(fs::canonicalize(path)?.to_string_lossy());
+            let mut reader = LDom2Node::new();
+            reader.set_tag_name("ropts");
+            reader.set_type_name("AMBERPrmtopReader");
+            let coordinate_source = if coordinate_path.is_empty() {
+                String::new()
+            } else {
+                fs::canonicalize(coordinate_path)?
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            reader.set_str_attr("subPath_coord", coordinate_source);
+            reader.set_str_attr(
+                "compress",
+                match path.extension().and_then(|ext| ext.to_str()) {
+                    Some("gz") => "gzip",
+                    Some("bz2") => "bzip2",
+                    Some("xz") => "xzip",
+                    _ => "none",
+                },
+            );
+            object.replace_qsc_extensions(vec![reader], BTreeMap::new());
+            object.set_modified(false);
+            self.put_config_value("cuemol2.ui.histories.amberprm.coordpath", coordinate_path);
             (scene_uid, object_uid)
         } else {
             let loaded = self.open_path_with_format_inner(path, format)?;
@@ -13850,7 +13947,9 @@ impl DesktopAppState {
                 reader.set_subsample(options.subsample);
                 reader.set_max_voxels(options.max_voxels);
                 reader.set_use_header_stats(options.use_header_stats);
-                reader.read_density_map_file(path)?
+                let mut map = reader.read_density_map_file(path)?;
+                map.set_map_type(options.map_type.as_str())?;
+                map
             }
             Some(GuiDensityMapReaderOptions::Mtz(options)) => {
                 if format != "mtzmap" {
