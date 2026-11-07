@@ -204,6 +204,7 @@ impl App {
     }
 
     pub(super) fn render_ui(&mut self, ctx: &egui::Context) {
+        self.movie_tick(ctx);
         self.flush_render_settings(ctx.input(|i| i.time), !self.show_render);
         if !self.show_render {
             return;
@@ -213,9 +214,9 @@ impl App {
         let action = self.render_panel.show(
             ctx,
             &mut open,
-            self.render_cancel.is_some(),
+            self.render_cancel.is_some() || self.movie.running,
             cuemol_ui::RenderControls {
-                movie_error: Some("Movie file output and FFmpeg encoding currently require the native application.".into()),
+                movie_error: self.movie_error(),
                 can_start: !self.busy && self.render_panel.targets.current().is_some(),
                 pov_error: Some("POV-Ray runs in the native application. Choose Umbreon or Umbreon (NPR) to render here.".into()),
                 view_size: if self.state.active_view_summary().map(|view| view.uid.get())
@@ -237,6 +238,8 @@ impl App {
         if matches!(
             action,
             cuemol_ui::RenderAction::Start
+                | cuemol_ui::RenderAction::StartMovie(_)
+                | cuemol_ui::RenderAction::ReencodeMovie
                 | cuemol_ui::RenderAction::UseSettings
                 | cuemol_ui::RenderAction::Target(_)
         ) || !open
@@ -247,6 +250,7 @@ impl App {
         }
         self.ui_rects.extend(self.render_panel.rects.clone());
         self.show_render = open;
+        self.movie_action(ctx, &action);
         if matches!(
             action,
             cuemol_ui::RenderAction::Undo | cuemol_ui::RenderAction::Redo

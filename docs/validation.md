@@ -1,5 +1,59 @@
 # Validation evidence
 
+## Browser movie output in the shared Rendering window
+
+The browser now captures an isolated Rust movie scene, renders sequential frames
+through the shared still pipeline and writes PNGs to origin storage or a chosen
+folder. H.264/H.265 MP4/MOV encoding uses runtime capability checks and streams
+muxed chunks to an atomic file writer. A pinned Mediabunny module, its MPL-2.0
+license and checksum provenance are bundled by the unified web build; Node is not
+required for packaging. Unsupported encoders fail before output replacement.
+Raw MOV, WMV2 and animated GIF still require the native application.
+
+The shared viewer supports movie history, selected-frame Save/Copy, movie
+Save/Open, re-encoding without an animation and confirmed cleanup. Closing the
+window leaves the job running, and Stop retains completed frames and concurrent
+scene edits. Frame reads are serialized, with only the latest pending selection
+retained. Each history entry stores one cached PNG within its byte budget;
+replaced outputs cannot silently change an older result's displayed frame.
+Cross-window output locks protect writes and cleanup. Managed temporary sessions
+skip active owners, unknown content and all custom folders; expired frames and
+movies use the native retention intervals and inactive-session limit.
+
+Four storage checks pass, covering MP4/MOV metadata and frame bytes, fractional
+rates, cancellation preserving a previous movie, locks across two windows,
+unconfirmed replacement, unsupported encoding, preflight abort and retention.
+Three application checks pass in WebGL/WebGPU: actual three-frame output,
+selected-frame downloads, movie download/open, re-encoding without changing PNG
+bytes or timestamps, confirmed cleanup with cached previews, closed-window work,
+and partial cancellation after a separate scene edit. The final 27-case run
+passes, including all 20 Rendering checks. Slider checks delay real reads and
+verify one in-flight read, latest-selection precedence and preserved history
+previews. Both generated MP4 files also decode through the bundled FFmpeg into
+three distinct 64-by-48 frames.
+
+A new mode-request regression first reproduced the browser toolbar retaining
+movie mode. Toolbar and menu requests now select the requested mode and reapply
+its default size, including repeated requests for the same mode. This follows
+the current reference without immediately writing those defaults to the scene;
+movie preferences and history-restored dimensions remain intact. Earlier browser
+tests set dimensions before opening Rendering and relied on the old behavior;
+they now set their requested dimensions after opening it.
+
+All 96 shared command checks pass, with four explicit external/GPU checks
+excluded; all 232 native and 203 Tauri model checks pass, with six explicit Tauri
+external/GPU checks excluded. Shared history tests cover byte-budget eviction,
+stale/failed asynchronous loads and preserving prior metadata on failed writes.
+The optimized WASM build, workflow actionlint check, formatting and diff checks
+pass. A fresh CLI with GUI and bundled web assets builds, and all 43 served files
+match the staged manifest, including JavaScript/WASM MIME types. The embedded
+application passes the mode-request regression; the preceding embedded build
+also passed a complete movie output workflow. The browser tests
+exercise real downloads and movie tabs; custom-folder tests use genuine browser
+storage handles through a substituted picker. Actual OS directory/save dialogs
+have not been driven. Browser storage availability and codec support remain
+platform-dependent, and these checks do not establish complete reference parity.
+
 ## Scene-scoped application history
 
 Native egui, Tauri and the browser now store shared document changes for the
@@ -107,7 +161,8 @@ contracts referenced that removed form and are updated to check the shared
 controls and runtime. Native WebView OS input and the actual file chooser,
 clipboard and Open/Reveal applications were not exercised by the Chrome adapter.
 The scene-scoped history section above supersedes the target-Undo limitation.
-Browser movie execution and remaining reference details are still open.
+The browser movie section above supersedes the execution limitation. Remaining
+reference details are still open.
 
 ## Native movie integration in the Rendering window
 
@@ -150,8 +205,8 @@ Focused regressions cover both orderings.
 
 The usage guide previously described a separate animation window for both native
 frontends. At that stage it described the unified egui window and the separate Tauri
-window. The Tauri integration above supersedes that limitation. Browser movie
-execution and remaining reference details are still open. The scene-scoped
+window. The Tauri and browser integrations above supersede those limitations.
+Remaining reference details are still open. The scene-scoped
 history section above supersedes the earlier target-Undo limitation.
 
 ## Shared movie output and sequential rendering
@@ -189,8 +244,7 @@ shared reference-compatible calculation, with fractional-time regressions.
 The existing movie windows consume the shared file helpers and frame-count fix;
 at that checkpoint, the new preferences, job and movie history still needed
 connection to the unified Rendering window. The native connection is documented
-above; the Tauri integration is now covered by the newer evidence. Browser movie
-execution remains pending.
+above; the Tauri and browser integrations are now covered by the newer evidence.
 
 ## Movie state isolation
 

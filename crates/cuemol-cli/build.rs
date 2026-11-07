@@ -137,6 +137,7 @@ fn main() {
                 "index.html",
                 "kernels.js",
                 "oidn.js",
+                "movie.js",
                 "input.js",
                 "loader.js",
                 "loader-worker.js",
@@ -147,6 +148,7 @@ fn main() {
     }
     for required in [
         "index.html",
+        "movie.js",
         "loader.js",
         "loader-worker.js",
         "pkg/cuemol_web.js",
@@ -156,6 +158,9 @@ fn main() {
         "pkg/fonts/NotoSansJP-Regular.ttf",
         "pkg/fonts/OFL.txt",
         "pkg/fonts/SOURCE.json",
+        "pkg/movie/mediabunny.js",
+        "pkg/movie/LICENSE",
+        "pkg/movie/SOURCE.json",
     ] {
         assert!(
             assets.contains(required),

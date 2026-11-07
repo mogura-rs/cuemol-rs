@@ -12,7 +12,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parent.parent
 REQUIRED = (
     'pkg/source-build.json',
-    'pkg/logo.png', 'index.html', 'kernels.js', 'oidn.js', 'input.js', 'loader.js', 'loader-worker.js', 'pkg/cuemol_web.js',
+    'pkg/logo.png', 'index.html', 'kernels.js', 'oidn.js', 'movie.js', 'input.js', 'loader.js', 'loader-worker.js', 'pkg/cuemol_web.js',
     'pkg/cuemol_web_bg.wasm', 'pkg/cuemol_web_loader.js', 'pkg/cuemol_web_loader_bg.wasm',
     'pkg/kernels/usalign.js', 'pkg/kernels/usalign.wasm',
     'pkg/kernels/lcms.js', 'pkg/kernels/lcms.wasm',
@@ -27,6 +27,7 @@ REQUIRED = (
     'pkg/licenses/molstar.txt', 'pkg/licenses/smaa.txt', 'pkg/licenses/xegtao.txt',
     'pkg/licenses/phosphor.txt',
     'pkg/fonts/NotoSansJP-Regular.ttf', 'pkg/fonts/OFL.txt', 'pkg/fonts/SOURCE.json',
+    'pkg/movie/mediabunny.js', 'pkg/movie/LICENSE', 'pkg/movie/SOURCE.json',
 )
 
 
@@ -99,7 +100,7 @@ def main():
     if output.exists():
         shutil.rmtree(output)
     output.mkdir(parents=True)
-    for name in ('index.html', 'kernels.js', 'oidn.js', 'input.js', 'loader.js', 'loader-worker.js'):
+    for name in ('index.html', 'kernels.js', 'oidn.js', 'movie.js', 'input.js', 'loader.js', 'loader-worker.js'):
         shutil.copy2(source / name, output / name)
     shutil.copytree(source / 'pkg', output / 'pkg')
     manifest = {

@@ -28,6 +28,8 @@ pub enum RenderAction {
     SaveMovie,
     OpenMovie,
     RevealMovie,
+    #[cfg(target_arch = "wasm32")]
+    MovieFrame(u32),
 }
 
 pub struct RenderControls {
@@ -56,6 +58,7 @@ pub struct RenderPanel {
     pub temporary_directory: String,
     pub available_frames: u32,
     pub has_movie_outputs: bool,
+    pub requested_movie_frame: Option<(u64, u32)>,
     live_preview: bool,
     movie_action: RenderAction,
     confirm_movie_replace: bool,
@@ -94,6 +97,7 @@ impl Default for RenderPanel {
             temporary_directory: String::new(),
             available_frames: 0,
             has_movie_outputs: false,
+            requested_movie_frame: None,
             live_preview: false,
             movie_action: RenderAction::None,
             confirm_movie_replace: false,
@@ -214,6 +218,7 @@ impl RenderPanel {
         })?;
         self.replace_preview(ctx, png, image);
         self.live_preview = false;
+        self.requested_movie_frame = None;
         Ok(())
     }
 
@@ -224,6 +229,7 @@ impl RenderPanel {
         self.viewer = ImageFraming::default();
         self.confirm_clear = false;
         self.live_preview = false;
+        self.requested_movie_frame = None;
     }
 
     fn record(&mut self, label: &str, response: &Response) {
@@ -303,6 +309,7 @@ impl RenderPanel {
                 }
             });
         if let Some(window) = window {
+            self.record("Rendering window", &window.response);
             if ctx.input(|input| input.pointer.any_pressed()) {
                 if let Some(position) = ctx.pointer_latest_pos() {
                     let layer = ctx.layer_id_at(position);

@@ -178,11 +178,24 @@ fn build(args: &[String]) -> Result<()> {
             ])
             .arg(out.join("pkg/fonts")),
     )?;
+    run_command(
+        Command::new("uv")
+            .current_dir(&root)
+            .args([
+                "run",
+                "--no-project",
+                "python",
+                "scripts/bundle-movie.py",
+                "--out-dir",
+            ])
+            .arg(out.join("pkg/movie")),
+    )?;
     if out != root.join("web") {
         for name in [
             "index.html",
             "kernels.js",
             "oidn.js",
+            "movie.js",
             "input.js",
             "loader.js",
             "loader-worker.js",

@@ -58,11 +58,57 @@ impl RenderPanel {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn movie_preview(&mut self, ctx: &Context, path: &std::path::Path) -> Result<(), String> {
         let png: Arc<[u8]> = std::fs::read(path).map_err(|e| e.to_string())?.into();
+        self.movie_preview_bytes(ctx, png)
+    }
+
+    pub fn movie_preview_bytes(&mut self, ctx: &Context, png: Arc<[u8]>) -> Result<(), String> {
         let image = image::load_from_memory(&png)
             .map_err(|e| e.to_string())?
             .into_rgba8();
         self.replace_preview(ctx, png, image);
         self.live_preview = true;
+        Ok(())
+    }
+
+    pub fn store_movie_result(
+        &mut self,
+        ctx: &Context,
+        png: Arc<[u8]>,
+        source: RenderSource,
+        size: [u32; 2],
+        elapsed: f64,
+        movie: cuemol_command::movie::MovieResult,
+    ) -> Result<(), String> {
+        let image = image::load_from_memory(&png)
+            .map_err(|e| e.to_string())?
+            .into_rgba8();
+        self.history
+            .push_movie(png.clone(), source, size, Some(elapsed), movie)?;
+        self.replace_preview(ctx, png, image);
+        self.started = None;
+        self.pending_source = None;
+        self.live_preview = false;
+        self.requested_movie_frame = None;
+        Ok(())
+    }
+
+    pub fn select_movie_frame_bytes(
+        &mut self,
+        ctx: &Context,
+        record: u64,
+        frame: u32,
+        png: Arc<[u8]>,
+    ) -> Result<(), String> {
+        let image = self
+            .history
+            .select_frame_bytes_with(record, frame, png.clone(), |png| {
+                image::load_from_memory(png)
+                    .map(|image| image.into_rgba8())
+                    .map_err(|e| e.to_string())
+            })?;
+        self.replace_preview(ctx, png, image);
+        self.live_preview = false;
+        self.requested_movie_frame = None;
         Ok(())
     }
 
@@ -186,7 +232,7 @@ impl RenderPanel {
         ui.horizontal(|ui| {
             let width = (ui.available_width() - 36.).max(40.);
             let response = ui.add_enabled(
-                !self.movie.use_temp_dir,
+                !self.movie.use_temp_dir && !cfg!(target_arch = "wasm32"),
                 egui::TextEdit::singleline(&mut self.movie.output_dir).desired_width(width),
             );
             self.record("Movie folder", &response);
@@ -278,11 +324,21 @@ impl RenderPanel {
         running: bool,
         action: &mut RenderAction,
     ) {
-        let Some(movie) = self.history.current().and_then(|entry| entry.movie.clone()) else {
+        let Some((record, movie)) = self
+            .history
+            .current()
+            .and_then(|entry| entry.movie.clone().map(|movie| (entry.id, movie)))
+        else {
             return;
         };
         if movie.frame_count > 1 {
-            let mut frame = self.history.frame().unwrap_or(movie.frame_count - 1) + 1;
+            let mut frame = self
+                .requested_movie_frame
+                .filter(|(id, _)| *id == record)
+                .map(|(_, frame)| frame)
+                .or_else(|| self.history.frame())
+                .unwrap_or(movie.frame_count - 1)
+                + 1;
             let response = ui.add_enabled(
                 !running && movie.frames_available,
                 egui::Slider::new(&mut frame, 1..=movie.frame_count).text("Frame"),
@@ -300,6 +356,11 @@ impl RenderPanel {
                     Err(error) => self.message = error,
                 }
             }
+            #[cfg(target_arch = "wasm32")]
+            if response.changed() {
+                self.requested_movie_frame = Some((record, frame - 1));
+                *action = RenderAction::MovieFrame(frame - 1);
+            }
         }
         if !movie.frames_available {
             ui.weak("Movie frames were replaced or removed. The saved preview remains available.");
@@ -311,6 +372,9 @@ impl RenderPanel {
                     ("Open movie", RenderAction::OpenMovie),
                     ("Reveal movie", RenderAction::RevealMovie),
                 ] {
+                    if cfg!(target_arch = "wasm32") && intent == RenderAction::RevealMovie {
+                        continue;
+                    }
                     let response = ui.button(label);
                     self.record(label, &response);
                     if response.clicked() {

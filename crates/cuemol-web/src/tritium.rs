@@ -170,9 +170,11 @@ impl App {
                             self.cancel_load();
                         }
                     }
-                    if self.render_cancel.is_some() {
+                    if self.render_cancel.is_some() || self.movie.running {
                         ui.spinner();
-                        if ui.small_button("Cancel render").clicked() {
+                        let response = ui.small_button("Cancel render");
+                        self.record_ui_rect("Cancel render", &response);
+                        if response.clicked() {
                             self.call("cancel_render", json!({}));
                         }
                     }
@@ -534,9 +536,17 @@ impl App {
                         }
                     });
                     self.record_ui_rect("View menu", &view_menu.response);
-                    ui.menu_button("Rendering", |ui| {
-                        if ui.button("Render image…").clicked() {
-                            self.open_render();
+                    let rendering_menu = ui.menu_button("Rendering", |ui| {
+                        let response = ui.button("Render image…");
+                        self.record_ui_rect("Render image", &response);
+                        if response.clicked() {
+                            self.request_render(false);
+                            ui.close();
+                        }
+                        let response = ui.button("Animation rendering…");
+                        self.record_ui_rect("Animation rendering", &response);
+                        if response.clicked() {
+                            self.request_render(true);
                             ui.close();
                         }
                         if ui.button("Save PNG").clicked() {
@@ -544,6 +554,7 @@ impl App {
                             ui.close();
                         }
                     });
+                    self.record_ui_rect("Rendering menu", &rendering_menu.response);
                     let tools_menu = ui.menu_button("Tools", |ui| {
                         for (label, command) in [
                             ("Molecular superposition…", "superpose"),
@@ -697,7 +708,7 @@ impl App {
                                 }
                                 "Reload Scene" => self.reload_scene(),
                                 "Get PDB" => self.open_get_pdb(),
-                                "Render" => self.open_render(),
+                                "Render" => self.request_render(false),
                                 "Undo" => self.call("undo", json!({})),
                                 "Redo" => self.call("redo", json!({})),
                                 _ => {}
@@ -813,6 +824,13 @@ impl App {
         self.flush_render_settings(0., true);
         self.sync_render_settings();
         self.show_render = true;
+    }
+
+    fn request_render(&mut self, movie: bool) {
+        self.open_render();
+        if !self.movie.running && self.render_cancel.is_none() {
+            self.render_panel.request_mode(movie);
+        }
     }
     fn shell_sidebar(&mut self, ctx: &egui::Context) {
         let Some(activity) = self.activity else {

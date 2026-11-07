@@ -34,6 +34,10 @@ jobs:
         with:
           path: .cache/ui-fonts
           key: ui-fonts-${{ runner.os }}-${{ hashFiles('scripts/bundle-ui-fonts.py') }}
+      - uses: actions/cache@v6
+        with:
+          path: .cache/browser-movie
+          key: browser-movie-${{ runner.os }}-${{ hashFiles('scripts/bundle-movie.py') }}
       - name: Prepare wasm-bindgen
         run: uv run --no-project python scripts/prepare-web-tools.py
       - name: Build browser application

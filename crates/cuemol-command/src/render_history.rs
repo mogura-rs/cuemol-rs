@@ -98,12 +98,19 @@ struct Entry {
     image: ImageStorage,
     bytes: usize,
     frame: Option<u32>,
+    frame_cached: bool,
 }
 
 impl Entry {
     fn read(&self) -> Result<Arc<[u8]>, String> {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some((movie, frame)) = self.record.movie.as_ref().zip(self.frame) {
+        if let Some((movie, frame)) = self
+            .record
+            .movie
+            .as_ref()
+            .zip(self.frame)
+            .filter(|_| !self.frame_cached)
+        {
             let path = crate::movie::files::frame_path(
                 std::path::Path::new(&movie.output_dir),
                 &movie.base_name,
@@ -222,6 +229,7 @@ impl RenderHistory {
             image,
             bytes,
             frame: None,
+            frame_cached: false,
         });
         self.next_id = self.next_id.wrapping_add(1);
         self.bytes = self.bytes.saturating_add(bytes);
@@ -247,8 +255,9 @@ impl RenderHistory {
         if movie.frame_count == 0 {
             return Err("Movie has no rendered frames".into());
         }
+        self.push(png, source, size, elapsed_seconds)?;
         if movie.movie_path.is_some() {
-            for entry in &mut self.entries {
+            for entry in self.entries.iter_mut().rev().skip(1) {
                 if let Some(previous) = &mut entry.record.movie {
                     if previous.movie_path == movie.movie_path {
                         previous.movie_path = None;
@@ -256,9 +265,67 @@ impl RenderHistory {
                 }
             }
         }
-        self.push(png, source, size, elapsed_seconds)?;
         self.entries.back_mut().unwrap().record.movie = Some(movie);
         Ok(())
+    }
+
+    pub fn invalidate_movie_identity(&mut self, directory: &str, base: &str) {
+        for entry in &mut self.entries {
+            let Some(movie) = &mut entry.record.movie else {
+                continue;
+            };
+            if movie.output_dir == directory && movie.base_name == base {
+                movie.frames_available = false;
+                movie.movie_path = None;
+                if !entry.frame_cached {
+                    entry.frame = None;
+                }
+            }
+        }
+    }
+
+    pub fn select_frame_bytes_with<T>(
+        &mut self,
+        record: u64,
+        index: u32,
+        png: Arc<[u8]>,
+        validate: impl FnOnce(&[u8]) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let selected = self.selected.ok_or("No movie is selected")?;
+        let entry = self
+            .entries
+            .get_mut(selected)
+            .ok_or("No movie is selected")?;
+        let movie = entry
+            .record
+            .movie
+            .as_ref()
+            .ok_or("Selected render is not a movie")?;
+        if entry.record.id != record || !movie.frames_available || index >= movie.frame_count {
+            return Err("Movie frame request is no longer current".into());
+        }
+        if !matches!(&entry.image, ImageStorage::Memory(_)) {
+            return Err("Byte-based frame selection requires memory history".into());
+        }
+        let decoded = validate(&png)?;
+        self.bytes = self
+            .bytes
+            .saturating_sub(entry.bytes)
+            .saturating_add(png.len());
+        entry.bytes = png.len();
+        entry.image = ImageStorage::Memory(png);
+        entry.frame = Some(index);
+        entry.frame_cached = true;
+        while self.entries.len() > 1 && self.byte_limit.is_some_and(|limit| self.bytes > limit) {
+            let selected = self.selected.unwrap();
+            let remove = usize::from(selected == 0);
+            let entry = self.entries.remove(remove).unwrap();
+            self.bytes -= entry.bytes;
+            if remove < selected {
+                self.selected = Some(selected - 1);
+            }
+        }
+        Ok(decoded)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -277,6 +344,7 @@ impl RenderHistory {
                 movie.frames_available = false;
                 movie.movie_path = None;
                 entry.frame = None;
+                entry.frame_cached = false;
             }
         }
     }
@@ -324,6 +392,7 @@ impl RenderHistory {
             .into();
         let decoded = validate(&png)?;
         entry.frame = Some(index);
+        entry.frame_cached = false;
         Ok((png, decoded))
     }
 
@@ -372,6 +441,113 @@ mod tests {
                 .unwrap()
                 .clone(),
         }
+    }
+
+    #[test]
+    fn asynchronous_movie_frames_reject_stale_results_and_keep_the_memory_budget() {
+        let mut history = RenderHistory::in_memory(8);
+        let movie = crate::movie::MovieResult {
+            output_dir: "session-one".into(),
+            base_name: "movie".into(),
+            frame_count: 3,
+            frames_available: true,
+            fps: 30.,
+            movie_path: None,
+            options: Default::default(),
+        };
+        for name in ["first", "second"] {
+            history
+                .push_movie(
+                    Arc::from(&b"last"[..]),
+                    source(name),
+                    [1, 1],
+                    None,
+                    movie.clone(),
+                )
+                .unwrap();
+        }
+        history.select(0).unwrap();
+        let id = history.current().unwrap().id;
+        assert!(history
+            .select_frame_bytes_with(id + 1, 0, Arc::from(&b"wrong"[..]), |_| Ok(()))
+            .is_err());
+        assert!(history
+            .select_frame_bytes_with(id, 3, Arc::from(&b"wrong"[..]), |_| Ok(()))
+            .is_err());
+        assert!(history
+            .select_frame_bytes_with(id, 0, Arc::from(&b"bad"[..]), |_| Err::<(), _>(
+                "bad image".into()
+            ))
+            .is_err());
+        assert_eq!(history.frame(), Some(2));
+        history
+            .select_frame_bytes_with(id, 0, Arc::from(&b"frame-zero"[..]), |_| Ok(()))
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.bytes, 10);
+        assert_eq!(history.current().unwrap().id, id);
+        assert_eq!(history.frame(), Some(0));
+        assert_eq!(&*history.image(0).unwrap(), b"frame-zero");
+        history.invalidate_movie_identity("session-one", "movie");
+        assert!(
+            !history
+                .current()
+                .unwrap()
+                .movie
+                .as_ref()
+                .unwrap()
+                .frames_available
+        );
+        assert!(history
+            .select_frame_bytes_with(id, 1, Arc::from(&b"stale"[..]), |_| Ok(()))
+            .is_err());
+        assert_eq!(&*history.image(0).unwrap(), b"frame-zero");
+        assert_eq!(history.frame(), Some(0));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn failed_movie_history_writes_preserve_the_previous_encoded_path() {
+        let mut history = RenderHistory::default();
+        let movie = crate::movie::MovieResult {
+            output_dir: "outputs".into(),
+            base_name: "movie".into(),
+            frame_count: 2,
+            frames_available: true,
+            fps: 30.,
+            movie_path: Some("outputs/movie.mp4".into()),
+            options: Default::default(),
+        };
+        history
+            .push_movie(
+                Arc::from(&b"first"[..]),
+                source("first"),
+                [1, 1],
+                None,
+                movie.clone(),
+            )
+            .unwrap();
+        std::fs::remove_dir_all(history.directory.as_ref().unwrap().path()).unwrap();
+        assert!(history
+            .push_movie(
+                Arc::from(&b"second"[..]),
+                source("second"),
+                [1, 1],
+                None,
+                movie.clone()
+            )
+            .is_err());
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history
+                .current()
+                .unwrap()
+                .movie
+                .as_ref()
+                .unwrap()
+                .movie_path,
+            movie.movie_path
+        );
     }
 
     #[test]

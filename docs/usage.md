@@ -904,19 +904,20 @@ PNG. Tauri uses its webview image element for the same full-resolution preview.
 Its modeless Rendering window retains history when closed, and its target selector
 waits for the new scene settings before accepting edits.
 
-Both native egui and Tauri windows handle Movie mode. The Animation rendering menu opens
+Native egui, Tauri and the browser handle Movie mode. The Animation rendering menu opens
 that mode with the QVGA preset. Still/Movie requests reset the size preset while
 preserving backend settings and movie preferences. Movies use pixel dimensions,
 the complete target animation, a positive fractional frame rate, and an optional
 last frame. Output can use the managed temporary session or a custom folder.
-The base name selects the numbered PNGs and one of seven optional movie formats.
+The base name selects the numbered PNGs and an optional encoded movie. Native
+applications support all seven listed formats.
 Custom output replacement and Cleanup require confirmation. Cleanup removes only
 the matching frames and movies; clearing result history keeps those output files.
 
 Frames render sequentially through the same settings and backend as still images.
 The window displays a throttled preview and keeps running when closed. Completed
 and cancelled runs retain a result with on-demand frame browsing, selected-frame
-Save/Copy, Open movie, Reveal movie and Save movie as. Re-encode uses existing
+Save/Copy, Open movie and Save movie as. Native applications also offer Reveal movie. Re-encode uses existing
 contiguous PNGs and does not require an animation. A failed re-encode preserves
 the previous movie. Replacing or cleaning frame files disables browsing those
 frames in older results while preserving their cached preview. A replaced movie
@@ -925,10 +926,25 @@ file is no longer offered by older results.
 Managed temporary sessions survive shutdown. On the next session creation,
 inactive owned sessions lose frames after one day and movies after 30 days;
 at most ten inactive sessions with movies are retained. Live sessions, unknown
-content and custom folders are not automatically cleaned. The browser exposes
-the movie settings but currently requires the native application for execution.
+content and custom folders are not automatically cleaned.
 
-Native animation renders capture the target scene and display settings at Start.
+Browser movies use the same Rust scene capture and frame preparation. PNGs and
+encoded movies are written incrementally to browser storage; only the current
+frame and bounded history previews stay in memory. Frame browsing serializes
+reads and gives priority to the latest slider request. Choose a custom folder
+with the folder button when the browser supports directory access. Save movie as
+uses the browser's file picker or a download, and Open movie opens a media tab.
+Browser temporary output follows the retention policy above, but clearing site
+storage or browser eviction can also remove it. Custom folders are never swept.
+
+MP4 and QuickTime H.264/H.265 encoding use WebCodecs and a pinned local muxer.
+Codec support is checked for the requested size before replacing any output.
+H.265 availability depends on the browser and hardware. Raw QuickTime, Windows
+Media and animated GIF currently require the native application. Disable Encode
+movie to produce numbered PNGs without an encoder. Browser POV-Ray execution
+continues to require the native application.
+
+Animation renders capture the target scene and display settings at Start.
 Rendering does not move the live camera or animation timeline, and edits made
 while frames render remain after completion, cancellation or an error. Each job
 uses its captured scene for every frame. Re-encoding existing frames also leaves

@@ -3,6 +3,24 @@ import {PNG} from 'pngjs';
 import {load, call, enablePlugins} from './support.js';
 
 const molecule = 'HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n';
+
+test('Render requests select their mode and reapply its preset without immediately writing scene settings', async ({page}) => {
+  await open(page);
+  await click(page,'Render mode Movie'); await field(page,'Movie frame rate',12.5);
+  await click(page,'Render');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().rendering.movieMode)).toBe(false);
+  expect(await page.evaluate(()=>window.cuemol.status().rendering.settings)).toMatchObject({width:1200,height:1200,dpi:600,unit:'px'});
+  await field(page,'Render Width',42); await click(page,'Render');
+  expect(await page.evaluate(()=>window.cuemol.status().rendering.settings)).toMatchObject({width:1200,height:1200,dpi:600});
+  const stored=await call(page,'execute_script',{source:"print(scene.getAppData('render').width);"});
+  expect(JSON.parse(stored.message).log).toBe('42\n');
+  await click(page,'Rendering menu'); await click(page,'Animation rendering');
+  expect(await page.evaluate(()=>window.cuemol.status().rendering.movieMode)).toBe(true);
+  expect(await page.evaluate(()=>window.cuemol.status().rendering.settings)).toMatchObject({width:320,height:240,unit:'px'});
+  expect(await page.evaluate(()=>window.cuemol.status().rendering.movieOptions.fps)).toBe(12.5);
+  await click(page,'Rendering menu'); await click(page,'Render image');
+  expect(await page.evaluate(()=>window.cuemol.status().rendering.movieMode)).toBe(false);
+});
 async function present(page) {
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
 }
@@ -25,8 +43,8 @@ async function open(page, renderer = 'webgl') {
   await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
   await load(page,'preview.pdb',Buffer.from(molecule));
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
-  await call(page,'set_render_settings',{settings:'backend=umbreon; width=64; height=48; unit=px; dpi=300; umbreon.useGI=false; umbreon.aoEnabled=false; umbreon.supersample=1; umbreon.denoise=None'});
   await click(page,'Render');
+  await call(page,'set_render_settings',{settings:'backend=umbreon; width=64; height=48; unit=px; dpi=300; umbreon.useGI=false; umbreon.aoEnabled=false; umbreon.supersample=1; umbreon.denoise=None'});
 }
 async function save(page) {
   const pending=page.waitForEvent('download');await click(page,'Save render');
@@ -200,8 +218,8 @@ test('DPI edits preserve physical image dimensions', async ({page}) => {
   await page.goto('./?renderer=webgl');
   await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
   await load(page,'physical.pdb',Buffer.from(molecule));
-  await call(page,'set_render_settings',{settings:'backend=umbreon; width=1.3; height=0.7; unit=in; dpi=64.5; umbreon.useGI=false; umbreon.aoEnabled=false; umbreon.supersample=1; umbreon.denoise=None'});
   await click(page,'Render');
+  await call(page,'set_render_settings',{settings:'backend=umbreon; width=1.3; height=0.7; unit=in; dpi=64.5; umbreon.useGI=false; umbreon.aoEnabled=false; umbreon.supersample=1; umbreon.denoise=None'});
   await click(page,'Start Render');
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Rendered 84 × 45');
   await field(page,'Render DPI',128.5);
