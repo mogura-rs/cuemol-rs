@@ -1,5 +1,49 @@
 # Validation evidence
 
+## Tauri movie integration in the Rendering window
+
+Tauri now routes Animation rendering into the same modeless Rendering window as
+still images. The window uses the shared movie preferences, sequential isolated
+job, managed output sessions and disk-backed result history. It supports pixel
+size presets, fractional frame rates, all seven format choices, live preview,
+frame selection, re-encoding, confirmed replacement/cleanup, and movie file
+actions. The application loop polls the shared job after the window closes.
+The previous animation form and its unused CSS have been removed; existing Rust
+command endpoints remain compatible.
+
+Four focused model checks pass, including the explicitly enabled FFmpeg test.
+They cover browser number normalization, physical-size target conversion,
+closed-window output, concurrent edits, frame-byte saves and stale selections,
+cleanup confirmation, cached previews, cancellation counts, preference reload,
+repeated mode presets and re-encoding without an animation. The full Tauri suite
+passes 201 checks with six explicit external/GPU checks excluded. All 68 shell
+contracts and 82 browser DOM tests pass. The macOS Tauri binary builds.
+
+A real Rust-model/Chrome integration run renders three 64 x 48 PNGs at 29.97 fps
+and encodes MP4; FFmpeg confirms three decoded frames. Frame selection returns
+the exact first PNG bytes, and Save Movie As copies the encoded bytes exactly.
+Re-encoding at 12.5 fps after removing the animation leaves PNG timestamps and
+the active view unchanged. Cancelled replacement/cleanup keep the output files;
+confirmed Cleanup removes only matching outputs and retains the cached preview.
+A longer run is stopped after a separate scene is created, retaining the saved
+partial frames and the concurrent edit. The UI reaches the cancelled state and
+no encoded movie is reported for that partial run.
+
+The real integration exposed a stale-settings guard that compared JSON integer
+and floating-point representations directly. Browser `30` and Rust `30.0` now
+pass through the same typed movie options before comparison. A focused regression
+covers this case. Movie mode also converts physical dimensions to pixels when
+switching target scenes. Restoring a still-image result reloads its original
+physical units even if the target already stores those same settings.
+
+The usage guide and implementation checklist previously described a separate
+Tauri animation window; both now describe the unified window. The old source
+contracts referenced that removed form and are updated to check the shared
+controls and runtime. Native WebView OS input and the actual file chooser,
+clipboard and Open/Reveal applications were not exercised by the Chrome adapter.
+Browser movie execution, target-scoped Undo and remaining reference details
+are still open.
+
 ## Native movie integration in the Rendering window
 
 Native egui now uses the shared movie options, managed sessions, sequential job
@@ -40,9 +84,9 @@ A movie atomically saved before Stop is likewise retained as a completed result.
 Focused regressions cover both orderings.
 
 The usage guide previously described a separate animation window for both native
-frontends. It now describes the unified egui window and the remaining separate
-Tauri window. Browser movie execution, Tauri movie integration, target-scoped
-Undo and the remaining reference rendering details are still open.
+frontends. At that stage it described the unified egui window and the separate Tauri
+window. The Tauri integration above supersedes that limitation. Browser movie
+execution, target-scoped Undo and remaining reference details are still open.
 
 ## Shared movie output and sequential rendering
 
@@ -79,7 +123,8 @@ shared reference-compatible calculation, with fractional-time regressions.
 The existing movie windows consume the shared file helpers and frame-count fix;
 at that checkpoint, the new preferences, job and movie history still needed
 connection to the unified Rendering window. The native connection is documented
-above; Tauri integration and browser movie execution remain pending.
+above; the Tauri integration is now covered by the newer evidence. Browser movie
+execution remains pending.
 
 ## Movie state isolation
 

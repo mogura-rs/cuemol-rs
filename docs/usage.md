@@ -896,10 +896,9 @@ there. Large previews use multiple GPU textures to preserve full-resolution
 viewing on devices with smaller texture limits; Save and Copy retain the original
 PNG. Tauri uses its webview image element for the same full-resolution preview.
 Its modeless Rendering window retains history when closed, and its target selector
-waits for the new scene settings before accepting edits. Tauri animation rendering
-still uses a separate window.
+waits for the new scene settings before accepting edits.
 
-The native egui window also handles Movie mode. The Animation rendering menu opens
+Both native egui and Tauri windows handle Movie mode. The Animation rendering menu opens
 that mode with the QVGA preset. Still/Movie requests reset the size preset while
 preserving backend settings and movie preferences. Movies use pixel dimensions,
 the complete target animation, a positive fractional frame rate, and an optional

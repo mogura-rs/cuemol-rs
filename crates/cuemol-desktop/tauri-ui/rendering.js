@@ -17,7 +17,7 @@ const CueMolRendering = (() => {
   };
   const error = value => { nodes.message.textContent = String(value); };
   function request(operation, args = {}) {
-    const source = {sceneId: state?.sceneId, targetViewId: state?.viewId, imageId: state?.current?.id, ...(typeof args === 'function' ? {} : args)};
+    const source = {sceneId: state?.sceneId, targetViewId: state?.viewId, imageId: state?.current?.id, imageKey: state?.imageKey, ...(typeof args === 'function' ? {} : args)};
     pending++;
     if(operation === 'target'){switchingTargets++;if(state)render();}
     const task = queue.then(async () => {
@@ -42,7 +42,7 @@ const CueMolRendering = (() => {
     } else if (type === 'text') {
       input = element('textarea'); input.value = value ?? ''; input.rows = 4;
     } else {
-      input = element('input'); input.type = type === 'boolean' ? 'checkbox' : type === 'color' ? 'color' : 'number';
+      input = element('input'); input.type = type === 'boolean' ? 'checkbox' : type === 'color' ? 'color' : type === 'string' ? 'text' : 'number';
       if (type === 'boolean') input.checked = !!value;
       else input.value = value ?? '';
       if (input.type === 'number') {
@@ -52,9 +52,9 @@ const CueMolRendering = (() => {
       }
     }
     input.setAttribute('aria-label', label);
-    input.addEventListener(type === 'text' || type === 'enum' || type === 'boolean' ? 'change' : 'input', () => {
+    input.addEventListener(type === 'text' || type === 'string' || type === 'enum' || type === 'boolean' ? 'change' : 'input', () => {
       if (!input.checkValidity()) return;
-      const value = type === 'enum' ? JSON.parse(input.value) : type === 'boolean' ? input.checked : ['text','color'].includes(type) ? input.value : Number(input.value);
+      const value = type === 'enum' ? JSON.parse(input.value) : type === 'boolean' ? input.checked : ['text','string','color'].includes(type) ? input.value : Number(input.value);
       changed(value);
     });
     row.append(input); return {row, input, type};
@@ -70,17 +70,48 @@ const CueMolRendering = (() => {
     const details = element('details'); details.open = open;
     details.append(element('summary', title)); parent.append(details); return details;
   }
+  function movieProperty(parent,key,label,type,options={}) {
+    const control=field(label,type,state.movieOptions[key],value=>send('movieEdit',{key,value}),options);
+    fieldNodes.set(`movie:${key}`,control);parent.append(control.row);return control;
+  }
+  function moviePreset(parent,key,label,values) {
+    const control=field(label,'enum','',value=>{if(value!=='')send('movieEdit',{key,value});},{choices:[['','Custom'],...values.map(value=>[value,String(value)])]});
+    control.input.addEventListener('change',()=>{control.input.value=JSON.stringify('');});parent.append(control.row);
+  }
+  function buildMovie(parent) {
+    const box=section('Movie',parent),location=element('div',undefined,'rendering-row');
+    location.setAttribute('role','radiogroup');location.setAttribute('aria-label','Movie output location');
+    for(const [value,label]of [[true,'Temporary'],[false,'Custom']]){
+      const row=element('label'),input=element('input');input.type='radio';input.name='rendering-movie-location';input.setAttribute('aria-label',label);input.dataset.temporary=String(value);
+      input.addEventListener('change',()=>{if(input.checked)send('movieEdit',{key:'useTempDir',value});});row.append(input,document.createTextNode(label));location.append(row);
+    }
+    box.append(location);
+    movieProperty(box,'outputDir','Folder','string');
+    box.append(button('Browse…',async()=>{
+      const movieOptions=structuredClone(state.movieOptions),sceneId=state.sceneId;
+      const selected=await dialog.open({directory:true,multiple:false,defaultPath:movieOptions.outputDir||undefined});
+      if(selected)send('movieEdit',{key:'outputDir',value:selected,movieOptions,sceneId});
+    }));
+    movieProperty(box,'baseName','Base name','string');
+    movieProperty(box,'fps','Frame rate','real',{min:0.001});moviePreset(box,'fps','Frame rate preset',[24,30,60]);
+    movieProperty(box,'dupLastFrame','Duplicate last frame','boolean');
+    movieProperty(box,'makeMovie','Encode movie','boolean');
+    movieProperty(box,'movieFormat','Movie format','enum',{choices:state.movieFormats});
+    movieProperty(box,'bitrateKbps','Bitrate (kbps)','integer',{min:1,max:4294967295});moviePreset(box,'bitrateKbps','Bitrate preset',[256,1024,10240]);
+  }
   function buildImage(parent) {
-    const presets = field('Size preset', 'enum', '', index => { if(index !== '')send('preset', {index}); }, {choices:[['','Custom'],[0,'Current view'],[1,'100 × 100 (72 dpi)'],[2,'300 × 300 (300 dpi)'],[3,'600 × 600 (300 dpi)'],[4,'1200 × 1200 (600 dpi)']]});
-    presets.input.addEventListener('change', () => {presets.input.value = JSON.stringify('');});
-    parent.append(presets.row);
-    for (const key of ['width','height']) property({key,label:key === 'width'?'Width':'Height',type:'real',min:0.001,max:10000},false,parent);
-    property({key:'unit',label:'Size unit',type:'enum',options:['px','in','mm','cm']},false,parent);
-    property({key:'dpi',label:'DPI',type:'real',min:1,max:4800},false,parent);
-    const dpi = field('DPI preset','enum','', value => { if(value !== '')send('edit',{key:'dpi',value}); },{choices:[['','Custom'],...[72,150,300,600,1200,2400].map(value=>[value,String(value)])]});
-    parent.append(dpi.row);
-    nodes.pixels = element('p'); parent.append(nodes.pixels);
-    for (const row of catalog.common.filter(row => row.group === 'Image' && row.type === 'boolean' && (state.values.backend === 'povray' || row.key === 'transparentBg'))) property(row,false,parent);
+    const choices=state.movieMode?(state.movieSizes||[]).map(([label],index)=>[index,label]):[[0,'Current view'],[1,'100 × 100 (72 dpi)'],[2,'300 × 300 (300 dpi)'],[3,'600 × 600 (300 dpi)'],[4,'1200 × 1200 (600 dpi)']];
+    const presets=field('Size preset','enum','',index=>{if(index!=='')send('preset',{index});},{choices:[['','Custom'],...choices]});
+    presets.input.addEventListener('change',()=>{presets.input.value=JSON.stringify('');});parent.append(presets.row);
+    for(const key of ['width','height'])property({key,label:key==='width'?'Width':'Height',type:state.movieMode?'integer':'real',min:state.movieMode?1:0.001,max:10000},false,parent);
+    if(!state.movieMode){
+      property({key:'unit',label:'Size unit',type:'enum',options:['px','in','mm','cm']},false,parent);
+      property({key:'dpi',label:'DPI',type:'real',min:1,max:4800},false,parent);
+      const dpi=field('DPI preset','enum','',value=>{if(value!=='')send('edit',{key:'dpi',value});},{choices:[['','Custom'],...[72,150,300,600,1200,2400].map(value=>[value,String(value)])]});parent.append(dpi.row);
+    }
+    nodes.pixels=element('p');parent.append(nodes.pixels);
+    for(const row of catalog.common.filter(row=>row.group==='Image'&&row.type==='boolean'&&(state.values.backend==='povray'||row.key==='transparentBg')))property(row,false,parent);
+    if(state.movieMode)buildMovie(parent);
   }
   function buildRender(parent) {
     const backend = state.values.backend;
@@ -166,7 +197,7 @@ const CueMolRendering = (() => {
   }
   function renderControls() {
     const structure = parseSpec(state.hatchSpec).map(part=>part.kind==='layer'?part.values.kind:part.kind).join(',');
-    const key = `${state.sceneId}/${state.viewId}|${tab}|${state.values.backend}|${state.lighting}|${structure}`;
+    const key = `${state.sceneId}/${state.viewId}|${state.movieMode}|${tab}|${state.values.backend}|${state.lighting}|${structure}`;
     if(key!==controlsKey){
       controlsKey=key; fieldNodes.clear(); nodes.controls.replaceChildren();
       ({Image:buildImage,Render:buildRender,'NPR Detail':buildHatch})[tab](nodes.controls);
@@ -177,9 +208,10 @@ const CueMolRendering = (() => {
     for(const [key,control]of fieldNodes){
       let value=state.values[key];
       if(key==='@lighting')value=state.lighting;
+      else if(key.startsWith('movie:'))value=state.movieOptions[key.slice(6)];
       else if(key.startsWith('@'))value=state.quality[key.slice(1)].selected;
       else if(key.startsWith('hatch:')){const [,index,name]=key.split(':');value=parts[Number(index)]?.values[name];if(control.type==='boolean')value=value==='true';else if(control.type!=='enum')value=Number(value);}
-      control.input.disabled=busy || (key.endsWith('.hatchInkColor')&&!state.values[`${state.values.backend}.hatchCustomInk`]) || (key.endsWith('.hatchPaperColor')&&!state.values[`${state.values.backend}.hatchCustomPaper`]);
+      control.input.disabled=busy || (key==='movie:outputDir'&&state.movieOptions.useTempDir) || (['movie:movieFormat','movie:bitrateKbps'].includes(key)&&!state.movieOptions.makeMovie) || (key.endsWith('.hatchInkColor')&&!state.values[`${state.values.backend}.hatchCustomInk`]) || (key.endsWith('.hatchPaperColor')&&!state.values[`${state.values.backend}.hatchCustomPaper`]);
       if(document.activeElement===control.input)continue;
       if(control.type==='boolean')control.input.checked=!!value;
       else control.input.value=control.type==='enum'?JSON.stringify(value):value??'';
@@ -189,51 +221,64 @@ const CueMolRendering = (() => {
       const [min,max]=({px:[1,8192],in:[0.1,60],mm:[1,1500],cm:[0.1,150]})[state.values.unit]||[1,8192];
       input.min=min;input.max=max;input.step=state.values.unit==='px'?1:'any';
     }
+    nodes.controls.querySelectorAll('[data-temporary]').forEach(node=>{node.checked=state.movieOptions?.useTempDir===(node.dataset.temporary==='true');});
     if(nodes.pixels)nodes.pixels.textContent=`${state.pixels[0]} × ${state.pixels[1]} pixels`;
   }
-  function fitScale(size=state?.current?.size||[1,1]) {
+  function fitScale(size=(state?.preview||state?.current)?.size||[1,1]) {
     return Math.max(0.05,Math.min(8,nodes.preview.clientWidth/size[0],nodes.preview.clientHeight/size[1]));
   }
   function frame() {
-    const size=state?.current?.size||[1,1];
+    const size=(state?.preview||state?.current)?.size||[1,1];
     const view=[nodes.preview.clientWidth,nodes.preview.clientHeight];
-    if(state?.current&&!fitted&&view[0]>0&&view[1]>0){scale=fitScale();center=[0.5,0.5];fitted=true;}
+    if((state?.preview||state?.current)&&!fitted&&view[0]>0&&view[1]>0){scale=fitScale();center=[0.5,0.5];fitted=true;}
     for(let i=0;i<2;i++){const half=Math.min(0.5,view[i]/(size[i]*scale)*0.5);center[i]=Math.max(half,Math.min(1-half,center[i]));}
     nodes.image.style.width=`${size[0]*scale}px`;nodes.image.style.height=`${size[1]*scale}px`;
     nodes.image.style.left=`${view[0]/2-center[0]*size[0]*scale}px`;nodes.image.style.top=`${view[1]/2-center[1]*size[1]*scale}px`;
     nodes.zoom.textContent=`${Math.round(scale*100)}%`;
   }
   function zoom(next,anchor=[0,0]) {
-    const size=state?.current?.size||[1,1];
+    const size=(state?.preview||state?.current)?.size||[1,1];
     const at=center.map((value,i)=>value+anchor[i]/(size[i]*scale));
     scale=Math.max(0.05,Math.min(8,next));center=at.map((value,i)=>value-anchor[i]/(size[i]*scale));frame();
   }
   function render() {
     if(!dialogElement)return;
     nodes.start.textContent=state.running?'Stop':'Start Render';
-    nodes.start.disabled=!state.running&&(switchingTargets>0||!state.sceneId||!!state.povError);
+    for(const [name,value]of [['stillMode',false],['movieMode',true]]){nodes[name].setAttribute('aria-pressed',String(!!state.movieMode===value));nodes[name].disabled=state.running||switchingTargets>0;}
+    nodes.reencode.hidden=nodes.cleanup.hidden=!state.movieMode;
+    nodes.reencode.disabled=state.running||switchingTargets>0||!state.availableFrames||!state.movieOptions?.makeMovie||!!state.movieError;
+    nodes.cleanup.disabled=state.running||switchingTargets>0||!state.hasMovieOutputs;
+    nodes.start.disabled=!state.running&&(switchingTargets>0||!state.sceneId||!!state.povError||!!state.movieError);
     nodes.backend.value=state.values.backend;nodes.backend.disabled=state.running||switchingTargets>0;
     const targets=JSON.stringify(state.targets);
     if(nodes.target.dataset.targets!==targets){nodes.target.dataset.targets=targets;nodes.target.replaceChildren(...state.targets.map(target=>{const option=element('option',target.label);option.value=target.viewId;return option;}));}
     nodes.target.value=state.viewId;nodes.target.disabled=state.running||switchingTargets>0;
-    nodes.message.textContent=[state.running && state.elapsed != null ? `${state.message} (${state.elapsed.toFixed(1)} s)` : state.message,state.povError,state.log].filter(Boolean).join('\n');
+    nodes.message.textContent=[state.running && state.elapsed != null ? `${state.message} (${state.elapsed.toFixed(1)} s)` : state.message,state.povError,state.movieError,state.log].filter(Boolean).join('\n');
     nodes.message.setAttribute('role','status');
     const index=state.selected??-1;
-    nodes.history.textContent=state.current?`${index+1} / ${state.historyLength} · ${state.current.size.join(' × ')} · ${state.current.source.scene_name}`:'No render result';
-    nodes.previous.disabled=index<=0;nodes.next.disabled=index<0||index>=state.historyLength-1;
-    for(const node of [nodes.save,nodes.copy,nodes.useSettings])node.disabled=!state.current||(node===nodes.useSettings&&state.running);
+    nodes.history.textContent=state.livePreview?`Frame ${(state.preview?.frame??0)+1} / ${state.progress?.total??'…'}`:state.current?`${index+1} / ${state.historyLength} · ${state.current.size.join(' × ')} · ${state.current.source.scene_name}`:'No render result';
+    nodes.previous.disabled=state.livePreview||index<=0;nodes.next.disabled=state.livePreview||index<0||index>=state.historyLength-1;
+    for(const node of [nodes.save,nodes.copy,nodes.useSettings])node.disabled=state.livePreview||!state.current||(node===nodes.useSettings&&state.running);
     nodes.clear.disabled=!state.historyLength;
     if(Object.hasOwn(state,'image')){
       if(state.image){
-        const next=state.current.size;
+        const next=(state.preview||state.current).size;
         if(fitted)scale=Math.max(0.05,Math.min(8,scale*fitScale(next)/fitScale(previousSize)));
         previousSize=next;nodes.image.src=state.image;nodes.image.hidden=false;
       }else{nodes.image.removeAttribute('src');nodes.image.hidden=true;}
     }
-    if(!state.current){nodes.image.hidden=true;nodes.image.removeAttribute('src');fitted=false;scale=1;center=[0.5,0.5];}
-    nodes.recordSettings.hidden=!state.current;
+    if(!state.preview&&!state.current){nodes.image.hidden=true;nodes.image.removeAttribute('src');fitted=false;scale=1;center=[0.5,0.5];}
+    nodes.recordSettings.hidden=state.livePreview||!state.current;
     if(state.current){const settings=state.current.source.settings;nodes.recordValues.textContent=`Scene: ${state.current.source.scene_name}\n${Object.entries(settings).map(([key,value])=>`${key}: ${typeof value==='string'?value:JSON.stringify(value)}`).join('\n')}`;}
-    nodes.empty.hidden=!!state.current;
+    nodes.empty.hidden=!!state.preview||!!state.current;
+    const movie=!state.livePreview&&state.current?.movie;
+    nodes.frames.hidden=!movie;
+    nodes.frameSlider.disabled=!movie?.framesAvailable||state.running;
+    nodes.frameSlider.max=Math.max(0,(movie?.frameCount||1)-1);nodes.frameSlider.value=state.frame??0;
+    nodes.frameLabel.textContent=movie?.framesAvailable?`Frame ${(state.frame??0)+1} / ${movie.frameCount}`:'Frames were replaced or removed; the saved preview remains available.';
+    nodes.movieActions.hidden=!movie?.moviePath;
+    for(const name of ['saveMovie','openMovie','revealMovie'])nodes[name].disabled=state.running;
+
     renderControls();frame();
   }
   function build() {
@@ -247,17 +292,36 @@ const CueMolRendering = (() => {
     const framing=element('div',undefined,'rendering-row');nodes.zoom=element('span','100%');
     framing.append(button('−',()=>zoom(scale/1.25)),nodes.zoom,button('+',()=>zoom(scale*1.25)),button('Fit',()=>{scale=fitScale();center=[0.5,0.5];fitted=true;frame();}),button('100%',()=>zoom(1)));left.append(framing);
     const history=element('div',undefined,'rendering-row');nodes.previous=button('Previous',()=>send('select',{index:state.selected-1}));nodes.next=button('Next',()=>send('select',{index:state.selected+1}));nodes.history=element('span');history.append(nodes.previous,nodes.history,nodes.next);left.append(history);
+    nodes.frames=element('div',undefined,'rendering-frames');nodes.frameLabel=element('span');nodes.frameSlider=element('input');nodes.frameSlider.type='range';nodes.frameSlider.min=0;nodes.frameSlider.step=1;nodes.frameSlider.setAttribute('aria-label','Movie frame');
+    nodes.frameSlider.addEventListener('input',()=>send('frame',{index:Number(nodes.frameSlider.value)}));nodes.frames.append(nodes.frameLabel,nodes.frameSlider);left.append(nodes.frames);
+    nodes.movieActions=element('div',undefined,'rendering-row');
+    nodes.saveMovie=button('Save Movie As…',async()=>{const imageId=state.current?.id,imageKey=state.imageKey,path=state.current?.movie?.moviePath;const name=path?.split(/[\\/]/).pop()||'movie.mp4';const output=await chooseOutputPath(name,'Movie',[name.split('.').pop()]);if(output)send('saveMovie',{path:output,imageId,imageKey});});
+    nodes.openMovie=button('Open Movie',()=>send('openMovie'));nodes.revealMovie=button('Reveal Movie',()=>send('revealMovie'));nodes.movieActions.append(nodes.saveMovie,nodes.openMovie,nodes.revealMovie);left.append(nodes.movieActions);
     const actions=element('div',undefined,'rendering-row');
-    nodes.save=button('Save Image…',async()=>{const imageId=state.current?.id;const path=await chooseOutputPath(state.filename,'PNG image',['png']);if(path)send('save',{path,imageId});});
+    nodes.save=button('Save Image…',async()=>{const imageId=state.current?.id,imageKey=state.imageKey;const path=await chooseOutputPath(state.filename,'PNG image',['png']);if(path)send('save',{path,imageId,imageKey});});
     nodes.copy=button('Copy Image',()=>send('copy'));
     nodes.useSettings=button('Use Settings',()=>send('useSettings'));
-    nodes.clear=button('Clear History',async()=>{if(await showConfirmationDialog({title:'Clear render history',message:'Delete all rendered images from this session?',confirmLabel:'Clear'}))send('clear');});
+    nodes.clear=button('Clear History',async()=>{if(await showConfirmationDialog({title:'Clear render history',message:'Clear this image history? Movie files will remain in their output folders.',confirmLabel:'Clear'}))send('clear');});
     actions.append(nodes.save,nodes.copy,nodes.useSettings,nodes.clear);left.append(actions);
     nodes.recordSettings=element('details',undefined,'rendering-record-settings');nodes.recordSettings.append(element('summary','Settings'));nodes.recordValues=element('pre');nodes.recordSettings.append(nodes.recordValues);left.append(nodes.recordSettings);
-    const run=element('div',undefined,'rendering-row');nodes.start=button('Start Render',()=>send(state.running?'stop':'start'));
+    const modes=element('div',undefined,'rendering-row');nodes.stillMode=button('Still',()=>send('mode',{movie:false}));nodes.movieMode=button('Movie',()=>send('mode',{movie:true}));modes.append(nodes.stillMode,nodes.movieMode);left.append(modes);
+    const run=element('div',undefined,'rendering-row');nodes.start=button('Start Render',async()=>{
+      if(state.running){send('stop');return;}
+      const args={sceneId:state.sceneId,targetViewId:state.viewId,movieOptions:structuredClone(state.movieOptions)};
+      if(state.movieMode&&!state.movieOptions.useTempDir&&state.hasMovieOutputs){
+        if(!await showConfirmationDialog({title:'Replace movie outputs',message:`Replace frames and movies for ${state.movieOptions.baseName||'movie'} in ${state.movieOptions.outputDir}?`,confirmLabel:'Replace'}))return;
+        args.overwrite=true;
+      }
+      send('start',args);
+    });
+    nodes.reencode=button('Reencode',()=>send('reencode',{movieOptions:structuredClone(state.movieOptions)}));
+    nodes.cleanup=button('Cleanup…',async()=>{
+      const movieOptions=structuredClone(state.movieOptions);
+      if(await showConfirmationDialog({title:'Cleanup movie outputs',message:`Delete frames and movies for ${movieOptions.baseName||'movie'} in ${movieOptions.outputDir}?`,confirmLabel:'Delete'}))send('cleanup',{movieOptions,confirmed:true});
+    });run.append(nodes.reencode,nodes.cleanup);
     nodes.backend=element('select');nodes.backend.setAttribute('aria-label','Render backend');
     for(const [value,label]of [['umbreon','Umbreon'],['umbreon_npr','Umbreon NPR'],['povray','POV-Ray']]){const option=element('option',label);option.value=value;nodes.backend.append(option);}
-    nodes.backend.addEventListener('change',()=>send('edit',{key:'backend',value:nodes.backend.value}));run.append(nodes.start,nodes.backend);left.append(run);
+    nodes.backend.addEventListener('change',()=>send('edit',{key:'backend',value:nodes.backend.value}));run.prepend(nodes.start);run.append(nodes.backend);left.append(run);
     nodes.target=element('select');nodes.target.setAttribute('aria-label','Render target');nodes.target.addEventListener('change',()=>send('target',{viewId:Number(nodes.target.value)}));left.append(nodes.target);
     nodes.message=element('pre',undefined,'rendering-message');left.append(nodes.message);
     const tabs=element('div',undefined,'rendering-tabs');tabs.setAttribute('role','tablist');
@@ -275,17 +339,17 @@ const CueMolRendering = (() => {
     nodes.preview.addEventListener('wheel',event=>{
       event.preventDefault();const rect=nodes.preview.getBoundingClientRect();
       if(event.ctrlKey||event.metaKey)zoom(scale*Math.exp(-event.deltaY*0.002),[event.clientX-rect.x-rect.width/2,event.clientY-rect.y-rect.height/2]);
-      else {const size=state?.current?.size||[1,1];center[0]+=event.deltaX/(size[0]*scale);center[1]+=event.deltaY/(size[1]*scale);frame();}
+      else {const size=(state?.preview||state?.current)?.size||[1,1];center[0]+=event.deltaX/(size[0]*scale);center[1]+=event.deltaY/(size[1]*scale);frame();}
     },{passive:false});
     const pointers=new Map();let gesture=null;
     const geometry=()=>{const points=[...pointers.values()];if(!points.length)return null;return {center:points.length===1?points[0]:points[0].map((value,i)=>(value+points[1][i])/2),distance:points.length>1?Math.hypot(points[0][0]-points[1][0],points[0][1]-points[1][1]):null};};
-    nodes.preview.addEventListener('pointerdown',event=>{if(event.button!==0||!state.current)return;nodes.preview.setPointerCapture(event.pointerId);pointers.set(event.pointerId,[event.clientX,event.clientY]);gesture=geometry();});
+    nodes.preview.addEventListener('pointerdown',event=>{if(event.button!==0||!(state.preview||state.current))return;nodes.preview.setPointerCapture(event.pointerId);pointers.set(event.pointerId,[event.clientX,event.clientY]);gesture=geometry();});
     nodes.preview.addEventListener('pointermove',event=>{
-      if(!pointers.has(event.pointerId)||!state.current)return;
+      if(!pointers.has(event.pointerId)||!(state.preview||state.current))return;
       pointers.set(event.pointerId,[event.clientX,event.clientY]);const next=geometry(),previous=gesture;gesture=next;
       if(!previous||!next)return;
       if(previous.distance&&next.distance){const rect=nodes.preview.getBoundingClientRect();zoom(scale*next.distance/previous.distance,[previous.center[0]-rect.x-rect.width/2,previous.center[1]-rect.y-rect.height/2]);}
-      const size=state.current.size;center=center.map((value,i)=>value-(next.center[i]-previous.center[i])/(size[i]*scale));frame();
+      const size=(state.preview||state.current).size;center=center.map((value,i)=>value-(next.center[i]-previous.center[i])/(size[i]*scale));frame();
     });
     for(const name of ['pointerup','pointercancel','lostpointercapture'])nodes.preview.addEventListener(name,event=>{pointers.delete(event.pointerId);gesture=geometry();});
     new ResizeObserver(frame).observe(nodes.preview);
@@ -302,9 +366,9 @@ const CueMolRendering = (() => {
   async function close() {
     try{await request('close');dialogElement.close();clearInterval(timer);}catch{}
   }
-  async function open(backend) {
+  async function open(backend,movie=false) {
     if(!dialogElement)build();
-    await request('open',backend?{backend}:{});
+    await request('open',{backend,movie});
     if(!dialogElement.open)dialogElement.show();
     clearInterval(timer);timer=setInterval(()=>{if(!pending&&dialogElement.open)send('poll');},250);
     frame();

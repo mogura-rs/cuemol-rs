@@ -23,7 +23,10 @@ async function open(page) {
     const tone='tone:diffuse=1,ambient=0.12,wrap=0,rim=0,rimpow=1,rimbias=0.6,contact=1,shape=0.6,black=0,white=1,hl=1,hlsoft=0.06,gamma=1,speccut=0\nink:inkshade=1,mincontrast=0.25,mode=ink,tonefog=true,levels=0,albedoquant=0';
     const state={values,sceneId:1,viewId:11,targets:[{sceneId:1,viewId:11,label:'First / Main'},{sceneId:2,viewId:22,label:'Second / Main'}],pixels:[1200,1200],lighting:'gi',quality:{},historyLength:0,selected:null,current:null,running:false,message:'No render result',catalog,hatchSpec:`${layer}\n${tone}`,defaultLayer:layer};
     for(const axis of ['aa','ao','giLighting','shadows'])state.quality[axis]={selected:'medium',steps:[{id:'low',label:'Low'},{id:'medium',label:'Medium'},{id:'high',label:'High'}]};
+    Object.assign(state,{movieMode:false,movieOptions:{useTempDir:true,outputDir:'temporary',baseName:'movie',fps:30,makeMovie:true,movieFormat:'mp4_h264',dupLastFrame:true,bitrateKbps:1024},movieFormats:[['mp4_h264','MP4 (H.264)'],['gifanim','Animated GIF']],movieSizes:[['QVGA (320 × 240)',[320,240]],['VGA (640 × 480)',[640,480]]],availableFrames:0,hasMovieOutputs:false,livePreview:false});
     const records=[];let next=1;
+    window.dialog={open:async()=>'/chosen movie folder'};
+
     window.renderCalls=[];window.savedPaths=[];window.confirmClear=false;
     window.chooseOutputPath=async()=>{window.savedPaths.push(state.current.id);return 'image.png';};
     window.showConfirmationDialog=async()=>window.confirmClear;
@@ -32,6 +35,14 @@ async function open(page) {
       window.renderCalls.push({operation,args:structuredClone(args)});
       await new Promise(resolve=>setTimeout(resolve,operation==='target'?80:15));
       if(operation==='open'&&args.backend)values.backend=args.backend;
+      if((operation==='mode'||operation==='open')&&typeof args.movie==='boolean'&&!state.running){state.movieMode=args.movie;values.width=args.movie?320:1200;values.height=args.movie?240:1200;values.unit='px';state.pixels=[values.width,values.height];}
+      if(operation==='movieEdit'){state.movieOptions[args.key]=args.value;if(args.key==='outputDir')state.movieOptions.useTempDir=false;}
+      if(operation==='preset'&&state.movieMode){[values.width,values.height]=state.movieSizes[args.index][1];state.pixels=[values.width,values.height];}
+      if(operation==='reencode'){state.running=true;state.message='Encoding frames…';}
+      if(operation==='frame'){state.frame=args.index;}
+      if(operation==='cleanup'){state.availableFrames=0;state.hasMovieOutputs=false;if(state.current?.movie){state.current.movie.framesAvailable=false;state.current.movie.moviePath=null;}state.message='Removed movie output files';}
+      if(operation==='saveMovie')state.message='Movie action completed';
+
       if(operation==='edit'){values[args.key]=args.value;state.pixels=[values.width,values.height];}
       if(operation==='lighting')state.lighting=args.value;
       if(operation==='quality')state.quality[args.axis].selected=args.step;
@@ -46,10 +57,13 @@ async function open(page) {
       if(operation==='clear'){records.length=0;state.historyLength=0;state.selected=null;state.current=null;}
       state.povError=values.backend==='povray'?'POV-Ray executable is unavailable':null;
       const result=structuredClone(state);
-      if(result.current?.id!==args.imageId)result.image=result.current?image:null;
+      result.imageKey=`${result.current?.id}/${result.frame}/${result.livePreview}`;
+      if(result.imageKey!==args.imageKey)result.image=result.current||result.livePreview?image:null;
+
       return result;
     };
-    window.finishRender=()=>{state.running=false;state.message='Rendered 3000 × 2500';const record={id:next++,size:[3000,2500],source:{scene_name:`Scene ${state.sceneId}`,settings:structuredClone(values)},elapsed_seconds:0.1};records.push(record);state.historyLength=records.length;state.selected=records.length-1;state.current=record;};
+    window.finishRender=()=>{state.running=false;state.message='Rendered 3000 × 2500';state.livePreview=false;state.preview=null;const record={id:next++,size:state.movieMode?[values.width,values.height]:[3000,2500],source:{scene_name:`Scene ${state.sceneId}`,settings:structuredClone(values)},elapsed_seconds:0.1};if(state.movieMode){record.movie={frameCount:3,framesAvailable:true,moviePath:'temporary/movie.mp4',options:structuredClone(state.movieOptions)};state.frame=2;state.availableFrames=3;state.hasMovieOutputs=true;}records.push(record);state.historyLength=records.length;state.selected=records.length-1;state.current=record;};
+    window.liveMovieFrame=()=>{state.livePreview=true;state.preview={size:[3000,2500],frame:0};state.progress={completed:1,total:3};};
   },{catalog,image});
   await page.goto('http://rendering.test/');
   await page.evaluate(()=>CueMolRendering.open());
@@ -178,5 +192,45 @@ test('Tauri Rendering remains operable in a small window',async({page})=>{
   await expect(panel.getByRole('img',{name:'Rendered image',exact:true})).toBeVisible();
   await panel.getByRole('button',{name:'Fit',exact:true}).click();
   await page.screenshot({path:test.info().outputPath('rendering-small.png')});
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri movie controls share the viewer and confirm output replacement and cleanup',async({page})=>{
+  const errors=await open(page),panel=page.getByRole('dialog',{name:'Rendering',exact:true});
+  await panel.getByRole('button',{name:'Movie',exact:true}).click();
+  await expect(panel.getByLabel('Width',{exact:true})).toHaveValue('320');
+  await expect(panel.getByLabel('DPI',{exact:true})).toHaveCount(0);
+  await expect(panel.getByLabel('Size unit',{exact:true})).toHaveCount(0);
+  await expect(panel.getByLabel('Folder',{exact:true})).toBeDisabled();
+  await panel.getByRole('button',{name:'Browse…',exact:true}).click();
+  await expect(panel.getByLabel('Custom',{exact:true})).toBeChecked();
+  await expect(panel.getByLabel('Folder',{exact:true})).toHaveValue('/chosen movie folder');
+  await panel.getByLabel('Frame rate',{exact:true}).fill('29.97');
+  await panel.getByLabel('Movie format',{exact:true}).selectOption({label:'Animated GIF'});
+  await panel.getByRole('button',{name:'Start Render',exact:true}).click();
+  await expect(panel.getByRole('button',{name:'Stop',exact:true})).toBeVisible();
+  await page.evaluate(()=>liveMovieFrame());
+  await expect(panel.getByRole('img',{name:'Rendered image',exact:true})).toBeVisible();
+  await expect(panel.getByRole('button',{name:'Save Image…',exact:true})).toBeDisabled();
+  await page.evaluate(()=>finishRender());
+  await expect(panel.getByLabel('Movie frame',{exact:true})).toBeEnabled();
+  await panel.getByLabel('Movie frame',{exact:true}).fill('0');
+  await expect(panel.getByText('Frame 1 / 3',{exact:true})).toBeVisible();
+  await panel.getByRole('button',{name:'Save Movie As…',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>renderCalls.filter(call=>call.operation==='saveMovie').length)).toBe(1);
+  await panel.getByRole('button',{name:'Start Render',exact:true}).click();
+  await expect(panel.getByRole('button',{name:'Start Render',exact:true})).toBeVisible();
+  expect(await page.evaluate(()=>renderCalls.filter(call=>call.operation==='start').length)).toBe(1);
+  await panel.getByRole('button',{name:'Cleanup…',exact:true}).click();
+  expect(await page.evaluate(()=>renderCalls.filter(call=>call.operation==='cleanup').length)).toBe(0);
+  await page.evaluate(()=>{confirmClear=true;});
+  await panel.getByRole('button',{name:'Cleanup…',exact:true}).click();
+  await expect(panel.getByLabel('Movie frame',{exact:true})).toBeDisabled();
+  await expect(panel.getByRole('img',{name:'Rendered image',exact:true})).toBeVisible();
+  await expect(panel.getByRole('button',{name:'Reencode',exact:true})).toBeDisabled();
+  expect(await page.evaluate(()=>renderCalls.find(call=>call.operation==='movieEdit'&&call.args.key==='fps')?.args.value)).toBe(29.97);
+  await page.setViewportSize({width:700,height:480});
+  await expect(panel.getByRole('button',{name:'Close Rendering',exact:true})).toBeInViewport();
   expect(errors).toEqual([]);
 });

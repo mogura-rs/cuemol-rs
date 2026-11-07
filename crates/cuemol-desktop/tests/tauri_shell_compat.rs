@@ -366,16 +366,6 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "clear_log",
         "execute_script",
         "execute_script_file",
-        "start_animation_render",
-        "animation_render_frame_count",
-        "cleanup_animation_render_outputs",
-        "animation_render_movie_available",
-        "open_animation_render_movie",
-        "reveal_animation_render_movie",
-        "start_animation_movie",
-        "poll_animation_render",
-        "cancel_animation_render",
-        "animation_render_preview",
         "open_pdb",
         "merge_molecules",
         "save_object",
@@ -1366,78 +1356,49 @@ fn png_export_matches_the_reference_options_dialog() {
 
 #[test]
 fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
-    let start = JS
-        .find("} else if (title === \"Animation rendering\")")
-        .unwrap();
-    let end = JS[start + 1..]
-        .find("} else if (title === \"Save File As\")")
-        .map(|offset| start + 1 + offset)
-        .unwrap();
-    let dialog = &JS[start..end];
-
+    assert!(JS.contains("CueMolRendering.open(title === \"POV-Ray rendering\" ? \"povray\" : undefined, title === \"Animation rendering\")"));
     for label in [
-        "Target scene",
-        "Output dir",
-        "Output base name",
-        "Width (px)",
-        "Height (px)",
-        "Frame rate (fps)",
-        "NCPU",
-        "Loop",
-        "Projection",
-        "Main options",
-        "Render options",
-        "Movie options",
-        "Preview",
-        "Preset size",
-        "Backend",
-        "Povray exe file",
-        "Povray inc dir",
-        "Clipping plane",
-        "Post-render alpha blending",
-        "Shadow",
-        "Edge lines",
-        "Labels",
-        "Radiosity",
-        "Make movie",
-        "FFmpeg exe file",
-        "Output format",
+        "Temporary",
+        "Custom",
+        "Folder",
+        "Base name",
+        "Frame rate",
+        "Duplicate last frame",
+        "Encode movie",
+        "Movie format",
         "Bitrate (kbps)",
-        "Re-encode",
-        "Clean up",
-        "Open movie",
-        "Reveal",
-        "Progress",
-        "Log",
+        "Reencode",
+        "Cleanup…",
+        "Save Movie As…",
+        "Open Movie",
+        "Reveal Movie",
+        "Movie frame",
     ] {
         assert!(
-            dialog.contains(label),
-            "missing animation render field {label}"
+            RENDERING_JS.contains(label),
+            "missing shared movie control {label}"
         );
     }
-    for command in [
-        "start_animation_render",
-        "start_animation_movie",
-        "poll_animation_render",
-        "cancel_animation_render",
-        "animation_render_preview",
-        "animation_render_frame_count",
-        "cleanup_animation_render_outputs",
-        "animation_render_movie_available",
-        "open_animation_render_movie",
-        "reveal_animation_render_movie",
+    for operation in [
+        "movieEdit",
+        "reencode",
+        "cleanup",
+        "frame",
+        "saveMovie",
+        "openMovie",
+        "revealMovie",
     ] {
         assert!(
-            dialog.contains(command),
-            "missing animation render command {command}"
+            RENDERING_JS.contains(operation),
+            "missing shared movie action {operation}"
         );
     }
-    assert!(dialog.contains("duplicateLastFrame: loop.checked"));
-    assert!(dialog.contains("concurrency: Number(concurrency.value)"));
-    assert!(dialog.contains("backend: backend.value"));
-    assert!(dialog.contains("makeMovie: makeMovie.checked"));
-    assert!(dialog.contains("setInterval(poll, 150)"));
-    assert!(dialog.contains("if (running) event.preventDefault()"));
+    let movie = include_str!("../src/tauri_movie.rs");
+    assert!(movie.contains("MovieJob::start"));
+    assert!(movie.contains("MovieJob::reencode"));
+    assert!(movie.contains("invalidate_movie_outputs"));
+    assert!(RENDERING_RS.contains("job.cancel()"));
+    assert!(RENDERING_JS.contains("showConfirmationDialog"));
     assert!(TAURI_APP_RS.contains("struct TauriAnimationRenderJob"));
     assert!(TAURI_APP_RS.contains("scene: Option<cuemol_command::movie::MovieScene>"));
     assert!(TAURI_APP_RS.contains("spawn_tauri_animation_frame(task)"));

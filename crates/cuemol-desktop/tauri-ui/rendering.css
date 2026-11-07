@@ -36,3 +36,8 @@
 
 .rendering-record-settings summary { cursor: pointer; padding: 3px 0; }
 .rendering-record-settings pre { max-height: 160px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0; padding: 6px; background: var(--bg-input); font: 11px var(--font-mono); }
+
+.rendering-dialog [hidden] { display: none !important; }
+.rendering-frames { display: flex; flex-direction: column; gap: 4px; font-size: 12px; text-align: center; }
+.rendering-frames input { width: 100%; }
+.rendering-row button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }

@@ -5,11 +5,15 @@ use cuemol_command::render_history::{RenderHistory, RenderSource};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
+#[path = "tauri_movie.rs"]
+mod movie;
+
 pub(super) struct Rendering {
     editor: RenderEditor,
     targets: RenderTargets,
     history: RenderHistory,
     job: Option<RenderJob>,
+    movie: movie::MoviePanel,
     message: String,
     clock: Instant,
     scene_changed: bool,
@@ -22,6 +26,7 @@ impl Default for Rendering {
             targets: Default::default(),
             history: Default::default(),
             job: None,
+            movie: Default::default(),
             message: "No render result yet. Press Start Render to render the current view.".into(),
             clock: Instant::now(),
             scene_changed: false,
@@ -59,7 +64,7 @@ impl AppModel {
     }
 
     pub(super) fn rendering_pending(&self) -> bool {
-        self.rendering.job.is_some() || self.rendering.editor.pending()
+        self.rendering.running() || self.rendering.editor.pending()
     }
 
     pub(super) fn flush_rendering(&mut self) -> Result<(), String> {
@@ -142,10 +147,18 @@ impl Rendering {
             })
             .unwrap_or_default();
         self.editor.sync(scene, &stored);
+        if self.movie.mode && self.editor.text("unit") != "px" {
+            self.editor.set_unit("px");
+        }
         Ok(())
     }
 
+    fn running(&self) -> bool {
+        self.job.is_some() || self.movie.job.is_some()
+    }
+
     fn poll(&mut self) {
+        self.poll_movie();
         let Some(job) = &self.job else { return };
         let result = match job.receiver.try_recv() {
             Ok(result) => result,
@@ -193,9 +206,9 @@ impl Rendering {
         self.sync(model, false)?;
         if matches!(
             operation,
-            "edit" | "quality" | "lighting" | "preset" | "hatch"
+            "edit" | "quality" | "lighting" | "preset" | "hatch" | "mode" | "movieEdit"
         ) {
-            if self.job.is_some() {
+            if self.running() {
                 return Err("Wait for the current render to finish".into());
             }
             if args["sceneId"].as_u64() != self.editor.scene() || self.editor.scene().is_none() {
@@ -215,8 +228,14 @@ impl Rendering {
         match operation {
             "poll" => {}
             "open" => {
+                if !self.running() {
+                    if let Some(movie) = args["movie"].as_bool() {
+                        self.request_mode(model, movie)?;
+                    }
+                    self.refresh_movie_outputs();
+                }
                 if let Some(backend) = args["backend"].as_str() {
-                    if self.job.is_none() {
+                    if !self.running() {
                         self.editor.values.insert("backend".into(), json!(backend));
                         self.editor.edited(self.clock.elapsed().as_secs_f64());
                         self.sync(model, true)?;
@@ -227,6 +246,9 @@ impl Rendering {
                 let key = args["key"].as_str().ok_or("Render property is required")?;
                 if !self.editor.values.contains_key(key) {
                     return Err("Unknown render property".into());
+                }
+                if self.movie.mode && matches!(key, "unit" | "dpi") {
+                    return Err("Movie dimensions use pixels".into());
                 }
                 if key == "unit" {
                     let unit = args["value"].as_str().ok_or("Size unit is required")?;
@@ -284,19 +306,29 @@ impl Rendering {
             }
             "preset" => {
                 let preset = args["index"].as_u64().ok_or("Size preset is required")? as usize;
-                let (size, dpi) = match preset {
-                    0 => (self.view_size(model), None),
-                    1 => ([100, 100], Some(72.)),
-                    2 => ([300, 300], Some(300.)),
-                    3 => ([600, 600], Some(300.)),
-                    4 => ([1200, 1200], Some(600.)),
-                    _ => return Err("Unknown size preset".into()),
+                let (size, dpi) = if self.movie.mode {
+                    (
+                        cuemol_command::movie::SIZE_PRESETS
+                            .get(preset)
+                            .ok_or("Unknown movie size preset")?
+                            .1,
+                        None,
+                    )
+                } else {
+                    match preset {
+                        0 => (self.view_size(model), None),
+                        1 => ([100, 100], Some(72.)),
+                        2 => ([300, 300], Some(300.)),
+                        3 => ([600, 600], Some(300.)),
+                        4 => ([1200, 1200], Some(600.)),
+                        _ => return Err("Unknown size preset".into()),
+                    }
                 };
                 self.editor.set_size(size, dpi);
                 self.editor.edited(self.clock.elapsed().as_secs_f64());
             }
             "target" => {
-                if self.job.is_some() {
+                if self.running() {
                     return Err("Wait for the current render to finish".into());
                 }
                 self.sync(model, true)?;
@@ -308,7 +340,10 @@ impl Rendering {
                 }
                 self.sync(model, false)?;
             }
-            "close" | "flush" => self.sync(model, true)?,
+            "close" | "flush" => {
+                self.sync(model, true)?;
+                self.persist_movie_options(model)?;
+            }
             "undo" | "redo" => {
                 self.sync(model, true)?;
                 model.restore_animation_playback(false)?;
@@ -322,11 +357,16 @@ impl Rendering {
                 self.scene_changed = true;
             }
             "start" => {
-                if self.job.is_some() {
+                if self.running() {
                     return Err("A render is already running".into());
                 }
                 self.editor.edited(self.clock.elapsed().as_secs_f64());
                 self.sync(model, true)?;
+                if self.movie.mode {
+                    self.start_movie(model, args, false)?;
+                    return self.snapshot(model, args, false);
+                }
+                self.movie.preview = None;
                 let scene = self
                     .targets
                     .scene()
@@ -365,6 +405,10 @@ impl Rendering {
                 self.message = "Rendering image…".into();
             }
             "stop" => {
+                if let Some(job) = &self.movie.job {
+                    job.cancel();
+                    self.message = job.message();
+                }
                 if let Some(job) = &self.job {
                     job.cancel.store(true, Ordering::Relaxed);
                     self.message = "Stopping render…".into();
@@ -373,20 +417,37 @@ impl Rendering {
             "select" => {
                 self.history
                     .select(args["index"].as_u64().ok_or("Image index is required")? as usize)?;
+                self.movie.preview = None;
             }
-            "clear" => self.history.clear(),
+            "clear" => {
+                self.history.clear();
+                self.movie.preview = None;
+            }
             "useSettings" => {
-                if self.job.is_some() {
+                if self.running() {
                     return Err("Wait for the current render to finish".into());
                 }
                 self.sync(model, true)?;
-                let settings = self.selected(args)?.source.settings_argument();
+                let selected = self.selected(args)?;
+                let settings = selected.source.settings_argument();
+                let movie = selected.movie.clone();
                 let scene = self
                     .targets
                     .scene()
                     .ok_or("Render target is no longer available")?;
                 self.apply(model, scene, &settings)?;
+                self.movie.mode = movie.is_some();
+                self.editor = RenderEditor::default();
                 self.sync(model, false)?;
+                if let Some(movie) = movie {
+                    self.initialize_movie(model)?;
+                    self.movie.options = movie.options;
+                    if self.movie.options.use_temp_dir {
+                        self.movie.options.select_temporary(&self.movie.temporary);
+                    }
+                    self.refresh_movie_outputs();
+                    self.persist_movie_options(model)?;
+                }
                 self.message = "Applied settings from the selected image".into();
             }
             "save" | "copy" => {
@@ -404,6 +465,7 @@ impl Rendering {
                     self.message = "Image copied to clipboard".into();
                 }
             }
+            _ if self.movie_request(model, operation, args)? => {}
             _ => return Err("Unknown rendering operation".into()),
         }
         self.snapshot(model, args, operation == "open")
@@ -413,6 +475,12 @@ impl Rendering {
         &self,
         args: &Value,
     ) -> Result<&cuemol_command::render_history::RenderRecord, String> {
+        if self.movie.preview.is_some() {
+            return Err("Select a completed render result first".into());
+        }
+        if args.get("imageKey").is_some() && args["imageKey"] != self.image_key() {
+            return Err("The displayed frame changed; repeat the operation".into());
+        }
         let record = self
             .history
             .current()
@@ -452,9 +520,9 @@ impl Rendering {
             "targets":self.targets.views.iter().map(|target| json!({"sceneId":target.scene,"viewId":target.view,"label":target.label})).collect::<Vec<_>>(),
             "pixels":self.editor.pixels(),"lighting":self.editor.lighting(),
             "quality":(["aa","ao","giLighting","shadows"].into_iter().map(|axis| (axis.to_string(),json!({"selected":self.editor.quality_step(axis),"steps":quality_steps(axis).into_iter().map(|(id,label,_)| json!({"id":id,"label":label})).collect::<Vec<_>>()}))).collect::<serde_json::Map<_,_>>()),
-            "running":self.job.is_some(),"message":self.message,
+            "running":self.running(),"message":self.message,
             "log":self.job.as_ref().and_then(|job|job.progress.as_ref()).map(|progress|progress.text()),
-            "elapsed":self.job.as_ref().map(|job| job.started.elapsed().as_secs_f64()),
+            "elapsed":self.job.as_ref().map(|job| job.started.elapsed().as_secs_f64()).or_else(||self.movie.job.as_ref().map(|job|job.elapsed_seconds())),
             "povError":if self.editor.backend()=="povray" {cuemol_command::pov::availability(&model.desktop).err()}else{None},
             "historyLength":self.history.len(),"selected":self.history.selected(),"current":current,
             "filename":current.map(|record|record.filename()),
@@ -477,15 +545,29 @@ impl Rendering {
             default.layers.push(cuemol_render::HatchLayer::default());
             value["defaultLayer"] = json!(default.spec().lines().next().unwrap());
         }
-        if current.map(|record| record.id) != args["imageId"].as_u64() {
-            value["image"] = if let Some(index) = self.history.selected() {
+        self.movie_snapshot(model, &mut value);
+        let changed = if args.get("imageKey").is_some() {
+            args["imageKey"] != value["imageKey"]
+        } else {
+            self.movie.preview.is_some()
+                || self.history.frame().is_some()
+                || current.map(|record| record.id) != args["imageId"].as_u64()
+        };
+        if changed {
+            let png = if let Some(preview) = &self.movie.preview {
+                Some(preview.png.clone())
+            } else {
+                self.history
+                    .selected()
+                    .map(|index| self.history.image(index))
+                    .transpose()?
+            };
+            value["image"] = png.map_or(Value::Null, |png| {
                 json!(format!(
                     "data:image/png;base64,{}",
-                    base64::engine::general_purpose::STANDARD.encode(self.history.image(index)?)
+                    base64::engine::general_purpose::STANDARD.encode(png)
                 ))
-            } else {
-                Value::Null
-            };
+            });
         }
         Ok(value)
     }
