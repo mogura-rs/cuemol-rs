@@ -13308,8 +13308,10 @@ fn handle_model_request(
             if path.trim().is_empty() {
                 return Err("a view output path is required".to_string());
             }
-            fs::write(&path, camera_to_view_data(&model.camera))
+            let prepared = cuemol_command::prepare_current_view(&model.desktop, &model.camera)
                 .map_err(|error| error.to_string())?;
+            fs::write(&path, &prepared.xml).map_err(|error| error.to_string())?;
+            prepared.finish(&mut model.desktop).map_err(|error| error.to_string())?;
             model.status = format!("Saved current view: {path}");
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -16727,6 +16729,7 @@ fn backup_scene_file(path: &Path) -> Result<(), String> {
     })
 }
 
+#[cfg(test)]
 fn camera_to_view_data(camera: &Camera) -> String {
     let center = camera.center();
     let rotation = camera.rotation();
@@ -16760,6 +16763,9 @@ center_mark\t{}\n",
 }
 
 fn camera_from_view_data(data: &str) -> Result<Camera, String> {
+    if data.trim_start().starts_with('<') {
+        return Camera::from_xml_string(data).map_err(|error| error.to_string());
+    }
     let mut camera = Camera::new();
     let mut saw_header = false;
     for line in data.lines() {
@@ -17598,6 +17604,38 @@ mod tests {
         let camera = frame_camera(&snapshot);
         assert_eq!(camera.center(), Vector4::new3(0.0, 1.0, -1.0));
         assert!(camera.zoom() > 4.0);
+    }
+
+    #[test]
+    fn current_view_menu_writes_camera_xml_and_keeps_failed_output_transactional() {
+        let mut model = model_without_gpu();
+        model.camera.set_center(Vector4::new3(1.125, -3.25, 7.5));
+        model.camera.set_zoom(37.25);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("view.cam");
+        handle_model_request(
+            &mut model,
+            ModelRequest::SaveView(path.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+        let saved = Camera::from_xml_string(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.name(), "__current");
+        assert_eq!(saved.zoom(), 37.25);
+        assert_eq!(saved.center(), model.camera.center());
+        model.camera.set_zoom(9.);
+        let before = model.desktop.clone();
+        assert!(handle_model_request(
+            &mut model,
+            ModelRequest::SaveView(directory.path().to_string_lossy().into_owned())
+        )
+        .is_err());
+        assert!(model.desktop.same_undo_state(&before));
+        handle_model_request(
+            &mut model,
+            ModelRequest::LoadView(path.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+        assert_eq!(model.camera.zoom(), 37.25);
     }
 
     #[test]

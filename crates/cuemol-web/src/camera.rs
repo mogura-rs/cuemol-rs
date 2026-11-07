@@ -1,6 +1,21 @@
 use super::*;
 
 impl App {
+    pub(super) fn save_current_view_download(&mut self) {
+        let result = (|| -> Result<(), String> {
+            let prepared = cuemol_command::prepare_current_view(&self.state, &self.camera)
+                .map_err(|error| error.to_string())?;
+            download("view.cam", prepared.xml.as_bytes(), "application/xml").map_err(js_error)?;
+            prepared
+                .finish(&mut self.state)
+                .map_err(|error| error.to_string())
+        })();
+        self.message = match result {
+            Ok(()) => "Saved current view to view.cam".into(),
+            Err(error) => error,
+        };
+    }
+
     pub(super) fn prune_camera_files(&mut self) {
         if self.camera_files.is_empty() {
             return;

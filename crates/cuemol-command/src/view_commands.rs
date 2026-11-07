@@ -4,6 +4,41 @@ use cuemol_desktop_core::DesktopAppState;
 use cuemol_qsys::Camera;
 use serde_json::Value;
 
+pub struct PreparedCurrentView {
+    scene: cuemol_core::Uid,
+    camera: Camera,
+    pub xml: String,
+}
+
+pub fn prepare_current_view(
+    state: &DesktopAppState,
+    camera: &Camera,
+) -> Result<PreparedCurrentView> {
+    let scene = scene(state)?;
+    let mut camera = camera.clone();
+    camera.set_name("__current");
+    camera.set_source("");
+    camera.set_alt_source("");
+    camera.set_ui_order(-1);
+    camera.clear_visibility_settings();
+    Ok(PreparedCurrentView {
+        scene,
+        xml: camera.to_xml_string(),
+        camera,
+    })
+}
+
+impl PreparedCurrentView {
+    pub fn finish(self, state: &mut DesktopAppState) -> Result<()> {
+        let scene = state
+            .scene_manager_mut()
+            .scene_mut(self.scene)
+            .ok_or_else(|| CueMolError::not_found("view source scene"))?;
+        scene.set_camera(self.camera);
+        Ok(())
+    }
+}
+
 fn numbers<const N: usize>(args: &Value, key: &str) -> Result<Option<[f64; N]>> {
     if args[key].is_null() {
         return Ok(None);

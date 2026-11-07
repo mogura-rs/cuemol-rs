@@ -151,6 +151,11 @@ reorder them. The scene-opening camera, `__current`, remains at the top. Its row
 can still be selected, edited or deleted. Camera properties and show/hide editing
 are available from the context menu, together with Cut, Copy and Paste.
 
+File > Save current view saves the live view as a portable `.cam` camera named
+`__current`, without object visibility flags or inherited file links. The native,
+Tauri and browser frontends use the same XML format. Saving leaves scene Undo
+and Redo unchanged. Native frontends can still read their earlier view files.
+
 The Camera file submenu loads, reloads and saves `.cam` documents. Native reload
 reads the linked file; browser reload uses the File already opened in that tab.
 Browser Save and Save as both create downloads and do not overwrite local files.

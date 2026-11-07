@@ -1,5 +1,25 @@
 # Validation evidence
 
+## Current-view file compatibility
+
+The menu audit found a format mismatch behind Save current view. The reference
+saves the live camera as a standalone `.cam` XML document. Native egui and Tauri
+instead wrote an application-specific text format, and the browser downloaded
+a PNG. All three now use the same prepared camera document, named `__current`,
+without inherited source paths or object visibility flags. Saving completes the
+transient camera update only after successful output; native write failures
+leave stored cameras untouched. Native camera loading accepts these XML files,
+and the older native text readers remain available.
+
+Two shared checks cover camera values, metadata removal, deferred state changes
+and a captured scene that is switched or deleted. Native and Tauri model checks
+write actual files, parse them through the camera reader and verify failed-output
+preservation. Both native legacy-format checks also pass. Eight WebGL/WebGPU
+camera-pane, history and current-view checks pass, including downloaded XML,
+precise view values, file reload and Undo/Redo preservation. The optimized WASM
+and both native frontends compile. These checks establish the file behavior;
+the broader menu layout and separate Rendering-window audit remain open.
+
 ## Browser recent files
 
 The current menu audit found that the browser had no Open Recent workflow.

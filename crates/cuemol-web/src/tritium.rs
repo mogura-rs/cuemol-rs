@@ -399,8 +399,7 @@ impl App {
                         let save_view = ui.button("Save current view…");
                         self.record_ui_rect("Save current view", &save_view);
                         if save_view.clicked() {
-                            let size = self.target.as_ref().map_or(self.render_size, |target| target.size);
-                            self.render_async("get_screenshot", &json!({"width":size[0],"height":size[1]}), Some("view.png".into()), false);
+                            self.save_current_view_download();
                             ui.close();
                         }
                         if ui.button("Save Scene As…").clicked() {

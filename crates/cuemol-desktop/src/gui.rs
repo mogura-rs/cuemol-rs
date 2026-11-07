@@ -17306,13 +17306,27 @@ impl GuiApplication {
     }
 
     fn save_current_view(&mut self, camera: &CameraController) {
-        match fs::write(self.view_save_path.trim(), camera.to_view_data()) {
+        let result =
+            cuemol_command::prepare_current_view(&self.state, &camera.to_qsys_camera("__current"))
+                .and_then(|prepared| {
+                    fs::write(self.view_save_path.trim(), &prepared.xml)?;
+                    prepared.finish(&mut self.state)
+                });
+        match result {
             Ok(()) => self.set_status(format!("Saved view {}", self.view_save_path.trim())),
-            Err(error) => self.set_status(format!("Error: {error}")),
+            Err(error) => self.set_error(error),
         }
     }
 
     fn load_view_path(&mut self, path: &Path, camera: &mut CameraController) {
+        if fs::read_to_string(path).is_ok_and(|data| data.trim_start().starts_with('<')) {
+            if let Some(scene) = self.state.active_scene() {
+                if self.load_workspace_camera_file(scene, path, camera) {
+                    self.add_recent_path(path.to_path_buf());
+                }
+            }
+            return;
+        }
         match fs::read_to_string(path)
             .map_err(CueMolError::from)
             .and_then(|data| CameraController::from_view_data(&data))
@@ -22647,7 +22661,7 @@ impl GuiApplication {
         scene_uid: cuemol_core::Uid,
         path: &Path,
         camera: &mut CameraController,
-    ) {
+    ) -> bool {
         let undo = self.capture_undo();
         match self.state.load_scene_camera_file(scene_uid, path) {
             Ok(name) => match self.state.load_scene_camera(scene_uid, &name, true) {
@@ -22669,10 +22683,17 @@ impl GuiApplication {
                         camera_index,
                     });
                     self.set_status(format!("Load camera file {name}"));
+                    true
                 }
-                Err(error) => self.set_status(format!("Camera load error: {error}")),
+                Err(error) => {
+                    self.set_status(format!("Camera load error: {error}"));
+                    false
+                }
             },
-            Err(error) => self.set_status(format!("Camera file error: {error}")),
+            Err(error) => {
+                self.set_status(format!("Camera file error: {error}"));
+                false
+            }
         }
     }
 
@@ -28770,6 +28791,7 @@ impl CameraController {
         Some((egui::pos2(x, y), (self.eye() - point).length()))
     }
 
+    #[cfg(test)]
     fn to_view_data(&self) -> String {
         format!(
             "cuemol2-rs-view\t3\n\
@@ -34029,6 +34051,36 @@ mod tests {
         );
         fs::remove_file(qsc_path).expect("remove test scene");
         fs::remove_file(pdb_path).expect("remove test molecule");
+    }
+
+    #[test]
+    fn current_view_menu_saves_reference_camera_xml_and_preserves_failed_writes() {
+        let mut app = GuiApplication::new();
+        app.state.new_scene("View", true);
+        let mut camera = CameraController::default();
+        camera.target = Vec3::new(3., -2., 7.);
+        camera.ortho_scale = 17.5;
+        camera.slab_depth = 31.;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("view.cam");
+        app.view_save_path = path.to_string_lossy().into_owned();
+        let history = app.undo_stack.len();
+        app.save_current_view(&camera);
+        let xml = fs::read_to_string(&path).unwrap();
+        let saved = cuemol_qsys::Camera::from_xml_string(&xml).unwrap();
+        assert_eq!(saved.name(), "__current");
+        assert_eq!(saved.zoom(), 35.);
+        assert_eq!(saved.center(), Vector4::new3(3., -2., 7.));
+        assert_eq!(app.undo_stack.len(), history);
+        let before = app.state.clone();
+        app.view_save_path = directory.path().to_string_lossy().into_owned();
+        camera.ortho_scale = 4.;
+        app.save_current_view(&camera);
+        assert!(app.state.same_undo_state(&before));
+        app.load_view_path(&path, &mut camera);
+        assert_eq!(camera.ortho_scale, 17.5);
+        assert_eq!(camera.slab_depth, 31.);
+        assert_eq!(camera.target, Vec3::new(3., -2., 7.));
     }
 
     #[test]
