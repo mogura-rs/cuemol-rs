@@ -193,6 +193,8 @@ const WORKSPACE_PAINT_HUES = [
 
 let snapshot = null;
 let selectedObjectUid = null;
+let interactionObjectUid = null;
+let interactionObject2Uid = null;
 let selectedRendererUid = null;
 const workspaceRendererStyleCache = new Map();
 const spaceGroupOptionsCache = new Map();
@@ -6292,39 +6294,40 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     if (objects.length === 0) {
       dialogContent.append(dialogParagraph("No molecular object is loaded."));
     } else {
+      const sceneUid = snapshot.activeSceneUid;
+      const moleculeSection = dialogGroup("Molecule");
       const objectOptions = objects.map((object) => [object.uid, object.name]);
       const object = dialogSelect(
         "Molecule",
         objectOptions,
-        selectedObjectUid ?? objects[0].uid,
+        objects.some(item => item.uid === interactionObjectUid) ? interactionObjectUid : selectedObjectUid ?? objects[0].uid,
+        moleculeSection,
       );
-      const selection1 = dialogField("Selection 1", snapshot.selection || "");
-      const useObject2 = dialogCheckbox("Mol 2:", false);
+      const selectionPicker1 = dialogSelectionField("Selection 1", "", () => Number(object.value), moleculeSection);
+      const selection1 = selectionPicker1.input;
+      const useObject2 = dialogCheckbox("Second molecule", false, moleculeSection);
       const object2 = dialogSelect(
         "Molecule 2",
         objectOptions,
-        objects.find((candidate) => candidate.uid !== Number(object.value))?.uid ?? objects[0].uid,
+        objects.some(item => item.uid === interactionObject2Uid) ? interactionObject2Uid : objects.find((candidate) => candidate.uid !== Number(object.value))?.uid ?? objects[0].uid,
+        moleculeSection,
       );
       object2.disabled = true;
-      useObject2.addEventListener("change", () => {
-        object2.disabled = !useObject2.checked;
-      });
-      const useSelection2 = dialogCheckbox("Sel 2:", false);
-      const selection2 = dialogField("Selection 2", "");
+      const useSelection2 = dialogCheckbox("Second selection", false, moleculeSection);
+      const selectionPicker2 = dialogSelectionField("Selection 2", "", () => Number((useObject2.checked ? object2 : object).value), moleculeSection);
+      const selection2 = selectionPicker2.input;
       selection2.disabled = true;
-      useSelection2.addEventListener("change", () => {
-        selection2.disabled = !useSelection2.checked;
-      });
-      const rMin = dialogField("Min distance (Å)", "1.5", "number");
+      const parameters = dialogGroup("Parameters");
+      const rMin = dialogField("Min distance (Å)", "2.5", "number", parameters);
       rMin.step = "0.1";
       rMin.min = "0";
-      const rMax = dialogField("Max distance (Å)", "3.5", "number");
+      const rMax = dialogField("Max distance (Å)", "3.5", "number", parameters);
       rMax.step = "0.1";
       rMax.min = "0";
-      const maxCount = dialogField("Max labels", "100", "number");
+      const maxCount = dialogField("Max labels", "30", "number", parameters);
       maxCount.min = "1";
-      const hbond = dialogCheckbox("Hydrogen bond (N, O) only", true);
-      const renderer = dialogField("Renderer", "measure");
+      const hbond = dialogCheckbox("Hydrogen bond (N, O) only", false, parameters);
+      const renderer = dialogField("Label set name", "measure", "text", parameters);
       const rendererNames = [
         ...new Set(
           objects.flatMap((candidate) =>
@@ -6345,23 +6348,62 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         renderer.setAttribute("list", rendererList.id);
         dialogContent.append(rendererList);
       }
+      const errorMessage = dialogParagraph("");
+      errorMessage.setAttribute("role", "alert");
+      dialogContent.append(errorMessage);
+      let submitting = false;
+      const validate = () => {
+        interactionObjectUid = Number(object.value);
+        interactionObject2Uid = Number(object2.value);
+        object2.closest("label").hidden = !useObject2.checked;
+        selection2.closest("label").hidden = !(useSelection2.checked || useObject2.checked);
+        object2.disabled = !useObject2.checked || submitting;
+        selectionPicker1.setEnabled(!submitting);
+        selectionPicker2.setEnabled((useSelection2.checked || useObject2.checked) && !submitting);
+        let error = "";
+        if (snapshot.activeSceneUid !== sceneUid) error = "The active scene changed. Reopen Interaction analysis.";
+        else if (!activeObjects().some(item => item.uid === Number(object.value)) ||
+          (useObject2.checked && !activeObjects().some(item => item.uid === Number(object2.value)))) error = "Select a molecule.";
+        else if (!rMin.value || !rMax.value || !Number.isFinite(Number(rMin.value)) || !Number.isFinite(Number(rMax.value)) || Number(rMin.value) < 0) error = "Enter a valid non-negative distance range.";
+        else if (Number(rMin.value) >= Number(rMax.value)) error = "Min distance must be smaller than max distance.";
+        else if (!Number.isInteger(Number(maxCount.value)) || Number(maxCount.value) <= 0) error = "Max labels must be greater than zero.";
+        calculate.disabled = submitting || Boolean(error);
+        errorMessage.textContent = error;
+        return !error;
+      };
       const calculate = button("OK", "dialog-primary", async () => {
+        if (!validate() || submitting) return;
+        const secondObjectUid = useObject2.checked && object2.value !== object.value ? Number(object2.value) : null;
+        const secondSelection = secondObjectUid !== null || useSelection2.checked ? selection2.value : null;
+        submitting = true;
+        validate();
         const changed = await mutate("calculate_contacts", {
           objectUid: Number(object.value),
           selection1: selection1.value,
-          object2Uid: useObject2.checked ? Number(object2.value) : null,
-          selection2: useSelection2.checked ? selection2.value : null,
+          object2Uid: secondObjectUid,
+          selection2: secondSelection,
           rMin: Number(rMin.value),
           rMax: Number(rMax.value),
           hbond: hbond.checked,
           maxCount: Number(maxCount.value),
           rendererName: renderer.value,
-        });
+        }, renderShell, true, error => { errorMessage.textContent = String(error); });
+        submitting = false;
+        calculate.disabled = false;
         if (changed && snapshot.status !== "No interaction was found") {
+          rememberSelection(selection1.value);
+          if (secondSelection !== null) rememberSelection(secondSelection);
           referenceDialog.close();
+        } else if (changed) {
+          errorMessage.textContent = snapshot.status;
         }
+        object2.disabled = !useObject2.checked;
+        selectionPicker1.setEnabled(true);
+        selectionPicker2.setEnabled(useSelection2.checked || useObject2.checked);
       });
-      dialogActions(calculate);
+      for (const input of [object, object2, useObject2, useSelection2, rMin, rMax, maxCount]) input.addEventListener("input", validate);
+      validate();
+      dialogActions(button("Cancel", "", () => referenceDialog.close()), calculate);
     }
   } else if (title === "Change symmetry") {
     dialogTitle.textContent = "Change symmetry";
@@ -17183,7 +17225,7 @@ function scheduleRender(delay = 100) {
   renderTimer = setTimeout(renderViewport, delay);
 }
 
-async function mutate(command, args = {}, render = renderShell, refreshViewport = true) {
+async function mutate(command, args = {}, render = renderShell, refreshViewport = true, onError = showError) {
   cancelAnimationStripDrag();
   await cancelCueMolNumericDrag();
   if (!invoke) {
@@ -17212,7 +17254,7 @@ async function mutate(command, args = {}, render = renderShell, refreshViewport 
     scheduleMoleculeDetailsRefresh();
     return true;
   } catch (error) {
-    showError(error);
+    onError(error);
     return false;
   } finally {
     setBusy(false);

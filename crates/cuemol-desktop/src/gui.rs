@@ -1609,17 +1609,7 @@ struct GuiApplication {
     atom_intr_column_drag_start: Option<(usize, f32)>,
     bond_aid1: String,
     bond_aid2: String,
-    contact_object: Option<cuemol_core::Uid>,
-    contact_selection1: String,
-    contact_use_object2: bool,
-    contact_object2: Option<cuemol_core::Uid>,
-    contact_use_selection2: bool,
-    contact_selection2: String,
-    contact_r_min: f64,
-    contact_r_max: f64,
-    contact_hbond: bool,
-    contact_max_count: usize,
-    contact_renderer_name: String,
+    interaction: cuemol_ui::interaction::InteractionDialog,
     secondary_target: Option<cuemol_core::Uid>,
     secondary_assign_by_selection: bool,
     secondary_selection: String,
@@ -4937,17 +4927,7 @@ impl GuiApplication {
             atom_intr_column_drag_start: None,
             bond_aid1: String::new(),
             bond_aid2: String::new(),
-            contact_object: None,
-            contact_selection1: String::new(),
-            contact_use_object2: false,
-            contact_object2: None,
-            contact_use_selection2: false,
-            contact_selection2: String::new(),
-            contact_r_min: 1.5,
-            contact_r_max: 3.5,
-            contact_hbond: true,
-            contact_max_count: 100,
-            contact_renderer_name: "measure".to_string(),
+            interaction: Default::default(),
             secondary_target: None,
             secondary_assign_by_selection: false,
             secondary_selection: String::new(),
@@ -5891,6 +5871,7 @@ impl GuiApplication {
                         if ui.button(label).clicked() {
                             match label {
                                 "Execute script..." => self.choose_execute_script(),
+                                "Interaction..." => self.open_interaction_dialog(),
                                 "Mol surface generation..." => self.open_surface_generation_tool(),
                                 "APBS elepot calculation..." => self.open_apbs_tool(),
                                 "Mol morphing animation..." => {
@@ -17685,52 +17666,65 @@ impl GuiApplication {
         self.set_status(format!("Removed {removed} non-standard bond(s)"));
     }
 
+    fn open_interaction_dialog(&mut self) {
+        self.interaction
+            .opened(&self.state, self.target_object_uid());
+        self.tool_dialog = Some("Interaction".into());
+    }
+
     fn calculate_contacts(&mut self) {
-        let Some(object_uid) = self
-            .contact_object
-            .filter(|uid| self.state.scene_manager().object(*uid).is_some())
-            .or_else(|| self.target_object_uid())
-        else {
-            self.set_status("No object selected");
+        if let Some(error) = self.interaction.validation_error(&self.state) {
+            self.interaction.error = error.into();
+            self.set_status(error);
             return;
-        };
-        let object2_uid = self
-            .contact_use_object2
-            .then_some(self.contact_object2)
-            .flatten();
-        let selection2 = self
-            .contact_use_selection2
-            .then(|| self.contact_selection2.clone());
-        let renderer_name = if self.contact_renderer_name.trim().is_empty() {
+        }
+        let object_uid = self.interaction.object.expect("validated molecule");
+        let renderer_name = if self.interaction.renderer_name.trim().is_empty() {
             "measure".to_string()
         } else {
-            self.contact_renderer_name.trim().to_string()
+            self.interaction.renderer_name.trim().to_string()
         };
-        self.contact_renderer_name.clone_from(&renderer_name);
         let undo = self.capture_undo();
         match self.state.define_atom_contacts(
             object_uid,
-            &self.contact_selection1,
-            object2_uid,
-            selection2.as_deref(),
-            self.contact_r_min,
-            self.contact_r_max,
-            self.contact_hbond,
-            self.contact_max_count,
+            &self.interaction.selection1,
+            self.interaction.second_object(),
+            self.interaction.second_selection(),
+            self.interaction.r_min,
+            self.interaction.r_max,
+            self.interaction.hbond,
+            self.interaction.max_count,
             &renderer_name,
         ) {
             Ok(summary) if summary.count > 0 => {
                 self.push_undo_snapshot(undo);
+                for selection in [
+                    Some(self.interaction.selection1.clone()),
+                    self.interaction.second_selection().map(str::to_owned),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    self.remember_selection_history(&selection);
+                }
                 self.selected_object = Some(object_uid);
                 self.selected_renderer = Some(summary.renderer_uid);
                 self.rebuild_snapshot();
+                self.tool_dialog = None;
+                self.interaction.error.clear();
                 self.set_status(format!(
                     "Defined {} interaction(s) in {}",
                     summary.count, renderer_name
                 ));
             }
-            Ok(_) => self.set_status("No interaction was found"),
-            Err(error) => self.set_error(error),
+            Ok(_) => {
+                self.interaction.error = "No interaction was found".into();
+                self.set_status("No interaction was found");
+            }
+            Err(error) => {
+                self.interaction.error = error.to_string();
+                self.set_error(error);
+            }
         }
     }
 
@@ -24588,6 +24582,10 @@ impl GuiApplication {
         if title == "Native rendering" {
             return;
         }
+        if title == "Interaction" {
+            self.interaction_dialog(ctx);
+            return;
+        }
         let mut open = true;
         let mut close = false;
         egui::Window::new(title.as_str())
@@ -24597,7 +24595,6 @@ impl GuiApplication {
                 match title.as_str() {
                     "Molecular superposition" => self.superpose_tool_ui(ui, camera),
                     "Mol bond editor" => self.bond_editor_tool_ui(ui),
-                    "Interaction" => self.interaction_tool_ui(ui),
                     "Reassign secondary str" => self.secondary_structure_tool_ui(ui),
                     "Mol morphing animation" => self.morph_tool_ui(ui),
                     "MolClient tools" => self.mol_client_tool_ui(ui),
@@ -24912,85 +24909,30 @@ impl GuiApplication {
         });
     }
 
-    fn interaction_tool_ui(&mut self, ui: &mut egui::Ui) {
-        let objects = self.state.active_object_summaries();
-        if !objects
-            .iter()
-            .any(|object| Some(object.uid) == self.contact_object)
-        {
-            self.contact_object = self
-                .target_object_uid()
-                .filter(|uid| objects.iter().any(|object| object.uid == *uid))
-                .or_else(|| objects.first().map(|object| object.uid));
+    fn interaction_dialog(&mut self, ctx: &egui::Context) {
+        if self.interaction.scene != self.state.active_scene() {
+            self.tool_dialog = None;
+            self.set_status("The active scene changed. Reopen Interaction analysis.");
+            return;
         }
-        if !objects
-            .iter()
-            .any(|object| Some(object.uid) == self.contact_object2)
-        {
-            self.contact_object2 = objects
-                .iter()
-                .find(|object| Some(object.uid) != self.contact_object)
-                .or_else(|| objects.first())
-                .map(|object| object.uid);
+        let mut open = true;
+        let mut action = None;
+        egui::Window::new("Interaction analysis")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(550.)
+            .show(ctx, |ui| {
+                action = self
+                    .interaction
+                    .show(ui, &self.state, self.snapshot_revision);
+            });
+        match action {
+            Some(cuemol_ui::interaction::Action::Accept) => self.calculate_contacts(),
+            Some(cuemol_ui::interaction::Action::Cancel) => open = false,
+            None => {}
         }
-        egui::ComboBox::from_label("Molecule")
-            .selected_text(object_combo_label(&objects, self.contact_object))
-            .show_ui(ui, |ui| {
-                for object in &objects {
-                    ui.selectable_value(
-                        &mut self.contact_object,
-                        Some(object.uid),
-                        object.name.as_str(),
-                    );
-                }
-            });
-        ui.horizontal(|ui| {
-            ui.label("Selection 1");
-            ui.add_sized(
-                [ui.available_width(), 22.0],
-                egui::TextEdit::singleline(&mut self.contact_selection1),
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.contact_use_object2, "Mol 2:");
-            ui.add_enabled_ui(self.contact_use_object2, |ui| {
-                egui::ComboBox::from_id_salt("native_contact_object2")
-                    .selected_text(object_combo_label(&objects, self.contact_object2))
-                    .show_ui(ui, |ui| {
-                        for object in &objects {
-                            ui.selectable_value(
-                                &mut self.contact_object2,
-                                Some(object.uid),
-                                object.name.as_str(),
-                            );
-                        }
-                    });
-            });
-        });
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.contact_use_selection2, "Sel 2:");
-            ui.add_enabled(
-                self.contact_use_selection2,
-                egui::TextEdit::singleline(&mut self.contact_selection2)
-                    .desired_width(ui.available_width()),
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.label("Distance");
-            ui.add(egui::DragValue::new(&mut self.contact_r_min).speed(0.1));
-            ui.add(egui::DragValue::new(&mut self.contact_r_max).speed(0.1));
-        });
-        ui.horizontal(|ui| {
-            ui.label("Max labels");
-            ui.add(egui::DragValue::new(&mut self.contact_max_count).range(1..=10_000));
-        });
-        ui.checkbox(&mut self.contact_hbond, "Hydrogen bond (N, O) only");
-        ui.horizontal(|ui| {
-            ui.label("Renderer");
-            ui.text_edit_singleline(&mut self.contact_renderer_name);
-        });
-        if ui.button("OK").clicked() {
-            self.calculate_contacts();
+        if !open {
+            self.tool_dialog = None;
         }
     }
 
@@ -39198,6 +39140,53 @@ mod tests {
     }
 
     #[test]
+    fn native_interaction_dialog_keeps_empty_and_invalid_analyses_out_of_history() {
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().into_owned();
+        app.open_current_path(&mut camera);
+        app.open_interaction_dialog();
+        let object = app.interaction.object;
+        assert_eq!(
+            (
+                app.interaction.r_min,
+                app.interaction.r_max,
+                app.interaction.max_count
+            ),
+            (2.5, 3.5, 30)
+        );
+        assert!(!app.interaction.hbond);
+        let before = app.state.clone();
+        let undo_count = app.undo_stack.len();
+        app.interaction.selection1 = "none".into();
+        app.calculate_contacts();
+        assert_eq!(app.interaction.error, "No interaction was found");
+        assert_eq!(app.tool_dialog.as_deref(), Some("Interaction"));
+        assert!(app.state.same_undo_state(&before));
+        assert_eq!(app.undo_stack.len(), undo_count);
+        app.interaction.selection1 = "invalid (((".into();
+        app.calculate_contacts();
+        assert!(!app.interaction.error.is_empty());
+        assert!(app.state.same_undo_state(&before));
+        assert_eq!(app.undo_stack.len(), undo_count);
+        app.interaction.r_min = app.interaction.r_max;
+        app.calculate_contacts();
+        assert!(app.interaction.error.contains("Min distance"));
+        assert_eq!(app.undo_stack.len(), undo_count);
+        app.open_interaction_dialog();
+        assert_eq!(app.interaction.object, object);
+        assert!(app.interaction.selection1.is_empty());
+        assert!(app.interaction.error.is_empty());
+        app.interaction.scene = None;
+        app.calculate_contacts();
+        assert!(app.interaction.error.contains("active scene changed"));
+        assert_eq!(app.undo_stack.len(), undo_count);
+    }
+
+    #[test]
     fn native_interaction_tool_defines_cross_molecule_renderer() {
         let Some(pdb) = reference_pdb_path() else {
             return;
@@ -39210,17 +39199,18 @@ mod tests {
         let objects = app.state.active_object_summaries();
         let first = objects[0].uid;
         let second = objects[1].uid;
-        app.contact_object = Some(first);
-        app.contact_selection1 = "name CA".to_string();
-        app.contact_use_object2 = true;
-        app.contact_object2 = Some(second);
-        app.contact_use_selection2 = true;
-        app.contact_selection2 = "name CA".to_string();
-        app.contact_r_min = 0.0;
-        app.contact_r_max = 0.1;
-        app.contact_hbond = false;
-        app.contact_max_count = 2;
-        app.contact_renderer_name = "measure".to_string();
+        app.open_interaction_dialog();
+        app.interaction.object = Some(first);
+        app.interaction.selection1 = "name CA".to_string();
+        app.interaction.use_object2 = true;
+        app.interaction.object2 = Some(second);
+        app.interaction.use_selection2 = false;
+        app.interaction.selection2 = "name CA".to_string();
+        app.interaction.r_min = 0.0;
+        app.interaction.r_max = 0.1;
+        app.interaction.hbond = false;
+        app.interaction.max_count = 2;
+        app.interaction.renderer_name = "measure".to_string();
 
         app.calculate_contacts();
 

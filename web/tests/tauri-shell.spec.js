@@ -57,6 +57,10 @@ async function openShell(page, storage = {}, options = {}) {
       snapshot.animationObjects=[{uid:20,index:0,relativeStart:0,timeRefName:'missing',disabled:false,quadric:0,name:'child',typeName:'NoopAnimObj',start:0,end:1,duration:1,resolveError:snapshot.animationResolveError}];
       snapshot.animationDuration=1;
     }
+    if(options.interactions) {
+      snapshot.objects.push({...molecule,uid:5,name:'Other',renderers:[]});
+      window.__interactionSceneChanged=()=>{snapshot.activeSceneUid=9;};
+    }
     const animationUndo=[],animationRedo=[];
     const resolveAnimation=()=>{
       const ends=new Map();
@@ -155,6 +159,11 @@ async function openShell(page, storage = {}, options = {}) {
       if (command === 'get_preferences') return structuredClone(preferences);
       if (command === 'set_preferences') { preferences=structuredClone(args.preferences);return {preferences,status:'Options updated'}; }
       if (command === 'get_snapshot') return snapshot;
+      if (options.interactions && command === 'calculate_contacts') {
+        if(args.selection1 === 'invalid (((') throw new Error('Invalid selection');
+        snapshot.status=args.selection1 === 'none' ? 'No interaction was found' : 'Defined 1 interaction(s) in measure';
+        return structuredClone(snapshot);
+      }
       if(options.files && command==='get_file_renderer_setup')return null;
       if(options.files && command==='open_paths') {
         const context=args.openContext;
@@ -2319,5 +2328,61 @@ test('Tauri file options retain AMBER coordinates and map kind before submission
   await dialog.getByRole('button',{name:'OK',exact:true}).click();
   await expect.poll(()=>page.evaluate(()=>window.__readerResult?.ccp4MapOptions)).toMatchObject({mapType:'em',subsample:2});
   await expect.poll(()=>page.evaluate(()=>window.__readerResult?.rendererSetup)).toMatchObject({mapCenterPolicy:'moveViewCenter',recenter:false});
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri interaction analysis validates inputs, remembers molecules and enables the second selection', async ({page},testInfo) => {
+  const errors=await openShell(page,{}, {interactions:true});
+  const open=async()=>{
+    await page.locator('summary').filter({hasText:/^Tools$/}).click();
+    await page.locator('[data-dialog="Interaction"]').click();
+  };
+  await open();
+  const dialog=page.locator('#reference-dialog');
+  await expect(dialog.getByLabel('Min distance (Å)',{exact:true})).toHaveValue('2.5');
+  await expect(dialog.getByLabel('Max labels',{exact:true})).toHaveValue('30');
+  await expect(dialog.getByLabel('Hydrogen bond (N, O) only',{exact:true})).not.toBeChecked();
+  await expect(dialog.getByLabel('Selection 1',{exact:true})).toHaveValue('');
+  await expect(dialog.getByLabel('Selection 2',{exact:true})).toBeDisabled();
+  await dialog.getByRole('button',{name:'Choose Selection 1',exact:true}).click();
+  await dialog.getByRole('button',{name:'Selection choice *',exact:true}).click();
+  await expect(dialog.getByLabel('Selection 1',{exact:true})).toHaveValue('*');
+  await dialog.getByLabel('Second molecule',{exact:true}).check();
+  await expect(dialog.getByLabel('Selection 2',{exact:true})).toBeEnabled();
+  await dialog.getByLabel('Selection 2',{exact:true}).fill('name CA');
+  await dialog.getByLabel('Min distance (Å)',{exact:true}).fill('3.5');
+  await expect(dialog.getByRole('button',{name:'OK',exact:true})).toBeDisabled();
+  await dialog.getByLabel('Min distance (Å)',{exact:true}).fill('2.5');
+  await dialog.getByLabel('Max labels',{exact:true}).fill('0');
+  await expect(dialog.getByRole('button',{name:'OK',exact:true})).toBeDisabled();
+  await dialog.getByLabel('Max labels',{exact:true}).fill('30');
+  await dialog.getByLabel('Selection 1',{exact:true}).fill('none');
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await expect(dialog.getByRole('alert')).toHaveText('No interaction was found');
+  await dialog.getByLabel('Selection 1',{exact:true}).fill('invalid (((');
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('Invalid selection');
+  await page.screenshot({path:testInfo.outputPath('tauri-interaction.png')});
+  await dialog.getByLabel('Selection 1',{exact:true}).fill('name N');
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  const args=await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='calculate_contacts').at(-1).args);
+  expect(args).toEqual({objectUid:3,selection1:'name N',object2Uid:5,selection2:'name CA',rMin:2.5,rMax:3.5,hbond:false,maxCount:30,rendererName:'measure'});
+  await open();
+  await expect(dialog.getByLabel('Selection 1',{exact:true})).toHaveValue('');
+  await expect(dialog.getByLabel('Second molecule',{exact:true})).not.toBeChecked();
+  await dialog.getByLabel('Second molecule',{exact:true}).check();
+  await dialog.getByLabel('Molecule 2',{exact:true}).selectOption('3');
+  await dialog.getByLabel('Selection 2',{exact:true}).fill('invalid (((');
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  const same=await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='calculate_contacts').at(-1).args);
+  expect(same.object2Uid).toBeNull();expect(same.selection2).toBeNull();
+  await open();
+  await expect(dialog.getByLabel('Molecule 2',{exact:true})).toHaveValue('3');
+  await page.evaluate(async()=>{window.__interactionSceneChanged();await mutate('get_snapshot');});
+  await dialog.getByLabel('Max labels',{exact:true}).fill('29');
+  await expect(dialog.getByRole('button',{name:'OK',exact:true})).toBeDisabled();
+  await expect(dialog.getByRole('alert')).toContainText('active scene changed');
   expect(errors).toEqual([]);
 });

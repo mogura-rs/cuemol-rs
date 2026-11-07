@@ -1,5 +1,38 @@
 # Validation evidence
 
+## Interaction analysis dialogs
+
+Native egui and the browser now share a dedicated Interaction analysis dialog.
+Tauri exposes the same defaults, second-molecule/selection gates and validation.
+All use the reference defaults: 2.5–3.5 Å, 30 labels, hydrogen-bond filtering off
+and the `measure` label set. Reopening resets the conditions while retaining
+valid molecule choices. Selection builders edit the form without changing the
+molecule's current selection. Successful expressions enter selection history.
+
+A distinct second molecule activates the second selection even when its switch
+is off. Selecting the first molecule again only uses a second selection when
+that switch is on, matching the reference service. Invalid distances disable
+acceptance. Invalid expressions and empty results stay in the dialog and do not
+change the scene or history. Successful analysis appends to the named renderer,
+closes the form and creates one undo entry. Scene changes reject stale drafts.
+
+The native GUI suite passes 214 tests, including cross-molecule selection and
+empty/invalid analysis regressions. Three browser cases pass on WebGL/WebGPU,
+covering real analysis, renderer creation, Undo/Redo, selection history,
+same-molecule dispatch and scene cancellation. The Tauri DOM case covers
+selection building, default/reset values, gating, invalid inputs, inline errors,
+same-molecule arguments and stale scenes. Linux OS mouse/keyboard input also
+confirms empty-result preservation, one label, Undo/Redo and reopening. Native,
+browser and Tauri screenshots were inspected; the label-set field's width was
+corrected after the first visual check.
+
+The earlier native/Tauri forms used 1.5 Å, 100 labels and hydrogen-bond filtering,
+and ignored selection 2 unless its own switch was on. The browser menu opened
+the generic command form. Those interfaces did not match the current reference
+dialog, despite the shared command already supporting interaction analysis.
+The guide now documents the dedicated forms; the broader dialog audit remains
+open. The command catalog's own defaults are unchanged.
+
 ## Browser reader options and native deferred imports
 
 Native egui and the browser now expose optional file setup. The browser dialog

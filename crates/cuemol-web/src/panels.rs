@@ -251,6 +251,11 @@ impl App {
     }
 
     pub(super) fn select_tool(&mut self, name: &str) {
+        if name == "analyze_interactions" {
+            self.interaction.opened(&self.state, self.selected);
+            self.show_interaction = true;
+            return;
+        }
         self.console_tool = name.into();
         self.form_tool.clear();
         self.show_console = true;
@@ -366,6 +371,64 @@ impl App {
         self.settings_draft = if open && !reloaded { Some(draft) } else { None };
         self.show_settings = open;
     }
+    pub(super) fn interaction_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_interaction {
+            return;
+        }
+        if self.interaction.scene != self.state.active_scene() {
+            self.show_interaction = false;
+            self.message = "The active scene changed. Reopen Interaction analysis.".into();
+            return;
+        }
+        let mut open = true;
+        let mut action = None;
+        let window = egui::Window::new("Interaction analysis")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(550.)
+            .show(ctx, |ui| {
+                action = self.interaction.show(ui, &self.state, self.revision);
+            });
+        self.ui_rects.extend(self.interaction.rects.clone());
+        if let Some(window) = window {
+            self.record_ui_rect("Interaction window", &window.response);
+        }
+        match action {
+            Some(cuemol_ui::interaction::Action::Accept) => {
+                let args = self.interaction.arguments();
+                if self.call_shared("analyze_interactions", args) {
+                    let count = serde_json::from_str::<serde_json::Value>(&self.message)
+                        .ok()
+                        .and_then(|v| v["count"].as_u64())
+                        .unwrap_or(0);
+                    if count > 0 {
+                        for selection in [
+                            Some(self.interaction.selection1.clone()),
+                            self.interaction.second_selection().map(str::to_owned),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            self.state.remember_selection(&selection);
+                        }
+                        self.persist_selection_history();
+                        self.selected = self.interaction.object;
+                        self.message = format!("Defined {count} interaction(s)");
+                        open = false;
+                    } else {
+                        self.message = "No interaction was found".into();
+                        self.interaction.error.clone_from(&self.message);
+                    }
+                } else {
+                    self.interaction.error.clone_from(&self.message);
+                }
+            }
+            Some(cuemol_ui::interaction::Action::Cancel) => open = false,
+            None => {}
+        }
+        self.show_interaction = open;
+    }
+
     pub(super) fn tools_ui(&mut self, ctx: &egui::Context) {
         if !self.show_console {
             return;

@@ -340,6 +340,8 @@ struct App {
     fps: f32,
     next_frame: f64,
     show_console: bool,
+    show_interaction: bool,
+    interaction: cuemol_ui::interaction::InteractionDialog,
     show_help: bool,
     about: cuemol_ui::about::AboutDialog,
     dark: bool,
@@ -552,6 +554,8 @@ impl App {
             fps: 24.0,
             next_frame: 0.0,
             show_console: false,
+            show_interaction: false,
+            interaction: Default::default(),
             pending_close: None,
             show_help: false,
             about: cuemol_ui::about::AboutDialog::default(),
@@ -1584,6 +1588,7 @@ impl eframe::App for App {
         self.settings_ui(ctx);
         self.render_ui(ctx);
         self.tools_ui(ctx);
+        self.interaction_ui(ctx);
         self.timeline_ui(ctx);
         self.rebuild();
         egui::CentralPanel::default()

@@ -33,6 +33,7 @@ Tauri and WebGL/WebGPU checks. The current operation inventory is complete; newl
 | Saved camera controls | Native and browser frontends share named selection, toolbar actions, rename, reordering, properties, show/hide editing and file controls. Tauri exposes the same actions. Focused command, model and actual-window/browser checks cover overwrite metadata, pinned order, visibility, navigation preserving redo and camera-file round trips. |
 | View transforms | Native and browser share relative rotation, viewing-axis pan, absolute coordinate entry, chained keyboard input, zoom/slab/distance, projection and center-mark controls. Tauri uses the shared transform math and matching numeric interactions. C++ comparisons, shared/model tests, WebGL/WebGPU and Linux OS input verify distance/slab separation and navigation preserving redo. |
 | Crystal symmetry controls | Native and browser frontends share molecule/map selection, crystal readouts, constrained cell editing, symmetry extents and unit-cell actions. Default cell values, cancellation, scene changes, repeated unit-cell actions and history pass focused checks. Tauri also uses the current defaults, ignores stale space-group replies and offers explicit cancellation. |
+| Interaction analysis | Native and browser share a dedicated form; Tauri exposes matching defaults, selection builders, optional molecule/selection gates and input validation. Empty/invalid results preserve history, successful labels use one undo, reopening resets conditions, and scene changes reject stale drafts. Native, WebGL/WebGPU, Tauri DOM and Linux OS input checks pass. |
 | MD loading, seeking and playback | Indexed DCD, XTC, TRR, NetCDF and MDCRD are implemented. MDCRD decoding and shared frame application avoid intermediate copies; malformed frames and oversized averaging windows have regressions. Coordinate/RSS benchmarks, affected native tests, and rebuilt-browser File seeking, agent undo and multi-object trajectory export/reload pass. |
 | Performance and memory | Measure changed operations with identical inputs and output checks. Record at least three fresh-process samples; do not infer application-wide speedups from one stage. |
 | Bug fixes | Require a reproducer and relevant regression checks for confirmed defects. Keep failed operations transactional. |
@@ -73,5 +74,5 @@ reference feature, not an implemented interface to port.
 The old [parity audit](parity-audit.md) retains measurements against 2.4.1.547.
 Its historical open rows and publication notes do not supersede this checklist.
 The remaining dialog audit covers reader options, molecular editing, surface
-operations, interaction analysis and rendering controls against the current
+operations and rendering controls against the current
 reference. A registered command alone does not close a dialog or appearance row.

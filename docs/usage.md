@@ -303,6 +303,21 @@ set or remove non-standard bonds. Each completed edit has one undo entry.
 The palette cap and **View > Tool palette** share a persisted collapse setting.
 Hover information and highlighting are configurable in Settings.
 
+### Interaction analysis
+
+**Tools > Interaction** opens the interaction form in each frontend. Choose a
+molecule and selection; Choose opens the selection builder. Defaults are
+2.5–3.5 Å, 30 labels, all atom types and the `measure` label set. Hydrogen-bond
+filtering restricts candidates to N and O. A distinct second molecule uses
+Selection 2 automatically. Without it, enable Second selection to restrict both
+ends within the first molecule. Choosing the first molecule in both pickers
+has the same behavior as using only the first picker.
+
+OK adds the found pairs to the named interaction renderer under one undo step.
+An empty result or invalid expression stays in the form without changing the
+scene. Cancel discards the draft. Reopening restores the defaults and keeps
+valid molecule choices. Switching scenes cancels or rejects the old draft.
+
 ### Picking and hover feedback
 
 Native, WebGL, WebGPU and Tauri views share geometry-based GPU picking and a

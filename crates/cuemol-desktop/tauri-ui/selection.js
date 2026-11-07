@@ -427,3 +427,46 @@ function createCueMolSelectionPane(scene, object, identity) {
     dispose:()=>{disposed=true;clearTimeout(timer);clearTimeout(refreshTimer);validationGeneration++;builder.cancel();},
   };
 }
+
+function dialogSelectionField(label, value, objectId, parent = dialogContent) {
+  const input = dialogField(label, value, 'text', parent);
+  input.setAttribute('aria-label', label);
+  const row = input.parentElement;
+  const controls = document.createElement('div');
+  controls.style.display = 'flex';
+  controls.style.gap = '6px';
+  input.style.minWidth = '0';
+  input.style.flex = '1';
+  const choose = document.createElement('button');
+  choose.type = 'button';
+  choose.textContent = 'Choose…';
+  choose.setAttribute('aria-label', `Choose ${label}`);
+  controls.append(input, choose);
+  row.append(controls);
+  const host = document.createElement('div');
+  host.hidden = true;
+  row.after(host);
+  const scene = snapshot.activeSceneUid;
+  let picker = null;
+  let target = null;
+  const close = () => { picker?.cancel(); picker = null; host.hidden = true; };
+  choose.addEventListener('click', () => {
+    if (picker) { close(); return; }
+    target = objectId();
+    host.hidden = false;
+    picker = createCueMolSelectionPicker(input, {nodeType:'object',nodeId:target}, `${scene}:dialog:${label}`, expression => {
+      input.value = expression;
+      input.dispatchEvent(new Event('input', {bubbles:true}));
+      setTimeout(close, 0);
+      return true;
+    }, {container:host, draft:{keyword:'hierarchical',fields:{},picked:'',distance:'5'},
+      isLive:()=>input.isConnected && referenceDialog.open && snapshot.activeSceneUid===scene && target===objectId()});
+  });
+  input.addEventListener('input', () => picker?.setValue(input.value));
+  referenceDialog.addEventListener('close', close, {once:true});
+  return {input, close, setEnabled:enabled=>{
+    input.disabled = !enabled;
+    choose.disabled = !enabled;
+    if (!enabled || target !== objectId()) close();
+  }};
+}
