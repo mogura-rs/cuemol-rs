@@ -1,5 +1,49 @@
 # Validation evidence
 
+## Native movie integration in the Rendering window
+
+Native egui now uses the shared movie options, managed sessions, sequential job
+and result history inside the modeless Rendering window. Mode requests select
+the still or movie size preset; movie controls use pixel dimensions and preserve
+fractional frame rates. The window supports temporary/custom folders, seven
+formats, existing-frame re-encoding, confirmed replacement/cleanup and movie
+file actions. Closing the window does not stop output. History holds one cached
+preview per result and loads only the requested frame. Replaced or removed files
+invalidate the old frame controls and movie path without discarding that preview.
+
+The shared command suite passes 94 cases with four explicit external/GPU checks
+excluded. Shared rendering UI tests pass four cases. Native GUI tests pass 160
+cases, including three movie regressions for mode presets, closed-window output,
+concurrent edits, old-preview retention, and cancellation after a frame has
+already been saved. Tauri passes 198 model tests with five existing checks
+excluded; all 68 shell contracts also pass. The updated native binary and WASM
+build succeed, and all 16 browser rendering tests pass with WebGL/WebGPU coverage.
+
+Actual Linux window input renders three 64 x 48 frames at 29.97 fps and encodes
+MP4. FFmpeg confirms three decoded frames. Clipboard pixels match the selected
+first frame. Re-encoding at 12.5 fps after removing the animation preserves the
+frame file timestamps and live view. Replacement cancellation leaves outputs
+intact, while confirmed Cleanup removes the matching output and leaves the
+cached preview copyable. A longer render is stopped through the window while
+another scene is created; completed frames and the concurrent scene edit remain.
+Save movie as uses an atomic copy and preserves source aliases and existing
+destinations on failure; its file tests pass. Native file actions use OS dialogs
+and the existing Open/Reveal helpers; their
+external dialogs/applications have not been exercised in this window check.
+
+The first UI pass exposed a height calculation that moved controls after the
+new mode row was added. The panel now measures its action area, and the DPI,
+backend and full browser regressions pass. The stop check also exposed a queued
+completion race: a frame already saved before cancellation was omitted from the
+reported count. The job now records that successful save before handling Stop.
+A movie atomically saved before Stop is likewise retained as a completed result.
+Focused regressions cover both orderings.
+
+The usage guide previously described a separate animation window for both native
+frontends. It now describes the unified egui window and the remaining separate
+Tauri window. Browser movie execution, Tauri movie integration, target-scoped
+Undo and the remaining reference rendering details are still open.
+
 ## Shared movie output and sequential rendering
 
 The command layer now owns movie preferences, frame-file operations, managed
@@ -33,8 +77,9 @@ The previous native and Tauri frame-count functions rounded fractional end
 frames, while `AnimMgr::setup_render` floors the end frame. Both now use the
 shared reference-compatible calculation, with fractional-time regressions.
 The existing movie windows consume the shared file helpers and frame-count fix;
-the new preferences, job and movie history still need connection to the unified
-Rendering window. Browser movie execution remains separate pending work.
+at that checkpoint, the new preferences, job and movie history still needed
+connection to the unified Rendering window. The native connection is documented
+above; Tauri integration and browser movie execution remain pending.
 
 ## Movie state isolation
 

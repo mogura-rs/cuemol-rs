@@ -896,8 +896,32 @@ there. Large previews use multiple GPU textures to preserve full-resolution
 viewing on devices with smaller texture limits; Save and Copy retain the original
 PNG. Tauri uses its webview image element for the same full-resolution preview.
 Its modeless Rendering window retains history when closed, and its target selector
-waits for the new scene settings before accepting edits. Animation rendering still
-uses a separate window.
+waits for the new scene settings before accepting edits. Tauri animation rendering
+still uses a separate window.
+
+The native egui window also handles Movie mode. The Animation rendering menu opens
+that mode with the QVGA preset. Still/Movie requests reset the size preset while
+preserving backend settings and movie preferences. Movies use pixel dimensions,
+the complete target animation, a positive fractional frame rate, and an optional
+last frame. Output can use the managed temporary session or a custom folder.
+The base name selects the numbered PNGs and one of seven optional movie formats.
+Custom output replacement and Cleanup require confirmation. Cleanup removes only
+the matching frames and movies; clearing result history keeps those output files.
+
+Frames render sequentially through the same settings and backend as still images.
+The window displays a throttled preview and keeps running when closed. Completed
+and cancelled runs retain a result with on-demand frame browsing, selected-frame
+Save/Copy, Open movie, Reveal movie and Save movie as. Re-encode uses existing
+contiguous PNGs and does not require an animation. A failed re-encode preserves
+the previous movie. Replacing or cleaning frame files disables browsing those
+frames in older results while preserving their cached preview. A replaced movie
+file is no longer offered by older results.
+
+Managed temporary sessions survive shutdown. On the next session creation,
+inactive owned sessions lose frames after one day and movies after 30 days;
+at most ten inactive sessions with movies are retained. Live sessions, unknown
+content and custom folders are not automatically cleaned. The browser exposes
+the movie settings but currently requires the native application for execution.
 
 Native animation renders capture the target scene and display settings at Start.
 Rendering does not move the live camera or animation timeline, and edits made

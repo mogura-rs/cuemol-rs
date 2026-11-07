@@ -227,6 +227,7 @@ impl App {
             &mut open,
             self.render_cancel.is_some(),
             cuemol_ui::RenderControls {
+                movie_error: Some("Movie file output and FFmpeg encoding currently require the native application.".into()),
                 can_start: !self.busy && self.render_panel.targets.current().is_some(),
                 pov_error: Some("POV-Ray runs in the native application. Choose Umbreon or Umbreon (NPR) to render here.".into()),
                 view_size: if self.state.active_view_summary().map(|view| view.uid.get())
@@ -258,6 +259,10 @@ impl App {
         }
         self.ui_rects.extend(self.render_panel.rects.clone());
         self.show_render = open;
+        if let cuemol_ui::RenderAction::MovieMode(movie) = action {
+            self.flush_render_settings(ctx.input(|i| i.time), true);
+            self.render_panel.request_mode(movie);
+        }
         if let cuemol_ui::RenderAction::Target(view) = action {
             self.render_panel.targets.select(view);
             self.sync_render_settings();

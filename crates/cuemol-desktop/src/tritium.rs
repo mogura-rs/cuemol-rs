@@ -197,7 +197,7 @@ impl GuiApplication {
                     }
                     ui.separator();
                     if shell::toolbar_button(ui, Icon::Render, "Render", compact).clicked() {
-                        self.open_native_render();
+                        self.request_native_render(false);
                     }
                     ui.separator();
                     for (label, icon, undo) in

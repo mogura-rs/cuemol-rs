@@ -6,6 +6,7 @@ use serde_json::json;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+mod movie;
 
 #[derive(Default, PartialEq, Eq)]
 pub enum RenderAction {
@@ -17,11 +18,20 @@ pub enum RenderAction {
     Copy,
     UseSettings,
     Target(u64),
+    MovieMode(bool),
+    StartMovie(bool),
+    ReencodeMovie,
+    CleanupMovie,
+    PickMovieFolder,
+    SaveMovie,
+    OpenMovie,
+    RevealMovie,
 }
 
 pub struct RenderControls {
     pub can_start: bool,
     pub pov_error: Option<String>,
+    pub movie_error: Option<String>,
     pub view_size: [u32; 2],
 }
 
@@ -37,6 +47,17 @@ pub struct RenderPanel {
     preview: Option<Vec<PreviewTile>>,
     pub png: Option<Arc<[u8]>>,
     pub history: RenderHistory,
+    pub movie_mode: bool,
+    pub movie: cuemol_command::movie::MovieOptions,
+    pub movie_loaded: bool,
+    pub temporary_directory: String,
+    pub available_frames: u32,
+    pub has_movie_outputs: bool,
+    live_preview: bool,
+    movie_action: RenderAction,
+    confirm_movie_replace: bool,
+    confirm_movie_cleanup: bool,
+    controls_height: f32,
     pending_source: Option<RenderSource>,
     viewer: ImageFraming,
     confirm_clear: bool,
@@ -63,6 +84,17 @@ impl Default for RenderPanel {
             preview: None,
             png: None,
             history: RenderHistory::default(),
+            movie_mode: false,
+            movie: Default::default(),
+            movie_loaded: false,
+            temporary_directory: String::new(),
+            available_frames: 0,
+            has_movie_outputs: false,
+            live_preview: false,
+            movie_action: RenderAction::None,
+            confirm_movie_replace: false,
+            confirm_movie_cleanup: false,
+            controls_height: 240.,
             pending_source: None,
             viewer: ImageFraming::default(),
             confirm_clear: false,
@@ -87,10 +119,19 @@ impl RenderPanel {
     }
 
     pub fn filename(&self) -> String {
-        self.history
+        let filename = self
+            .history
             .current()
             .map(|entry| entry.filename())
-            .unwrap_or_else(|| "render.png".into())
+            .unwrap_or_else(|| "render.png".into());
+        match self.history.frame() {
+            Some(frame) => format!(
+                "{}-frame{}.png",
+                filename.trim_end_matches(".png"),
+                frame + 1
+            ),
+            None => filename,
+        }
     }
 
     pub fn result(&mut self, ctx: &Context, value: &Value) -> Result<(), String> {
@@ -113,6 +154,7 @@ impl RenderPanel {
         )?;
         self.started = None;
         self.pending_source = None;
+        self.live_preview = false;
         self.replace_preview(ctx, png, image);
         self.message = format!(
             "Rendered {} × {}{}",
@@ -167,6 +209,7 @@ impl RenderPanel {
                 .map_err(|e| e.to_string())
         })?;
         self.replace_preview(ctx, png, image);
+        self.live_preview = false;
         Ok(())
     }
 
@@ -176,6 +219,7 @@ impl RenderPanel {
         self.png = None;
         self.viewer = ImageFraming::default();
         self.confirm_clear = false;
+        self.live_preview = false;
     }
 
     fn record(&mut self, label: &str, response: &Response) {
@@ -192,6 +236,7 @@ impl RenderPanel {
         controls: RenderControls,
     ) -> RenderAction {
         self.rects.clear();
+        self.movie_action = RenderAction::None;
         let mut action = RenderAction::None;
         let available = ctx.content_rect().size();
         let size = egui::vec2(
@@ -215,16 +260,19 @@ impl RenderPanel {
                             egui::vec2(left_width, height),
                             egui::Layout::top_down(egui::Align::LEFT),
                             |ui| {
-                                let controls_height = if self.editor.backend() == "povray"
-                                    && controls.pov_error.is_some()
-                                {
-                                    230.
-                                } else {
-                                    176.
-                                };
-                                action =
-                                    self.preview(ui, (height - controls_height).max(120.), running);
+                                action = self.preview(
+                                    ui,
+                                    (height - self.controls_height).max(80.),
+                                    running,
+                                );
+                                let top = ui.cursor().top();
                                 let run = self.actions(ui, running, &controls);
+                                let measured =
+                                    ui.cursor().top() - top + ui.spacing().item_spacing.y;
+                                if (self.controls_height - measured).abs() > 0.5 {
+                                    self.controls_height = measured;
+                                    ctx.request_repaint();
+                                }
                                 if run != RenderAction::None {
                                     action = run;
                                 }
@@ -265,13 +313,17 @@ impl RenderPanel {
                     });
                 });
         }
+        self.movie_confirmations(ctx, running);
+        if self.movie_action != RenderAction::None {
+            action = std::mem::take(&mut self.movie_action);
+        }
         action
     }
 
     fn preview(&mut self, ui: &mut egui::Ui, height: f32, running: bool) -> RenderAction {
         let mut action = RenderAction::None;
         let top = ui.cursor().top();
-        if self.png.is_some() {
+        if self.png.is_some() && !self.live_preview {
             ui.horizontal_wrapped(|ui| {
                 let index = self.history.selected().unwrap_or(0);
                 for (label, enabled, target) in [
@@ -371,6 +423,7 @@ impl RenderPanel {
                     ));
                 }
             });
+            self.movie_result_actions(ui, running, &mut action);
         }
         let toolbar = ui.cursor().top() - top;
         let (rect, response) = ui.allocate_exact_size(
@@ -467,13 +520,54 @@ impl RenderPanel {
     ) -> RenderAction {
         let mut action = RenderAction::None;
         let available = self.editor.backend() != "povray" || controls.pov_error.is_none();
-        let can_start = controls.can_start && available;
+        let can_start =
+            controls.can_start && available && (!self.movie_mode || controls.movie_error.is_none());
         ui.separator();
+        ui.add_enabled_ui(!running, |ui| {
+            ui.horizontal(|ui| {
+                for (mode, label) in [(false, "Still"), (true, "Movie")] {
+                    let response = ui.selectable_label(self.movie_mode == mode, label);
+                    self.record(&format!("Render mode {label}"), &response);
+                    if response.clicked() {
+                        action = RenderAction::MovieMode(mode);
+                    }
+                }
+            });
+        });
         ui.horizontal_wrapped(|ui| {
             let response = ui.add_enabled(!running && can_start, egui::Button::new("Start Render"));
             self.record("Start Render", &response);
             if response.clicked() {
-                action = RenderAction::Start;
+                if self.movie_mode {
+                    if self.has_movie_outputs && !self.movie.use_temp_dir {
+                        self.confirm_movie_replace = true;
+                    } else {
+                        action = RenderAction::StartMovie(self.movie.use_temp_dir);
+                    }
+                } else {
+                    action = RenderAction::Start;
+                }
+            }
+            if self.movie_mode {
+                let response = ui.add_enabled(
+                    !running
+                        && self.movie.make_movie
+                        && self.available_frames > 0
+                        && controls.movie_error.is_none(),
+                    egui::Button::new("Re-encode"),
+                );
+                self.record("Re-encode movie", &response);
+                if response.clicked() {
+                    action = RenderAction::ReencodeMovie;
+                }
+                let response = ui.add_enabled(
+                    !running && self.has_movie_outputs && controls.movie_error.is_none(),
+                    egui::Button::new("Cleanup"),
+                );
+                self.record("Cleanup movie", &response);
+                if response.clicked() {
+                    self.confirm_movie_cleanup = true;
+                }
             }
             if running {
                 ui.spinner();
@@ -545,6 +639,11 @@ impl RenderPanel {
                 ui.colored_label(ui.visuals().warn_fg_color, error);
             }
         }
+        if self.movie_mode {
+            if let Some(error) = &controls.movie_error {
+                ui.label(error);
+            }
+        }
         ui.separator();
         ui.weak("Log");
         egui::ScrollArea::vertical()
@@ -611,6 +710,10 @@ impl RenderPanel {
     }
 
     fn image_controls(&mut self, ui: &mut egui::Ui, view_size: [u32; 2]) {
+        if self.movie_mode {
+            self.movie_image_controls(ui);
+            return;
+        }
         ui.strong("Size");
         let size = self.editor.pixels();
         let presets = [

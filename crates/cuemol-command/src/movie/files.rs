@@ -3,6 +3,24 @@ use std::path::Path;
 
 const MOVIE_FILE_EXTENSIONS: [&str; 4] = ["mov", "mp4", "wmv", "gif"];
 
+pub fn save_movie_as(source: &Path, destination: &Path) -> Result<(), String> {
+    let source = source.canonicalize().map_err(|e| e.to_string())?;
+    if destination.canonicalize().is_ok_and(|path| path == source) {
+        return Ok(());
+    }
+    let directory = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let pending = tempfile::Builder::new()
+        .prefix(".cuemol-movie-pending-")
+        .tempfile_in(directory)
+        .map_err(|e| e.to_string())?;
+    fs::copy(source, pending.path()).map_err(|e| e.to_string())?;
+    pending.persist(destination).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn animation_ffmpeg_format_options(format: &str) -> Result<&'static str, String> {
     match format {
         "mov_h264" => Ok("-c:v libx264 -f mov"),
@@ -234,6 +252,28 @@ mod tests {
         assert!(output_dir.join("movie_frm_9999.png").is_dir());
 
         fs::remove_dir_all(output_dir).unwrap();
+    }
+
+    #[test]
+    fn save_movie_preserves_aliases_and_existing_destination_on_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("movie.mp4");
+        let destination = directory.path().join("saved.mp4");
+        fs::write(&source, b"movie data").unwrap();
+        fs::write(&destination, b"previous data").unwrap();
+        save_movie_as(&source, &destination).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"movie data");
+        assert!(save_movie_as(&directory.path().join("missing"), &destination).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"movie data");
+        save_movie_as(&source, &directory.path().join(".").join("movie.mp4")).unwrap();
+        assert_eq!(fs::read(&source).unwrap(), b"movie data");
+        #[cfg(unix)]
+        {
+            let alias = directory.path().join("alias.mp4");
+            std::os::unix::fs::symlink(&source, &alias).unwrap();
+            save_movie_as(&source, &alias).unwrap();
+            assert_eq!(fs::read(&source).unwrap(), b"movie data");
+        }
     }
 
     #[test]

@@ -11,6 +11,14 @@ pub const FORMATS: [(&str, &str); 7] = [
     ("wmv2", "Windows Media"),
     ("gifanim", "Animated GIF"),
 ];
+pub const SIZE_PRESETS: [(&str, [u32; 2]); 6] = [
+    ("QVGA (320 × 240)", [320, 240]),
+    ("VGA (640 × 480)", [640, 480]),
+    ("SVGA (800 × 600)", [800, 600]),
+    ("XGA (1024 × 768)", [1024, 768]),
+    ("HD720 (1280 × 720)", [1280, 720]),
+    ("HD1080 (1920 × 1080)", [1920, 1080]),
+];
 const PREF_KEY: &str = "movie_render:preferences";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -1,5 +1,5 @@
 mod options;
-pub use options::{base_name, frame_count, MovieOptions, FORMATS};
+pub use options::{base_name, frame_count, MovieOptions, FORMATS, SIZE_PRESETS};
 #[cfg(not(target_arch = "wasm32"))]
 pub mod files;
 #[cfg(not(target_arch = "wasm32"))]
@@ -15,6 +15,7 @@ pub struct MovieResult {
     pub output_dir: String,
     pub base_name: String,
     pub frame_count: u32,
+    pub frames_available: bool,
     pub fps: f64,
     pub movie_path: Option<String>,
     pub options: MovieOptions,

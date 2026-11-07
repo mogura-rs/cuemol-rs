@@ -208,6 +208,9 @@ impl MovieJob {
     pub fn total(&self) -> u32 {
         self.total
     }
+    pub fn output_identity(&self) -> (&Path, &str) {
+        (&self.directory, &self.base)
+    }
     pub fn elapsed_seconds(&self) -> f64 {
         self.started.elapsed().as_secs_f64()
     }
@@ -309,18 +312,25 @@ impl MovieJob {
             Err(mpsc::TryRecvError::Disconnected) => Err("Movie worker stopped".into()),
         };
         self.worker = None;
-        if self.cancel.load(Ordering::Relaxed) {
-            return Some(self.finish(None, Some("Movie render cancelled".into())));
-        }
         let path = match result {
             Ok(path) => path,
-            Err(error) => return Some(self.finish(None, Some(error))),
+            Err(error) => {
+                let error = if self.cancel.load(Ordering::Relaxed) {
+                    "Movie render cancelled".into()
+                } else {
+                    error
+                };
+                return Some(self.finish(None, Some(error)));
+            }
         };
         if encoding {
             return Some(self.finish(Some(path), None));
         }
         let index = self.completed;
         self.completed += 1;
+        if self.cancel.load(Ordering::Relaxed) {
+            return Some(self.finish(None, Some("Movie render cancelled".into())));
+        }
         let next = if self.completed < self.total {
             self.scene
                 .as_mut()
@@ -346,6 +356,7 @@ impl MovieJob {
                 output_dir: self.directory.to_string_lossy().into_owned(),
                 base_name: self.base.clone(),
                 frame_count: self.completed,
+                frames_available: true,
                 fps: self.options.fps,
                 movie_path: movie.map(|path| path.to_string_lossy().into_owned()),
                 options: self.options.clone(),
@@ -508,6 +519,41 @@ mod tests {
         fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_after_atomic_movie_save_keeps_the_completed_result() {
+        let directory = tempfile::tempdir().unwrap();
+        frames(directory.path());
+        let encoder = script(
+            directory.path(),
+            "encoder",
+            "for output do :; done; printf 'encoded movie' > \"$output\"",
+        );
+        let mut state = DesktopAppState::new();
+        state.put_config_value("cuemol2.ui.ffmpeg-path", encoder.to_string_lossy());
+        let mut job = MovieJob::reencode(
+            &state,
+            options(directory.path()),
+            RenderSource::default(),
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        let output = directory.path().join("movie.mp4");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !output.exists() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        job.cancel();
+        let result = finish(&mut job);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(
+            result.movie.movie_path.as_deref(),
+            output.canonicalize().unwrap().to_str()
+        );
+        assert_eq!(fs::read(output).unwrap(), b"encoded movie");
     }
 
     #[cfg(unix)]

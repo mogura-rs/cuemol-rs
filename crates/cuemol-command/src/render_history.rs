@@ -247,9 +247,38 @@ impl RenderHistory {
         if movie.frame_count == 0 {
             return Err("Movie has no rendered frames".into());
         }
+        if movie.movie_path.is_some() {
+            for entry in &mut self.entries {
+                if let Some(previous) = &mut entry.record.movie {
+                    if previous.movie_path == movie.movie_path {
+                        previous.movie_path = None;
+                    }
+                }
+            }
+        }
         self.push(png, source, size, elapsed_seconds)?;
         self.entries.back_mut().unwrap().record.movie = Some(movie);
         Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn invalidate_movie_outputs(&mut self, directory: &std::path::Path, base: &str) {
+        let directory = directory
+            .canonicalize()
+            .unwrap_or_else(|_| directory.to_path_buf());
+        for entry in &mut self.entries {
+            let Some(movie) = &mut entry.record.movie else {
+                continue;
+            };
+            let path = std::path::Path::new(&movie.output_dir);
+            if movie.base_name == base
+                && path.canonicalize().unwrap_or_else(|_| path.to_path_buf()) == directory
+            {
+                movie.frames_available = false;
+                movie.movie_path = None;
+                entry.frame = None;
+            }
+        }
     }
 
     pub fn frame(&self) -> Option<u32> {
@@ -276,6 +305,12 @@ impl RenderHistory {
             .movie
             .as_ref()
             .ok_or("Selected render is not a movie")?;
+        if !movie.frames_available {
+            return Err(
+                "Movie frames were replaced or removed; the saved preview is still available"
+                    .into(),
+            );
+        }
         if index >= movie.frame_count {
             return Err("Movie frame is outside the rendered range".into());
         }
@@ -426,6 +461,7 @@ mod tests {
             output_dir: options.output_dir.clone(),
             base_name: "movie".into(),
             frame_count: 2,
+            frames_available: true,
             fps: 30.,
             movie_path: None,
             options,

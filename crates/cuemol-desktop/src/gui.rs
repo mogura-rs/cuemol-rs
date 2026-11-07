@@ -5,6 +5,8 @@ use cuemol_command::animation_graph::{editor_time_ms, Graph as AnimationGraph};
 mod actions;
 #[path = "gui_clipboard.rs"]
 mod clipboard;
+#[path = "gui_movie.rs"]
+mod movie;
 #[path = "navigation.rs"]
 mod navigation;
 #[path = "tritium.rs"]
@@ -1474,6 +1476,8 @@ struct GuiApplication {
     umbreon_denoise: UmbreonDenoiseMode,
     ray_size: [u32; 2],
     ray_panel: cuemol_ui::RenderPanel,
+    ray_movie_job: Option<cuemol_command::movie::MovieJob>,
+    ray_movie_preview_at: Option<Instant>,
     ray_cancel: Option<Arc<AtomicBool>>,
     ray_progress: Option<cuemol_command::pov::PovProgress>,
     ray_worker: Option<NativeRenderWorker>,
@@ -4743,6 +4747,8 @@ impl GuiApplication {
             umbreon_denoise: UmbreonDenoiseMode::default(),
             ray_size: [1200, 900],
             ray_panel: cuemol_ui::RenderPanel::default(),
+            ray_movie_job: None,
+            ray_movie_preview_at: None,
             ray_cancel: None,
             ray_progress: None,
             ray_worker: None,
@@ -5224,6 +5230,7 @@ impl GuiApplication {
             || self.apbs_job.is_some()
             || self.pov_render_job.is_some()
             || self.ray_job.is_some()
+            || self.ray_movie_job.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
@@ -5624,7 +5631,7 @@ impl GuiApplication {
                 });
                 ui.menu_button("Rendering", |ui| {
                     if ui.button("Render image...").clicked() {
-                        self.open_native_render();
+                        self.request_native_render(false);
                         ui.close();
                     }
                     if ui.button("POV-Ray rendering...").clicked() {
@@ -5632,7 +5639,7 @@ impl GuiApplication {
                         ui.close();
                     }
                     if ui.button("Animation rendering...").clicked() {
-                        self.tool_dialog = Some("Animation rendering".to_string());
+                        self.request_native_render(true);
                         ui.close();
                     }
                     if ui.button("Export scene...").clicked() {
@@ -15086,11 +15093,13 @@ impl GuiApplication {
         }
         self.sync_native_render_settings();
         let mut open = true;
+        let movie_before = self.ray_panel.movie.clone();
         let action = self.ray_panel.show(
             ctx,
             &mut open,
-            self.ray_job.is_some(),
+            self.ray_job.is_some() || self.ray_movie_job.is_some(),
             cuemol_ui::RenderControls {
+                movie_error: None,
                 can_start: self.ray_panel.targets.current().is_some(),
                 pov_error: if self.ray_panel.editor.backend() == "povray" {
                     cuemol_command::pov::availability(&self.state).err()
@@ -15118,9 +15127,15 @@ impl GuiApplication {
             },
         );
         self.ray_size = self.ray_panel.editor.pixels();
+        if movie_before != self.ray_panel.movie {
+            self.ray_panel.movie.persist(&mut self.state);
+            self.ray_panel.refresh_movie_outputs();
+        }
         if matches!(
             action,
             cuemol_ui::RenderAction::Start
+                | cuemol_ui::RenderAction::StartMovie(_)
+                | cuemol_ui::RenderAction::MovieMode(_)
                 | cuemol_ui::RenderAction::UseSettings
                 | cuemol_ui::RenderAction::Target(_)
         ) || !open
@@ -15134,7 +15149,50 @@ impl GuiApplication {
                 self.ray_panel.targets.select(view);
                 self.sync_native_render_settings();
             }
+            cuemol_ui::RenderAction::MovieMode(movie) => self.request_native_render(movie),
+            cuemol_ui::RenderAction::StartMovie(overwrite) => {
+                self.start_native_movie(ctx, &current, overwrite, false)
+            }
+            cuemol_ui::RenderAction::ReencodeMovie => {
+                self.start_native_movie(ctx, &current, false, true)
+            }
+            cuemol_ui::RenderAction::CleanupMovie => {
+                self.ray_panel.message =
+                    match cuemol_command::movie::MovieJob::cleanup(&self.ray_panel.movie) {
+                        Ok(count) => {
+                            let directory = PathBuf::from(&self.ray_panel.movie.output_dir);
+                            let base =
+                                cuemol_command::movie::base_name(&self.ray_panel.movie.base_name)
+                                    .unwrap_or("movie")
+                                    .to_string();
+                            self.invalidate_native_movie_outputs(ctx, &directory, &base);
+                            format!("Deleted {count} movie output files")
+                        }
+                        Err(error) => error,
+                    };
+                self.ray_panel.refresh_movie_outputs();
+            }
+            cuemol_ui::RenderAction::PickMovieFolder => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_directory(&self.ray_panel.movie.output_dir)
+                    .pick_folder()
+                {
+                    self.ray_panel
+                        .movie
+                        .set_custom(path.to_string_lossy().into_owned());
+                    self.ray_panel.movie.persist(&mut self.state);
+                    self.ray_panel.refresh_movie_outputs();
+                }
+            }
+            cuemol_ui::RenderAction::SaveMovie
+            | cuemol_ui::RenderAction::OpenMovie
+            | cuemol_ui::RenderAction::RevealMovie => {
+                self.native_movie_file_action(action);
+            }
             cuemol_ui::RenderAction::Stop => {
+                if let Some(job) = &self.ray_movie_job {
+                    job.cancel();
+                }
                 if let Some(cancel) = &self.ray_cancel {
                     cancel.store(true, Ordering::Relaxed);
                 }
@@ -15176,6 +15234,9 @@ impl GuiApplication {
                         &mut current,
                     ) {
                         Ok(()) => {
+                            self.ray_panel.restore_movie_options();
+                            self.ray_panel.movie.persist(&mut self.state);
+                            self.ray_panel.refresh_movie_outputs();
                             self.open_native_render();
                         }
                         Err(error) => self.ray_panel.message = error.to_string(),
@@ -15243,10 +15304,12 @@ impl GuiApplication {
         }
         if !open {
             self.tool_dialog = None;
+            self.persist_native_movie_options();
         }
     }
 
     fn poll_native_render(&mut self, ctx: &egui::Context) {
+        self.poll_native_movie(ctx);
         if let Some(progress) = &self.ray_progress {
             let log = progress.text();
             if !log.is_empty() {
@@ -15283,7 +15346,10 @@ impl GuiApplication {
 
     fn open_pov_render_tool(&mut self) {
         self.open_native_render();
-        if self.ray_job.is_none() && self.ray_panel.editor.backend() != "povray" {
+        if self.ray_job.is_none()
+            && self.ray_movie_job.is_none()
+            && self.ray_panel.editor.backend() != "povray"
+        {
             self.ray_panel
                 .editor
                 .values
