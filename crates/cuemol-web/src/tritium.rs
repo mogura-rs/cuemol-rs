@@ -1118,6 +1118,26 @@ impl App {
                     self.paint_selected = 0;
                 }
                 response.context_menu(|ui| {
+                    if let Some(surface) = self.state.surface_summary(Uid::new(id)) {
+                        if !surface.original_molecule.is_empty() {
+                            let enabled = self
+                                .state
+                                .active_object_summaries()
+                                .iter()
+                                .any(|o| o.name == surface.original_molecule);
+                            let regenerate =
+                                ui.add_enabled(enabled, egui::Button::new("Regenerate surface…"));
+                            if regenerate.clicked() {
+                                self.surface.open(
+                                    cuemol_ui::surface::Kind::Regenerate,
+                                    &self.state,
+                                    Some(Uid::new(id)),
+                                );
+                                ui.close();
+                            }
+                            self.record_ui_rect("Regenerate surface…", &regenerate);
+                        }
+                    }
                     for (label, action) in [("Copy", "copy"), ("Cut", "cut"), ("Paste", "paste")] {
                         if ui.button(label).clicked() {
                             self.selected = Some(Uid::new(id));

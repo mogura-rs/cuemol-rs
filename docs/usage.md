@@ -357,6 +357,32 @@ Successful changes create one undo entry. Reopening clears both selections and
 restores only the last successful molecule, method, pivot and switch choices.
 Cancel does not save a draft, and a changed scene invalidates it.
 
+### Molecular surfaces
+
+**Tools → Mol surface generation** creates a solvent-excluded surface. Reopening
+keeps the last valid molecule and algorithm, but resets the selection gate and
+expression, point density to 2 and probe radius to 1.4 Å. Density uses integers
+from 1 to 10; probe radius ranges from 0.1 to 10 Å. Changing the molecule proposes
+a fresh unique `sf_<molecule>` name. A blank name accepts that suggestion.
+The selection builder is available when **Use selection** is enabled.
+MeshMS, BALL and Auto follow the reference choices; Rust retains the existing
+grid-based backend. New surfaces use CPK element coloring and a unique `molsurf`
+renderer name.
+
+Use the surface object's **Regenerate surface** context menu to rebuild it.
+The original molecule, selection and probe radius remain fixed; density and
+algorithm are editable. Auto keeps the surface's stored backend. Regeneration
+remembers its algorithm separately from generation, and requires the original
+molecule to remain in the scene.
+
+**Tools → Mol surface cutter** uses the current front clipping plane. Each open
+starts with Complete mode and section density 5; the allowed density range is
+0.1–50. Separately creates a distinct `sect_<surface>` object, while Section only
+and No section retain just the corresponding geometry. Successful operations
+close the dialog and use one undo step. Errors keep the draft available for
+correction, and Cancel leaves the scene unchanged. Changing scenes invalidates
+a draft. Native, browser and Tauri expose these controls.
+
 ### Secondary structure
 
 **Tools > Reassign secondary str** opens a shared form in native egui and the

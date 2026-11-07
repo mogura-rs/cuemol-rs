@@ -1,5 +1,60 @@
 # Validation evidence
 
+## Molecular surface forms, naming and read-only queries
+
+The native and browser frontends now share generation, regeneration and plane-cut
+forms, and Tauri exposes the same controls. Generation resets selection and probe
+inputs on open, defaults density to 2, and proposes a unique `sf_<molecule>` name
+on open or molecule change. Its selection builder is gated by Use selection.
+Density is an integer from 1 to 10; probe radius ranges from 0.1 to 10 Å.
+Generation and regeneration remember their backend independently within the
+session. Regeneration preserves original molecule, selection and probe radius;
+Auto leaves the stored backend unchanged. The cutter resets to Complete and
+density 5, accepts densities from 0.1 to 50 and uses the current front slab plane.
+Errors retain the draft, Cancel does not mutate, scene changes invalidate drafts,
+and successful operations close with one scene undo entry.
+
+Reference worker inspection found two additional generation differences: renderer
+names now follow `molsurf`, `molsurf(1)`, etc., and new surfaces explicitly use
+CPK element coloring instead of inheriting the molecule's Paint scheme. The CPK
+carbon color is pale yellow (1, 1, 0.75), as specified in `CPKColoring.qif`.
+A rendered-vertex regression checks that the molecule's explicit green coloring
+does not replace that default. Cut-section names now start at `sect_<surface>`;
+collisions advance to `sect1_<surface>`, including names used by other object
+classes. Ordinary suggested object names also account for surfaces and lightweight
+objects.
+
+The browser undo test found that a read-only JavaScript query normalized every
+loaded surface's metadata and renderer nodes, creating an extra undo entry.
+Unchanged surface state now bypasses that write. The regression checks plain
+queries, surface properties, raw stored state, later renderer/metadata edits and
+reads after those edits. Browser tests read generation properties between edits
+and Undo/Redo, so an extra query entry fails the real interaction check.
+
+Supplying the optional reference fixture also exposed three previously skipped
+Tauri checks. The legacy lowercase superposition method is now canonicalized
+before shared-command validation. Sequence selection setup now uses the current
+per-molecule state. The picking check distinguishes a visible clipped sphere cap
+from geometry fully outside the slab instead of treating a clipped atom center
+as an invisible sphere.
+
+Validation passes: 219 Linux native model tests, 190 macOS Tauri model tests
+with five existing ignored cases, 35 shared-core surface tests with scripting
+explicitly enabled, and the shared form reset/session test. Five browser cases
+on the final artifact cover WebGL/WebGPU forms, Tauri DOM controls, both analytic
+backends and scripted scene regeneration. Linux OS input verifies failed-input
+retention, generation/regeneration/cutting, separate-object naming, read-only
+queries and one-step Undo/Redo. Native, browser and Tauri screenshots were
+inspected. A default-feature core run does not enable scripting; it cannot
+validate the read-only-query regression.
+
+Documentation/source discrepancies found in the read-only reference: the
+`MakeMolSurfDialog.tsx` header describes a plain probe-radius input, but its JSX
+uses SliderField; `molSurfBackend.ts` describes SegmentField, but both dialogs
+use SelectField; the regeneration service header mentions only density while
+its current request also accepts a backend override. The implementation follows
+the executable code. The reference checkout remains unchanged.
+
 ## Molecular superposition dialog and failure preservation
 
 Native egui and the browser now share the current Molecular superposition form;

@@ -219,6 +219,10 @@ let molstructSelectionAnchor = null;
 let selectionObjectUid = null;
 const moleculeEditHistory = new Map();
 let secondaryObjectUid = null;
+let surfaceMoleculeUid = null;
+let surfaceCutUid = null;
+let surfaceGenerateBackend = "auto";
+let surfaceRegenerateBackend = "auto";
 let coloringTargetKey = null;
 let symmetryTargetKey = null;
 let densityPanelTargetKey = null;
@@ -5244,85 +5248,133 @@ function showTextPromptDialog({ title, label, defaultValue = "", confirmLabel = 
   });
 }
 
-function showSurfaceRegenerateDialog(object) {
+function surfaceDensity(value) {
+  return Number.isFinite(value) ? Math.min(10, Math.max(1, Math.round(value))) : 2;
+}
+
+function surfaceSlider(label, value, min, max, step, parent) {
+  const number = dialogField(label, String(value), "number", parent);
+  const wrapper = document.createElement("div");
+  wrapper.className = "dialog-field surface-slider";
+  const original = number.parentElement;
+  original.replaceWith(wrapper);
+  wrapper.append(...original.childNodes);
+  number.setAttribute("aria-label", label);
+  number.min = String(min); number.max = String(max); number.step = String(step);
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = number.min; slider.max = number.max; slider.step = number.step;
+  slider.value = number.value;
+  slider.setAttribute("aria-label", `${label} slider`);
+  number.parentElement.insertBefore(slider, number);
+  slider.addEventListener("input", () => { number.value = slider.value; number.dispatchEvent(new Event("input", {bubbles:true})); });
+  number.addEventListener("input", () => { slider.value = number.value; });
+  return number;
+}
+
+function showSurfaceDialog(kind, target = null) {
   if (referenceDialog.open) referenceDialog.close();
-  dialogTitle.textContent = "Mol surface tool";
-  dialogContent.replaceChildren(dialogParagraph("Create solvent-excluded surface:"));
-  dialogFooter.hidden = false;
-  referenceDialog.className = "reference-dialog surface-regenerate-dialog";
-
-  const molecule = dialogSelect(
-    "Target molecule:",
-    [[object.originalMolecule, object.originalMolecule]],
-    object.originalMolecule,
-  );
-  molecule.disabled = true;
-  const selectionEnabled = dialogCheckbox(
-    "Selection:",
-    Boolean(object.originalSelection),
-  );
-  selectionEnabled.disabled = true;
-  const selection = dialogField("Selection expression:", object.originalSelection || "");
-  selection.disabled = true;
-  const name = dialogField("Surface name:", object.name);
-  name.disabled = true;
-  const density = dialogField(
-    "Density (/Å):",
-    String(object.originalDensity > 0 ? object.originalDensity : 1),
-    "number",
-  );
-  density.min = "1";
-  density.step = "1";
-  const probeRadius = dialogField(
-    "Probe radius (Å):",
-    String(object.originalProbeRadius),
-    "number",
-  );
-  probeRadius.disabled = true;
-
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      referenceDialog.removeEventListener("close", onClose);
-      resolve(value);
-    };
-    const onClose = () => {
-      if (!referenceDialog.open) finish(null);
-    };
-    referenceDialog.addEventListener("close", onClose);
-    const cancel = button("Cancel", "", () => {
-      finish(null);
-      referenceDialog.close();
-    });
-    const submit = () => {
-      const value = Math.trunc(Number(density.value));
-      if (!Number.isFinite(value) || value < 1) return;
-      finish(value);
-      referenceDialog.close();
-    };
-    const confirm = button("OK", "dialog-primary", submit);
-    const updateState = () => {
-      const value = Number(density.value);
-      confirm.disabled = !Number.isFinite(value) || value < 1;
-    };
-    density.addEventListener("input", updateState);
-    density.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" || confirm.disabled) return;
-      event.preventDefault();
-      submit();
-    });
-    updateState();
-    dialogActions(cancel, confirm);
-    if (!referenceDialog.open && referenceDialog.showModal) {
-      referenceDialog.showModal();
+  const generate = kind === "generate";
+  const regenerate = kind === "regenerate";
+  const sceneUid = snapshot.activeSceneUid;
+  dialogTitle.textContent = generate ? "Mol surface generation" : regenerate ? "Regenerate surface" : "MolSurf cutting tool";
+  dialogContent.replaceChildren();
+  referenceDialog.className = "reference-dialog surface-dialog";
+  const fields = dialogGroup("Target");
+  const objects = activeObjects();
+  const surfaces = (snapshot.surfaces || []).filter(item => item.sceneUid === sceneUid);
+  let object, picker, useSelection, outputName, probeRadius, backend, mode;
+  const suggestedName = uid => {
+    const molecule = objects.find(item => item.uid === Number(uid));
+    const used = new Set([...snapshot.objects, ...snapshot.densityMaps, ...(snapshot.surfaces || []), ...(snapshot.lwObjects || [])]
+      .filter(item => item.sceneUid === sceneUid).map(item => item.name));
+    const base = `sf_${molecule?.name || "mol"}`;
+    if (!used.has(base)) return base;
+    let serial = 1;
+    while (used.has(`${base}(${serial})`)) serial += 1;
+    return `${base}(${serial})`;
+  };
+  if (generate) {
+    const valid = id => objects.some(item => item.uid === id);
+    object = dialogSelect("Molecule", objects.length ? objects.map(item => [item.uid, item.name]) : [["", "Select molecule"]],
+      valid(surfaceMoleculeUid) ? surfaceMoleculeUid : valid(selectedObjectUid) ? selectedObjectUid : objects[0]?.uid ?? "", fields);
+    useSelection = dialogCheckbox("Use selection", false, fields);
+    picker = dialogSelectionField("Selection", "", () => Number(object.value), fields);
+  } else if (regenerate) {
+    for (const [label, value] of [["Surface object", target.name], ["Molecule", target.originalMolecule],
+      ["Selection", target.originalSelection || "(all atoms)"], ["Probe radius (Å)", target.originalProbeRadius]]) {
+      dialogField(label, String(value), "text", fields).readOnly = true;
     }
-    setTimeout(() => {
-      density.focus();
-      density.select();
-    }, 0);
+  } else {
+    const valid = id => surfaces.some(item => item.uid === id);
+    object = dialogSelect("Target surface", surfaces.length ? surfaces.map(item => [item.uid, item.name]) : [["", "Select surface"]],
+      valid(surfaceCutUid) ? surfaceCutUid : valid(selectedSurfaceUid) ? selectedSurfaceUid : surfaces[0]?.uid ?? "", fields);
+  }
+  const options = dialogGroup(generate || regenerate ? "Surface" : "Cross section");
+  if (generate) outputName = dialogField("Object name", suggestedName(object.value), "text", options);
+  let density;
+  if (generate || regenerate) {
+    density = surfaceSlider("Point density (/Å)", regenerate ? surfaceDensity(target.originalDensity) : 2, 1, 10, 1, options);
+    if (generate) probeRadius = surfaceSlider("Probe radius (Å)", 1.4, 0.1, 10, 0.1, options);
+    backend = dialogSelect("Algorithm", [["auto", "Auto"], ["meshms", "MeshMS"], ["ball", "BALL"], ["rust", "Rust"]],
+      generate ? surfaceGenerateBackend : surfaceRegenerateBackend, options);
+    backend.addEventListener("change", () => {
+      if (generate) surfaceGenerateBackend = backend.value; else surfaceRegenerateBackend = backend.value;
+    });
+  } else {
+    mode = dialogSelect("Cross section type", [["full", "Complete"], ["separate", "Separately"], ["sect", "Section only"], ["body", "No section"]], "full", options);
+    density = dialogField("Section mesh density (/Å)", "5", "number", options);
+    density.min = "0.1"; density.max = "50"; density.step = "0.5";
+  }
+  const errorMessage = dialogParagraph(""); errorMessage.setAttribute("role", "alert"); dialogContent.append(errorMessage);
+  let submitting = false;
+  const validate = () => {
+    if (snapshot.activeSceneUid !== sceneUid) return "The active scene changed. Reopen the surface dialog.";
+    if (generate && !activeObjects().some(item => item.uid === Number(object.value))) return "Select a molecule.";
+    if (!generate && !(snapshot.surfaces || []).some(item => item.uid === (regenerate ? target.uid : Number(object.value)) && item.sceneUid === sceneUid)) return "Select a molecular surface.";
+    if (regenerate && !activeObjects().some(item => item.name === target.originalMolecule)) return "The original molecule is missing.";
+    const value = Number(density.value);
+    if (!density.value.trim() || !Number.isFinite(value) || value < Number(density.min) || value > Number(density.max)) return "Surface density is outside the allowed range.";
+    if (generate && (!probeRadius.value.trim() || !Number.isFinite(Number(probeRadius.value)) || Number(probeRadius.value) < 0.1 || Number(probeRadius.value) > 10)) return "Probe radius must be between 0.1 and 10 Å.";
+    return "";
+  };
+  const sync = (clearError = true) => {
+    if (generate) surfaceMoleculeUid = Number(object.value) || null;
+    else if (!regenerate) surfaceCutUid = Number(object.value) || null;
+    fields.disabled = submitting; options.disabled = submitting;
+    picker?.setEnabled(!submitting && useSelection.checked && Boolean(object.value));
+    apply.disabled = submitting || Boolean(validate());
+    if (clearError) errorMessage.textContent = validate();
+  };
+  const apply = button("OK", "dialog-primary", async () => {
+    const error = validate();
+    if (error || submitting) { if (error) errorMessage.textContent = error; return; }
+    const request = generate ? {objectUid:Number(object.value), selection:useSelection.checked ? picker.input.value : "",
+      name:outputName.value.trim() || suggestedName(object.value), density:surfaceDensity(Number(density.value)), probeRadius:Number(probeRadius.value), backend:backend.value}
+      : regenerate ? {surfaceUid:target.uid, density:surfaceDensity(Number(density.value)), backend:backend.value}
+      : {surfaceUid:Number(object.value), density:Number(density.value), mode:mode.value};
+    const previous = new Set((snapshot.surfaces || []).map(item => item.uid));
+    submitting = true; sync();
+    const success = await mutate(generate ? "create_molecular_surface" : regenerate ? "regenerate_surface" : "cut_surface", request, renderShell, true,
+      error => { errorMessage.textContent = String(error); });
+    submitting = false;
+    if (!fields.isConnected) return;
+    if (success) {
+      if (generate) rememberSelection(request.selection);
+      const created = (snapshot.surfaces || []).find(item => !previous.has(item.uid));
+      if (created) {
+        selectedObjectUid = null; selectedRendererUid = null; selectedSurfaceUid = created.uid;
+        selectedSurfaceRendererUid = null; workspaceSelectionKind = "surface";
+      }
+      picker?.close(); referenceDialog.close();
+    } else sync(false);
   });
+  fields.addEventListener("input", () => sync()); fields.addEventListener("change", () => sync());
+  options.addEventListener("input", () => sync()); options.addEventListener("change", () => sync());
+  if (generate) object.addEventListener("change", () => { picker.close(); outputName.value = suggestedName(object.value); });
+  dialogActions(apply, button("Cancel", "", () => { picker?.close(); referenceDialog.close(); }));
+  sync();
+  if (referenceDialog.showModal) referenceDialog.showModal();
 }
 
 function showConfirmationDialog({ title, message, confirmLabel = "OK" }) {
@@ -6812,123 +6864,11 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     dialogActions(apply, button("Cancel", "", () => { picker.close(); referenceDialog.close(); }));
     syncMode();
   } else if (title === "Mol surface generation") {
-    dialogTitle.textContent = "Mol surface tool";
-    const objects = activeObjects();
-    if (objects.length === 0) {
-      dialogContent.append(dialogParagraph("No molecular object is loaded."));
-    } else {
-      dialogContent.append(dialogParagraph("Create solvent-excluded surface:"));
-      const objectOptions = objects.map((object) => [object.uid, object.name]);
-      const object = dialogSelect(
-        "Target molecule",
-        objectOptions,
-        selectedObjectUid ?? objects[0].uid,
-      );
-      const initialObject =
-        objects.find((candidate) => candidate.uid === Number(object.value)) || objects[0];
-      const useSelection = dialogCheckbox("Selection", Boolean(initialObject.selection));
-      const selection = dialogField("Selection code", initialObject.selection || "");
-      selection.disabled = !useSelection.checked;
-      useSelection.addEventListener("change", () => {
-        selection.disabled = !useSelection.checked;
-      });
-      const usedNames = new Set([
-        ...snapshot.objects,
-        ...snapshot.densityMaps,
-        ...(snapshot.surfaces || []),
-        ...(snapshot.lwObjects || []),
-      ].map((item) => item.name));
-      const suggestedName = (moleculeName) => {
-        const base = `sf_${moleculeName}`;
-        if (!usedNames.has(base)) return base;
-        let serial = 1;
-        while (usedNames.has(`${base}(${serial})`)) serial += 1;
-        return `${base}(${serial})`;
-      };
-      const outputName = dialogField("Surface name", suggestedName(initialObject.name));
-      let outputNameEdited = false;
-      outputName.addEventListener("input", () => {
-        outputNameEdited = true;
-      });
-      object.addEventListener("change", () => {
-        const selected = objects.find(
-          (candidate) => candidate.uid === Number(object.value),
-        );
-        if (!selected) return;
-        selection.value = selected.selection || "";
-        useSelection.checked = Boolean(selection.value);
-        selection.disabled = !useSelection.checked;
-        if (!outputNameEdited) outputName.value = suggestedName(selected.name);
-      });
-      const density = dialogField("Density (/Å)", "1", "number");
-      density.min = "1";
-      density.step = "1";
-      const probeRadius = dialogField("Probe radius (Å)", "1.4", "number");
-      probeRadius.min = "0.1";
-      probeRadius.step = "0.1";
-      const generate = button("OK", "dialog-primary", async () => {
-        const name = outputName.value.trim();
-        if (!name) return;
-        const previous = new Set((snapshot.surfaces || []).map((item) => item.uid));
-        const changed = await mutate("create_molecular_surface", {
-          objectUid: Number(object.value),
-          selection: useSelection.checked ? selection.value : "",
-          name,
-          density: Math.trunc(Number(density.value)),
-          probeRadius: Number(probeRadius.value),
-        });
-        if (!changed) return;
-        const created = (snapshot.surfaces || []).find(
-          (item) => !previous.has(item.uid),
-        );
-        if (created) {
-          selectedObjectUid = null;
-          selectedRendererUid = null;
-          selectedSurfaceUid = created.uid;
-          selectedSurfaceRendererUid = null;
-          workspaceSelectionKind = "surface";
-        }
-        referenceDialog.close();
-      });
-      dialogActions(generate);
-    }
+    showSurfaceDialog("generate");
+    return;
   } else if (title === "Mol surface cutter") {
-    dialogTitle.textContent = "MolSurf cutting tool";
-    const surfaces = snapshot.surfaces;
-    if (surfaces.length === 0) {
-      dialogContent.append(dialogParagraph("No molecular surface is loaded."));
-    } else {
-      dialogContent.append(
-        dialogParagraph("Cut molecular surface by the current clipping plane:"),
-      );
-      const surface = dialogSelect(
-        "Target surface",
-        surfaces.map((item) => [item.uid, item.name]),
-        selectedSurfaceUid ?? surfaces[0].uid,
-      );
-      const mode = dialogSelect(
-        "Cross section type",
-        [
-          ["full", "Complete"],
-          ["separate", "Separately"],
-          ["sect", "Section only"],
-          ["body", "No section"],
-        ],
-        "full",
-      );
-      const density = dialogField("Section mesh density (/Å)", "1.0", "number");
-      density.min = "0.1";
-      density.step = "0.1";
-      const cut = button("OK", "dialog-primary", async () => {
-        const changed = await mutate("cut_surface", {
-          surfaceUid: Number(surface.value),
-          density: Number(density.value),
-          mode: mode.value,
-        });
-        if (changed) referenceDialog.close();
-      });
-      dialogActions(cut);
-    }
+    showSurfaceDialog("cut");
+    return;
   } else if (title === "APBS elepot calculation") {
     dialogTitle.textContent = "APBS tool";
     const objects = activeObjects();
@@ -11482,11 +11422,10 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
   if (kind === "surface" && object.originalMolecule) {
     items.push({
       label: "Regenerate surface...",
+      disabled: !snapshot.objects.some(item => item.sceneUid === scene.uid && item.name === object.originalMolecule),
       action: async () => {
-        const density = await showSurfaceRegenerateDialog(object);
-        if (density === null) return;
         if (!(await activate())) return;
-        await mutate("regenerate_surface", { surfaceUid: object.uid, density });
+        showSurfaceDialog("regenerate", object);
       },
     });
   }

@@ -3218,6 +3218,15 @@ body.resizing-bottom-panel {
   align-items: start;
 }
 
+.surface-dialog .surface-slider {
+  grid-template-columns: 130px minmax(0, 1fr) 72px;
+}
+
+.surface-dialog input[type="range"] {
+  min-width: 0;
+  width: 100%;
+}
+
 .dialog-textarea textarea {
   min-height: 150px;
   resize: vertical;

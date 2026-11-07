@@ -934,20 +934,6 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-const SURFACE_CUT_MODES: [(&str, &str); 4] = [
-    ("full", "Complete"),
-    ("separate", "Separately"),
-    ("sect", "Section only"),
-    ("body", "No section"),
-];
-
-fn surface_cut_mode_label(mode: &str) -> &str {
-    SURFACE_CUT_MODES
-        .iter()
-        .find(|entry| entry.0 == mode)
-        .map_or(mode, |entry| entry.1)
-}
-
 type PdbDownloadMessage = std::result::Result<
     (
         String,
@@ -1201,17 +1187,6 @@ struct NativeStyleDeleteDraft {
     scene_uid: cuemol_core::Uid,
     style_target: cuemol_desktop_core::GuiStyleTarget,
     name: String,
-}
-
-#[derive(Debug, Clone)]
-struct NativeSurfaceRegenerateDraft {
-    scene_uid: cuemol_core::Uid,
-    surface_uid: cuemol_core::Uid,
-    molecule: String,
-    selection: String,
-    surface_name: String,
-    density: f64,
-    probe_radius: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -1508,7 +1483,6 @@ struct GuiApplication {
     object_properties_draft: Option<NativeObjectProperties>,
     renderer_properties_draft: Option<NativeRendererProperties>,
     renderer_group_rename_draft: Option<NativeRendererGroupRenameDraft>,
-    surface_regenerate_draft: Option<NativeSurfaceRegenerateDraft>,
     show_bottom_panel: bool,
     about: cuemol_ui::about::AboutDialog,
     updates: updates::Updates,
@@ -1586,16 +1560,9 @@ struct GuiApplication {
     mol_client_url: String,
     mol_client_smiles: String,
     mol_client_name: String,
-    surface_target: Option<cuemol_core::Uid>,
-    surface_use_selection: bool,
-    surface_selection: String,
-    surface_name: String,
+    surface: cuemol_ui::surface::SurfaceDialog,
     surface_density: f64,
-    surface_backend: String,
     surface_probe_radius: f64,
-    cut_surface_target: Option<cuemol_core::Uid>,
-    cut_surface_mode: String,
-    cut_surface_density: f64,
     apbs_target: Option<cuemol_core::Uid>,
     apbs_use_selection: bool,
     apbs_selection: String,
@@ -4800,7 +4767,6 @@ impl GuiApplication {
             object_properties_draft: None,
             renderer_properties_draft: None,
             renderer_group_rename_draft: None,
-            surface_regenerate_draft: None,
             show_bottom_panel,
             about: cuemol_ui::about::AboutDialog::default(),
             updates: Default::default(),
@@ -4878,16 +4844,9 @@ impl GuiApplication {
             mol_client_url: "http://127.0.0.1:8000/RPC2".to_string(),
             mol_client_smiles: String::new(),
             mol_client_name: String::new(),
-            surface_target: None,
-            surface_use_selection: false,
-            surface_selection: String::new(),
-            surface_name: "surface".to_string(),
+            surface: cuemol_ui::surface::SurfaceDialog::default(),
             surface_density: 1.0,
-            surface_backend: "auto".into(),
             surface_probe_radius: 1.4,
-            cut_surface_target: None,
-            cut_surface_mode: "full".to_string(),
-            cut_surface_density: 1.0,
             apbs_target: None,
             apbs_use_selection: false,
             apbs_selection: String::new(),
@@ -5812,6 +5771,7 @@ impl GuiApplication {
                                 "Interaction..." => self.open_interaction_dialog(),
                                 "Reassign secondary str..." => self.open_secondary_dialog(),
                                 "Mol surface generation..." => self.open_surface_generation_tool(),
+                                "Mol surface cutter..." => self.open_surface_cutter_tool(),
                                 "APBS elepot calculation..." => self.open_apbs_tool(),
                                 "Mol morphing animation..." => {
                                     self.morph_target = self.selected_object;
@@ -17702,145 +17662,74 @@ impl GuiApplication {
         }
     }
 
-    fn suggested_surface_name(&self, molecule_name: &str) -> String {
-        let used = self
-            .state
-            .active_object_summaries()
-            .into_iter()
-            .map(|object| object.name)
-            .chain(
-                self.state
-                    .active_density_map_summaries()
-                    .into_iter()
-                    .map(|object| object.name),
-            )
-            .chain(
-                self.state
-                    .active_surface_summaries()
-                    .into_iter()
-                    .map(|object| object.name),
-            )
-            .chain(
-                self.state
-                    .active_lw_object_summaries()
-                    .into_iter()
-                    .map(|object| object.name),
-            )
-            .collect::<Vec<_>>();
-        let base = format!("sf_{molecule_name}");
-        if !used.contains(&base) {
-            return base;
-        }
-        (1_u64..)
-            .map(|serial| format!("{base}({serial})"))
-            .find(|name| !used.contains(name))
-            .expect("the surface object name space cannot be exhausted")
-    }
-
     fn open_surface_generation_tool(&mut self) {
-        let objects = self.state.active_object_summaries();
-        let target = self
-            .selected_object
-            .filter(|uid| objects.iter().any(|object| object.uid == *uid))
-            .or_else(|| objects.first().map(|object| object.uid));
-        self.surface_target = target;
-        if let Some(object_uid) = target {
-            self.surface_selection = self
-                .state
-                .molecule_selection_text(object_uid)
-                .unwrap_or_default()
-                .to_string();
-            self.surface_use_selection = !self.surface_selection.is_empty();
-            if let Some(object) = objects.iter().find(|object| object.uid == object_uid) {
-                self.surface_name = self.suggested_surface_name(&object.name);
-            }
-        }
-        self.tool_dialog = Some("Mol surface generation".to_string());
+        self.surface.open(
+            cuemol_ui::surface::Kind::Generate,
+            &self.state,
+            self.selected_object,
+        );
+        self.tool_dialog = Some("Mol surface generation".into());
     }
 
-    fn generate_surface_obj(&mut self) {
-        let Some(object_uid) = self.surface_target else {
-            self.set_status("No object selected");
-            return;
+    fn open_surface_cutter_tool(&mut self) {
+        let selected = match self.workspace_aux_selection {
+            Some(WorkspaceAuxSelection::Surface { surface_uid, .. }) => Some(surface_uid),
+            _ => None,
         };
-        let Some(scene_uid) = self.state.scene_manager().scene_uid_for_object(object_uid) else {
-            self.set_status("No object selected");
-            return;
-        };
-        let undo = self.capture_undo();
-        let selection = if self.surface_use_selection {
-            self.surface_selection.as_str()
-        } else {
-            ""
-        };
-        match self.state.create_molecular_surface_object_with_backend(
-            object_uid,
-            selection,
-            self.surface_name.trim(),
-            self.surface_density,
-            self.surface_probe_radius,
-            &self.surface_backend,
-        ) {
-            Ok(surface_uid) => {
-                self.push_undo_snapshot(undo);
-                self.state.mark_scene_modified(scene_uid);
-                self.selected_object = None;
-                self.selected_renderer = None;
-                self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
-                    scene_uid,
-                    surface_uid,
-                    renderer_uid: None,
-                });
-                self.rebuild_snapshot();
-                self.set_status(format!("Created molecular surface {}", self.surface_name));
-                self.tool_dialog = None;
-            }
-            Err(error) => self.set_error(error),
-        }
+        self.surface
+            .open(cuemol_ui::surface::Kind::Cut, &self.state, selected);
+        self.tool_dialog = Some("MolSurf cutting tool".into());
     }
 
-    fn cut_surface_by_current_plane(&mut self, camera: &CameraController) {
-        let Some(surface_uid) = self.cut_surface_target else {
-            self.set_status("No surface selected");
+    fn apply_surface(&mut self, camera: &CameraController) {
+        let Some(kind) = self.surface.active else {
             return;
         };
-        let qsys_camera = camera.to_qsys_camera("__current");
-        let (normal, position) = DesktopAppState::clipping_plane_from_camera(&qsys_camera);
-        let undo = self.capture_undo();
-        match self.state.cut_loaded_surface_by_plane(
-            surface_uid,
-            self.cut_surface_density,
-            normal,
-            position,
-            &self.cut_surface_mode,
-        ) {
-            Ok(summary) => {
-                self.push_undo_snapshot(undo);
-                self.rebuild_snapshot();
-                let selected_uid = summary.section_uid.unwrap_or(summary.target_uid);
-                if let Some(scene_uid) = self
-                    .state
-                    .scene_manager()
-                    .scene_uid_for_surface(selected_uid)
-                {
+        if let Some(error) = self.surface.validation_error(&self.state) {
+            self.surface.error = error.into();
+            self.set_status(error);
+            return;
+        }
+        let args = self.surface.arguments(&self.state);
+        let mut undo = self.capture_undo();
+        undo.record =
+            cuemol_command::console::actions::Record::operation(&self.state, kind.command(), &args);
+        let mut view = camera.to_qsys_camera("__current");
+        match cuemol_command::call_tool(&mut self.state, &mut view, kind.command(), &args) {
+            Ok(value) => {
+                if !undo.state.same_scene_undo_state(&self.state) {
+                    self.push_undo_snapshot(undo);
+                }
+                self.surface.remember(&mut self.state);
+                self.selection_history = self.state.selection_history();
+                if let Err(error) = self.persist_config_state() {
+                    self.log_lines.push(error);
+                }
+                let surface_uid = value["sectionId"]
+                    .as_u64()
+                    .or(value["objectId"].as_u64())
+                    .map(cuemol_core::Uid::new);
+                if let Some(surface_uid) = surface_uid {
                     self.selected_object = None;
                     self.selected_renderer = None;
                     self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
-                        scene_uid,
-                        surface_uid: selected_uid,
+                        scene_uid: self.surface.scene.unwrap(),
+                        surface_uid,
                         renderer_uid: None,
                     });
                 }
-                self.set_status(if summary.section_uid.is_some() {
-                    format!(
-                        "Surface cut: {} body / {} section triangles",
-                        summary.target_triangle_count, summary.section_triangle_count
-                    )
-                } else {
-                    format!("Surface cut: {} triangles", summary.target_triangle_count)
-                });
+                self.rebuild_snapshot();
+                self.set_status(format!("{} applied", kind.title()));
+                self.surface.close();
+                self.tool_dialog = None;
             }
-            Err(error) => self.set_error(error),
+            Err(error) => {
+                if !undo.state.same_undo_state(&self.state) {
+                    self.restore_gui_undo_state(undo);
+                }
+                self.surface.error = error.to_string();
+                self.set_status(format!("Error: {error}"));
+            }
         }
     }
 
@@ -18553,7 +18442,6 @@ impl GuiApplication {
         self.object_props_dialog(ctx);
         self.renderer_props_dialog(ctx);
         self.renderer_group_rename_dialog(ctx);
-        self.surface_regenerate_dialog(ctx);
         self.scene_props_dialog(ctx);
         self.view_props_dialog(ctx, camera);
         self.camera_visibility_dialog(ctx);
@@ -21845,69 +21733,6 @@ impl GuiApplication {
         }
     }
 
-    fn surface_regenerate_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut draft) = self.surface_regenerate_draft.take() else {
-            return;
-        };
-        let mut open = true;
-        let mut accept = false;
-        let mut cancel = false;
-        egui::Window::new("Mol surface tool")
-            .open(&mut open)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.label("Create solvent-excluded surface:");
-                egui::Grid::new("surface-regenerate-fields")
-                    .num_columns(2)
-                    .show(ui, |ui| {
-                        ui.label("Target molecule:");
-                        ui.add_enabled(false, egui::TextEdit::singleline(&mut draft.molecule));
-                        ui.end_row();
-
-                        ui.label("Selection:");
-                        let mut use_selection = !draft.selection.is_empty();
-                        ui.horizontal(|ui| {
-                            ui.add_enabled(false, egui::Checkbox::without_text(&mut use_selection));
-                            ui.add_enabled(false, egui::TextEdit::singleline(&mut draft.selection));
-                        });
-                        ui.end_row();
-
-                        ui.label("Surface name:");
-                        ui.add_enabled(false, egui::TextEdit::singleline(&mut draft.surface_name));
-                        ui.end_row();
-
-                        ui.label("Density (/Å):");
-                        ui.add(
-                            egui::DragValue::new(&mut draft.density)
-                                .range(1.0..=100.0)
-                                .speed(1.0)
-                                .max_decimals(0),
-                        );
-                        ui.end_row();
-
-                        ui.label("Probe radius (Å):");
-                        ui.add_enabled(
-                            false,
-                            egui::DragValue::new(&mut draft.probe_radius).max_decimals(1),
-                        );
-                        ui.end_row();
-                    });
-                ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() {
-                        accept = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                    }
-                });
-            });
-        if accept {
-            self.regenerate_workspace_surface(draft);
-        } else if open && !cancel {
-            self.surface_regenerate_draft = Some(draft);
-        }
-    }
-
     fn scene_props_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_scene_props {
             return;
@@ -24326,6 +24151,15 @@ impl GuiApplication {
             self.superposition_dialog(ctx, camera);
             return;
         }
+        if self.surface.active.is_some()
+            && matches!(
+                title.as_str(),
+                "Mol surface generation" | "Regenerate surface" | "MolSurf cutting tool"
+            )
+        {
+            self.surface_dialog(ctx, camera);
+            return;
+        }
         if title == "Interaction" {
             self.interaction_dialog(ctx);
             return;
@@ -24344,8 +24178,6 @@ impl GuiApplication {
                     "Mol bond editor" => self.bond_editor_tool_ui(ui),
                     "Mol morphing animation" => self.morph_tool_ui(ui),
                     "MolClient tools" => self.mol_client_tool_ui(ui),
-                    "Mol surface generation" => self.surface_tool_ui(ui),
-                    "Mol surface cutter" => self.surface_cutter_tool_ui(ui, camera),
                     "APBS elepot calculation" => self.apbs_tool_ui(ui),
                     "About plugins" => self.plugin_tool_ui(ui),
                     "About config" => self.config_tool_ui(ui),
@@ -24699,148 +24531,33 @@ impl GuiApplication {
         }
     }
 
-    fn surface_tool_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label("Create solvent-excluded surface:");
-        let objects = self.state.active_object_summaries();
-        if objects.is_empty() {
-            ui.weak("No molecular object is loaded.");
+    fn surface_dialog(&mut self, ctx: &egui::Context, camera: &CameraController) {
+        let Some(kind) = self.surface.active else {
+            return;
+        };
+        if self.surface.scene != self.state.active_scene() {
+            self.surface.close();
+            self.tool_dialog = None;
+            self.set_status("The active scene changed. Reopen the surface dialog.");
             return;
         }
-        if !objects
-            .iter()
-            .any(|object| Some(object.uid) == self.surface_target)
-        {
-            self.surface_target = objects.first().map(|object| object.uid);
-        }
-        let previous_target = self.surface_target;
-        let selected_name = objects
-            .iter()
-            .find(|object| Some(object.uid) == self.surface_target)
-            .map_or("(none)", |object| object.name.as_str());
-        egui::ComboBox::from_label("Target molecule:")
-            .selected_text(selected_name)
-            .show_ui(ui, |ui| {
-                for object in &objects {
-                    ui.selectable_value(&mut self.surface_target, Some(object.uid), &object.name);
-                }
+        let mut open = true;
+        let mut action = None;
+        egui::Window::new(kind.title())
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(530.)
+            .show(ctx, |ui| {
+                action = self.surface.show(ui, &self.state, self.snapshot_revision);
             });
-        if self.surface_target != previous_target {
-            if let Some(object_uid) = self.surface_target {
-                self.surface_selection = self
-                    .state
-                    .molecule_selection_text(object_uid)
-                    .unwrap_or_default()
-                    .to_string();
-                self.surface_use_selection = !self.surface_selection.is_empty();
-                if let Some(object) = objects.iter().find(|object| object.uid == object_uid) {
-                    self.surface_name = self.suggested_surface_name(&object.name);
-                }
-            }
+        match action {
+            Some(cuemol_ui::surface::Action::Accept) => self.apply_surface(camera),
+            Some(cuemol_ui::surface::Action::Cancel) => open = false,
+            None => {}
         }
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.surface_use_selection, "Selection:");
-            ui.add_enabled(
-                self.surface_use_selection,
-                egui::TextEdit::singleline(&mut self.surface_selection)
-                    .desired_width(ui.available_width()),
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.label("Surface name:");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.surface_name)
-                    .desired_width(ui.available_width()),
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.label("Backend:");
-            egui::ComboBox::from_id_salt("surface-backend")
-                .selected_text(&self.surface_backend)
-                .show_ui(ui, |ui| {
-                    for backend in ["auto", "meshms", "ball", "rust"] {
-                        ui.selectable_value(&mut self.surface_backend, backend.into(), backend);
-                    }
-                });
-        });
-        ui.horizontal(|ui| {
-            ui.label("Density (/Å):");
-            ui.add(
-                egui::DragValue::new(&mut self.surface_density)
-                    .range(0.1..=100.0)
-                    .speed(0.1),
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.label("Probe radius (Å):");
-            ui.add(
-                egui::DragValue::new(&mut self.surface_probe_radius)
-                    .range(0.1..=100.0)
-                    .speed(0.1),
-            );
-        });
-        if ui
-            .add_enabled(
-                !self.surface_name.trim().is_empty(),
-                egui::Button::new("OK"),
-            )
-            .clicked()
-        {
-            self.generate_surface_obj();
-        }
-    }
-
-    fn surface_cutter_tool_ui(&mut self, ui: &mut egui::Ui, camera: &CameraController) {
-        ui.label("Cut molecular surface by the current clipping plane:");
-        let surfaces = self.state.active_surface_summaries();
-        if !surfaces
-            .iter()
-            .any(|surface| Some(surface.uid) == self.cut_surface_target)
-        {
-            self.cut_surface_target = match self.workspace_aux_selection {
-                Some(WorkspaceAuxSelection::Surface { surface_uid, .. })
-                    if surfaces.iter().any(|surface| surface.uid == surface_uid) =>
-                {
-                    Some(surface_uid)
-                }
-                _ => surfaces.first().map(|surface| surface.uid),
-            };
-        }
-        if surfaces.is_empty() {
-            ui.weak("No molecular surface is loaded.");
-            return;
-        }
-        let selected_name = surfaces
-            .iter()
-            .find(|surface| Some(surface.uid) == self.cut_surface_target)
-            .map_or("(none)", |surface| surface.name.as_str());
-        egui::ComboBox::from_label("Target surface")
-            .selected_text(selected_name)
-            .show_ui(ui, |ui| {
-                for surface in &surfaces {
-                    ui.selectable_value(
-                        &mut self.cut_surface_target,
-                        Some(surface.uid),
-                        &surface.name,
-                    );
-                }
-            });
-        egui::ComboBox::from_label("Cross section type")
-            .selected_text(surface_cut_mode_label(&self.cut_surface_mode))
-            .show_ui(ui, |ui| {
-                for (mode, label) in SURFACE_CUT_MODES {
-                    ui.selectable_value(&mut self.cut_surface_mode, mode.to_string(), label);
-                }
-            });
-        ui.horizontal(|ui| {
-            ui.label("Section mesh density (/Å)");
-            ui.add(
-                egui::DragValue::new(&mut self.cut_surface_density)
-                    .speed(0.1)
-                    .range(0.1..=100.0),
-            );
-        });
-        if ui.button("OK").clicked() {
-            self.cut_surface_by_current_plane(camera);
+        if !open {
+            self.surface.close();
+            self.tool_dialog = None;
         }
     }
 
@@ -28651,44 +28368,15 @@ impl GuiApplication {
     }
 
     fn open_surface_regenerate_dialog(&mut self, selection: WorkspaceAuxSelection) {
-        let WorkspaceAuxSelection::Surface {
-            scene_uid,
-            surface_uid,
-            ..
-        } = selection
-        else {
-            self.set_status("Select a molecular surface");
+        let WorkspaceAuxSelection::Surface { surface_uid, .. } = selection else {
             return;
         };
-        let Some(surface) = self.state.surface_summary(surface_uid) else {
-            self.set_status("Select a molecular surface");
-            return;
-        };
-        self.surface_regenerate_draft = Some(NativeSurfaceRegenerateDraft {
-            scene_uid,
-            surface_uid,
-            molecule: surface.original_molecule,
-            selection: surface.original_selection,
-            surface_name: surface.name,
-            density: surface.original_density.max(0.1),
-            probe_radius: surface.original_probe_radius,
-        });
-    }
-
-    fn regenerate_workspace_surface(&mut self, draft: NativeSurfaceRegenerateDraft) {
-        let undo = self.capture_undo();
-        match self
-            .state
-            .regenerate_surface_object_with_density(draft.surface_uid, draft.density)
-        {
-            Ok(triangle_count) => {
-                self.push_undo_snapshot(undo);
-                self.state.mark_scene_modified(draft.scene_uid);
-                self.rebuild_snapshot();
-                self.set_status(format!("Regenerated surface: {triangle_count} triangle(s)"));
-            }
-            Err(error) => self.set_error(error),
-        }
+        self.surface.open(
+            cuemol_ui::surface::Kind::Regenerate,
+            &self.state,
+            Some(surface_uid),
+        );
+        self.tool_dialog = Some("Regenerate surface".into());
     }
 
     fn delete_workspace_object(&mut self, target: NativePropertyObject) {
@@ -37018,10 +36706,9 @@ mod tests {
             surface_uid,
             renderer_uid: None,
         });
-        let regenerate = app.surface_regenerate_draft.take().unwrap();
-        assert_eq!(regenerate.molecule, "source");
+        let regenerate = &app.surface;
         assert_eq!(regenerate.selection, "chain A");
-        assert_eq!(regenerate.surface_name, "edited surface");
+        assert_eq!(regenerate.name, "edited surface");
         assert_eq!(regenerate.density, 2.0);
         assert_eq!(regenerate.probe_radius, 1.4);
 
@@ -37091,6 +36778,12 @@ mod tests {
     #[test]
     fn native_molecular_surface_tool_creates_workspace_surface() {
         let mut app = GuiApplication::new();
+        let directory = tempfile::tempdir().unwrap();
+        app.config_path = directory
+            .path()
+            .join("config.tsv")
+            .to_string_lossy()
+            .into_owned();
         let scene_uid = app.state.active_scene().unwrap();
         let molecule = cuemol_molstr::read_pdb_str(
             "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n",
@@ -37108,12 +36801,14 @@ mod tests {
             .unwrap();
 
         app.open_surface_generation_tool();
-        assert_eq!(app.surface_target, Some(object_uid));
-        assert!(app.surface_use_selection);
-        assert_eq!(app.surface_selection, "chain A");
-        assert_eq!(app.surface_name, "sf_source");
-        app.surface_density = 2.0;
-        app.generate_surface_obj();
+        assert_eq!(app.surface.molecule, Some(object_uid));
+        assert!(!app.surface.use_selection);
+        assert!(app.surface.selection.is_empty());
+        app.surface.use_selection = true;
+        app.surface.selection = "chain A".into();
+        assert_eq!(app.surface.name, "sf_source");
+        app.surface.density = 2.0;
+        app.apply_surface(&CameraController::default());
 
         let surface = app.state.active_surface_summaries().remove(0);
         assert_eq!(surface.name, "sf_source");
@@ -37130,6 +36825,78 @@ mod tests {
             }) if surface_uid == surface.uid
         ));
         assert!(app.tool_dialog.is_none());
+    }
+
+    #[test]
+    fn native_surface_dialog_preserves_failed_edits_and_regenerates_with_one_undo() {
+        let mut app = GuiApplication::new();
+        let directory = tempfile::tempdir().unwrap();
+        app.config_path = directory
+            .path()
+            .join("config.tsv")
+            .to_string_lossy()
+            .into_owned();
+        app.state.open_bytes("source.pdb", b"ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        app.open_surface_generation_tool();
+        app.surface.backend = "rust".into();
+        app.surface.use_selection = true;
+        app.surface.selection = "invalid (((".into();
+        let before = app.state.clone();
+        let undo_count = app.undo_stack.len();
+        let mut camera = CameraController::default();
+        app.apply_surface(&camera);
+        assert!(before.same_undo_state(&app.state));
+        assert_eq!(app.undo_stack.len(), undo_count);
+        assert!(!app.surface.error.is_empty());
+        assert!(app.surface.active.is_some());
+        app.surface.selection = "chain A".into();
+        app.surface.name.clear();
+        app.surface.probe_radius = 1.8;
+        app.apply_surface(&camera);
+        assert!(app.surface.active.is_none(), "{}", app.surface.error);
+        let surface = app.state.active_surface_summaries().remove(0);
+        assert_eq!(surface.original_selection, "chain A");
+        assert_eq!(surface.original_probe_radius, 1.8);
+        assert_eq!(app.undo_stack.len(), undo_count + 1);
+        app.undo(&mut camera);
+        assert!(app.state.active_surface_summaries().is_empty());
+        app.redo(&mut camera);
+        app.open_surface_regenerate_dialog(WorkspaceAuxSelection::Surface {
+            scene_uid: surface.scene_uid,
+            surface_uid: surface.uid,
+            renderer_uid: None,
+        });
+        assert_eq!(app.surface.backend, "auto");
+        app.surface.density = 3.;
+        app.apply_surface(&camera);
+        assert!(app.surface.active.is_none(), "{}", app.surface.error);
+        let regenerated = app.state.surface_summary(surface.uid).unwrap();
+        assert_eq!(regenerated.original_density, 3.);
+        assert_eq!(regenerated.original_selection, "chain A");
+        assert_eq!(regenerated.original_probe_radius, 1.8);
+        assert_eq!(app.undo_stack.len(), undo_count + 2);
+        app.undo(&mut camera);
+        assert_eq!(
+            app.state
+                .surface_summary(surface.uid)
+                .unwrap()
+                .original_density,
+            2.
+        );
+        app.redo(&mut camera);
+        assert_eq!(
+            app.state
+                .surface_summary(surface.uid)
+                .unwrap()
+                .original_density,
+            3.
+        );
+        app.open_surface_cutter_tool();
+        app.surface.scene = None;
+        let before = app.state.clone();
+        app.apply_surface(&camera);
+        assert!(before.same_undo_state(&app.state));
+        assert!(app.surface.error.contains("active scene changed"));
     }
 
     #[cfg(unix)]
@@ -39170,6 +38937,12 @@ mod tests {
     #[test]
     fn native_surface_cutter_separates_and_undoes_loaded_surface() {
         let mut app = GuiApplication::new();
+        let directory = tempfile::tempdir().unwrap();
+        app.config_path = directory
+            .path()
+            .join("config.tsv")
+            .to_string_lossy()
+            .into_owned();
         let scene_uid = app.state.ensure_active_scene();
         let molecule = cuemol_molstr::read_pdb_str(
             "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n",
@@ -39200,24 +38973,25 @@ mod tests {
                 raw_data,
                 qsc_node: Some(node),
             });
-        app.cut_surface_target = Some(surface_uid);
-        app.cut_surface_mode = "separate".to_string();
-        app.cut_surface_density = 1.0;
+        app.open_surface_cutter_tool();
+        app.surface.surface = Some(surface_uid);
+        app.surface.mode = "separate".into();
+        app.surface.density = 1.0;
         let mut camera = CameraController {
             target: Vec3::new(0.0, 0.0, -120.0),
             slab_depth: 240.0,
             ..CameraController::default()
         };
 
-        app.cut_surface_by_current_plane(&camera);
+        app.apply_surface(&camera);
 
         assert_eq!(app.state.active_surface_summaries().len(), 2);
         assert!(app
             .state
             .active_surface_summaries()
             .iter()
-            .any(|surface| surface.name == "sect1_surface"));
-        assert!(app.status.starts_with("Surface cut:"));
+            .any(|surface| surface.name == "sect_surface"));
+        assert!(app.status.contains("cutting tool applied"));
         app.undo(&mut camera);
         assert_eq!(app.state.active_surface_summaries().len(), 1);
     }

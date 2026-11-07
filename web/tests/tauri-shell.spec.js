@@ -61,6 +61,9 @@ async function openShell(page, storage = {}, options = {}) {
       snapshot.objects.push({...molecule,uid:5,name:'Other',renderers:[]});
       window.__interactionSceneChanged=()=>{snapshot.activeSceneUid=9;};
     }
+    if(options.surfaceDialogs) {
+      snapshot.surfaces=[{uid:10,sceneUid:1,name:'sf_Probe',className:'MolSurfObj',visible:true,locked:false,uiOrder:1,uiCollapsed:false,source:'',format:'qdfsurf',originalMolecule:'Probe',originalSelection:'chain A',originalDensity:20,originalProbeRadius:1.8,renderers:[]}];
+    }
     const animationUndo=[],animationRedo=[];
     const resolveAnimation=()=>{
       const ends=new Map();
@@ -163,6 +166,11 @@ async function openShell(page, storage = {}, options = {}) {
         if (args.selection === 'invalid (((') throw new Error('Invalid selection');
         snapshot.status = args.selection === 'none' && command !== 'change_chain' ? 'No atoms matched the selection' : 'Edited molecule';
         if (command === 'renumber_residues' && !args.shiftMode && args.value === 1) snapshot.status = 'Residue index change was rejected';
+        return structuredClone(snapshot);
+      }
+      if (options.surfaceDialogs && ['create_molecular_surface','regenerate_surface','cut_surface'].includes(command)) {
+        if(args.selection==='invalid (((') throw new Error('Invalid selection');
+        if(command==='regenerate_surface' && window.__surfaceFailure) throw new Error('Surface generation failed');
         return structuredClone(snapshot);
       }
       if (options.superposition && command === 'superpose_objects') {
@@ -2656,5 +2664,83 @@ test('superposition dialog retains failed input and saves only successful settin
   await expect(dialog.getByRole('alert')).toContainText('active scene changed');
   expect(await stored()).toEqual(success);
   await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
+  expect(errors).toEqual([]);
+});
+
+
+test('surface dialogs match defaults, reset drafts and keep failed input', async ({page}, testInfo) => {
+  const errors = await openShell(page, {}, {surfaceDialogs:true, interactions:true});
+  const dialog = page.locator('#reference-dialog');
+  const open = async name => {
+    await page.locator('summary').filter({hasText:/^Tools$/}).click();
+    await page.locator(`[data-dialog="Mol surface ${name}"]`).click();
+    await expect(dialog).toBeVisible();
+  };
+  const last = command => page.evaluate(command => window.__shellCalls.filter(call => call.command === command).at(-1)?.args, command);
+  await open('generation');
+  await expect(dialog.getByLabel('Use selection', {exact:true})).not.toBeChecked();
+  await expect(dialog.getByLabel('Selection', {exact:true})).toBeDisabled();
+  await expect(dialog.getByLabel('Object name', {exact:true})).toHaveValue('sf_Probe(1)');
+  await expect(dialog.getByLabel('Point density (/Å)', {exact:true})).toHaveValue('2');
+  await expect(dialog.getByLabel('Probe radius (Å)', {exact:true})).toHaveValue('1.4');
+  await dialog.getByLabel('Use selection', {exact:true}).check();
+  await dialog.getByRole('button', {name:'Choose Selection', exact:true}).click();
+  await dialog.getByRole('button', {name:'Selection choice *', exact:true}).click();
+  await dialog.getByLabel('Selection', {exact:true}).fill('invalid (((');
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('Invalid selection');
+  await expect(dialog.getByLabel('Selection', {exact:true})).toHaveValue('invalid (((');
+  await dialog.getByLabel('Selection', {exact:true}).fill('chain A');
+  await dialog.getByLabel('Object name', {exact:true}).fill('custom');
+  await dialog.getByLabel('Molecule', {exact:true}).selectOption('5');
+  await expect(dialog.getByLabel('Object name', {exact:true})).toHaveValue('sf_Other');
+  await expect(dialog.getByLabel('Selection', {exact:true})).toHaveValue('chain A');
+  await dialog.getByLabel('Point density (/Å)', {exact:true}).fill('3');
+  await dialog.getByLabel('Probe radius (Å)', {exact:true}).fill('1.8');
+  await dialog.getByLabel('Algorithm', {exact:true}).selectOption('rust');
+  await page.screenshot({path:testInfo.outputPath('tauri-surface-generation.png')});
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  expect(await last('create_molecular_surface')).toEqual({objectUid:5,selection:'chain A',name:'sf_Other',density:3,probeRadius:1.8,backend:'rust'});
+  await open('generation');
+  await expect(dialog.getByLabel('Molecule', {exact:true})).toHaveValue('5');
+  await expect(dialog.getByLabel('Use selection', {exact:true})).not.toBeChecked();
+  await expect(dialog.getByLabel('Selection', {exact:true})).toHaveValue('');
+  await expect(dialog.getByLabel('Point density (/Å)', {exact:true})).toHaveValue('2');
+  await expect(dialog.getByLabel('Probe radius (Å)', {exact:true})).toHaveValue('1.4');
+  await expect(dialog.getByLabel('Algorithm', {exact:true})).toHaveValue('rust');
+  await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
+  await page.evaluate(() => showSurfaceDialog('regenerate', snapshot.surfaces[0]));
+  await expect(dialog.locator('#dialog-title')).toHaveText('Regenerate surface');
+  await expect(dialog.getByLabel('Selection', {exact:true})).toHaveValue('chain A');
+  await expect(dialog.getByLabel('Selection', {exact:true})).toHaveAttribute('readonly', '');
+  await expect(dialog.getByLabel('Point density (/Å)', {exact:true})).toHaveValue('10');
+  await expect(dialog.getByLabel('Algorithm', {exact:true})).toHaveValue('auto');
+  await dialog.getByLabel('Point density (/Å)', {exact:true}).fill('3');
+  await page.evaluate(() => { window.__surfaceFailure = true; });
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('Surface generation failed');
+  await expect(dialog.getByLabel('Point density (/Å)', {exact:true})).toHaveValue('3');
+  await dialog.getByLabel('Algorithm', {exact:true}).selectOption('ball');
+  await page.evaluate(() => { window.__surfaceFailure = false; });
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  expect(await last('regenerate_surface')).toEqual({surfaceUid:10,density:3,backend:'ball'});
+  await open('cutter');
+  await expect(dialog.getByLabel('Cross section type', {exact:true})).toHaveValue('full');
+  await expect(dialog.getByLabel('Section mesh density (/Å)', {exact:true})).toHaveValue('5');
+  await dialog.getByLabel('Cross section type', {exact:true}).selectOption('separate');
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  expect(await last('cut_surface')).toEqual({surfaceUid:10,density:5,mode:'separate'});
+  await open('cutter');
+  await expect(dialog.getByLabel('Cross section type', {exact:true})).toHaveValue('full');
+  await dialog.getByLabel('Section mesh density (/Å)', {exact:true}).fill('51');
+  await expect(dialog.getByRole('button', {name:'OK', exact:true})).toBeDisabled();
+  await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
+  await open('generation');
+  await page.evaluate(async () => { window.__interactionSceneChanged(); await mutate('get_snapshot'); });
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('active scene changed');
   expect(errors).toEqual([]);
 });

@@ -251,6 +251,10 @@ impl App {
     }
 
     pub(super) fn select_tool(&mut self, name: &str) {
+        if let Some(kind) = cuemol_ui::surface::Kind::from_command(name) {
+            self.surface.open(kind, &self.state, self.selected);
+            return;
+        }
         if let Some(kind) = cuemol_ui::molecule_edit::Kind::from_command(name) {
             self.molecule_edits.open(kind, &self.state, self.selected);
             return;
@@ -457,6 +461,49 @@ impl App {
         }
         if !open {
             self.molecule_edits.active = None;
+        }
+    }
+
+    pub(super) fn surface_ui(&mut self, ctx: &egui::Context) {
+        let Some(kind) = self.surface.active else {
+            return;
+        };
+        if self.surface.scene != self.state.active_scene() {
+            self.surface.close();
+            self.message = "The active scene changed. Reopen the surface dialog.".into();
+            return;
+        }
+        let mut open = true;
+        let mut action = None;
+        let window = egui::Window::new(kind.title())
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(530.)
+            .show(ctx, |ui| {
+                action = self.surface.show(ui, &self.state, self.revision);
+            });
+        self.ui_rects.extend(self.surface.rects.clone());
+        if let Some(window) = window {
+            self.record_ui_rect("Surface window", &window.response);
+        }
+        match action {
+            Some(cuemol_ui::surface::Action::Accept) => {
+                if let Some(error) = self.surface.validation_error(&self.state) {
+                    self.surface.error = error.into();
+                } else if self.call_shared(kind.command(), self.surface.arguments(&self.state)) {
+                    self.surface.remember(&mut self.state);
+                    self.persist_selection_history();
+                    self.message = format!("{} applied", kind.title());
+                    open = false;
+                } else {
+                    self.surface.error.clone_from(&self.message);
+                }
+            }
+            Some(cuemol_ui::surface::Action::Cancel) => open = false,
+            None => {}
+        }
+        if !open {
+            self.surface.close();
         }
     }
 

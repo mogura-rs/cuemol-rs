@@ -7956,6 +7956,7 @@ enum ModelRequest {
     RegenerateSurface {
         surface_uid: u64,
         density: f64,
+        backend: Option<String>,
     },
     CreateCamera(String),
     SaveCamera(String),
@@ -8288,6 +8289,7 @@ enum ModelRequest {
         name: String,
         density: f64,
         probe_radius: f64,
+        backend: Option<String>,
     },
     WriteSurface {
         object_uid: u64,
@@ -10103,11 +10105,15 @@ fn handle_model_request(
         ModelRequest::RegenerateSurface {
             surface_uid,
             density,
+            backend,
         } => {
+            if model.desktop.scene_manager().scene_uid_for_surface(Uid::new(surface_uid)) != model.desktop.active_scene() {
+                return Err("The active scene changed. Reopen the surface dialog.".into());
+            }
             let undo = model.capture_undo();
             let triangle_count = model
                 .desktop
-                .regenerate_surface_object_with_density(Uid::new(surface_uid), density)
+                .regenerate_surface_object_with_backend(Uid::new(surface_uid), density, backend.as_deref().filter(|value| *value != "auto"))
                 .map_err(|error| error.to_string())?;
             model.status = format!("Regenerated surface: {triangle_count} triangle(s)");
             model.invalidate_snapshot(false);
@@ -11571,6 +11577,12 @@ fn handle_model_request(
             algorithm, pivot, reference_object_uid, reference_selection,
             moving_object_uid, moving_selection, auto_recenter, use_property, rmsd_path,
         } => {
+            let algorithm = match algorithm.to_ascii_lowercase().as_str() {
+                "lsq" => "LSQ",
+                "ssm" => "SSM",
+                "usalign" => "USalign",
+                _ => return Err(format!("unknown superposition algorithm: {algorithm}")),
+            };
             let args = serde_json::json!({"algo":algorithm,"pivot":pivot,
                 "refId":reference_object_uid,"refSel":reference_selection,
                 "movId":moving_object_uid,"movSel":moving_selection,
@@ -11868,16 +11880,21 @@ fn handle_model_request(
             name,
             density,
             probe_radius,
+            backend,
         } => {
+            if model.desktop.scene_manager().scene_uid_for_object(Uid::new(object_uid)) != model.desktop.active_scene() {
+                return Err("The active scene changed. Reopen the surface dialog.".into());
+            }
             let undo = model.capture_undo();
             let _surface_uid = model
                 .desktop
-                .create_molecular_surface_object(
+                .create_molecular_surface_object_with_backend(
                     Uid::new(object_uid),
                     &selection,
                     &name,
                     density,
                     probe_radius,
+                    backend.as_deref().unwrap_or("auto"),
                 )
                 .map_err(|error| error.to_string())?;
             model.status = format!("Created molecular surface {name}");
@@ -11968,6 +11985,9 @@ fn handle_model_request(
             density,
             mode,
         } => {
+            if model.desktop.scene_manager().scene_uid_for_surface(Uid::new(surface_uid)) != model.desktop.active_scene() {
+                return Err("The active scene changed. Reopen the surface dialog.".into());
+            }
             let undo = model.capture_undo();
             let (normal, position) = DesktopAppState::clipping_plane_from_camera(&model.camera);
             let summary = model
@@ -14214,6 +14234,7 @@ fn add_surface_renderer(
 fn regenerate_surface(
     surface_uid: u64,
     density: f64,
+    backend: Option<String>,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
@@ -14221,6 +14242,7 @@ fn regenerate_surface(
         ModelRequest::RegenerateSurface {
             surface_uid,
             density,
+            backend,
         },
     )?)
 }
@@ -15823,6 +15845,7 @@ fn create_molecular_surface(
     name: String,
     density: f64,
     probe_radius: f64,
+    backend: Option<String>,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
@@ -15833,6 +15856,7 @@ fn create_molecular_surface(
             name,
             density,
             probe_radius,
+            backend,
         },
     )?)
 }
@@ -24273,6 +24297,11 @@ mod tests {
         let mut model = model_without_gpu();
         model.desktop.open_path(&pdb).unwrap();
         model.selection = "chain A and resid 1".to_string();
+        let selected_object = model.desktop.active_object_summaries()[0].uid;
+        model
+            .desktop
+            .set_molecule_selection_text(selected_object, &model.selection)
+            .unwrap();
         model.rebuild_snapshot(true).unwrap();
         let object_uid = model.desktop.active_object_summaries()[0].uid;
         let response = handle_model_request(
@@ -24798,6 +24827,13 @@ mod tests {
         model.camera.set_rotation(Quat::new(0.0, 0.0, 0.0, 1.0));
         model.camera.set_cam_dist(10.0);
         model.camera.set_slab_depth(2.0);
+        assert!(model
+            .atom_at_screen("aid 2", 400.0, 300.0, 800, 600)
+            .unwrap()
+            .is_some());
+        model
+            .camera
+            .set_center(position + Vector4::new3(0.0, 0.0, 100.0));
         assert!(model
             .atom_at_screen("aid 2", 400.0, 300.0, 800, 600)
             .unwrap()
@@ -26197,6 +26233,84 @@ mod tests {
     }
 
     #[test]
+    fn surface_dialog_requests_keep_failures_and_regeneration_transactional() {
+        let mut model = model_without_gpu();
+        model.desktop.open_bytes("source.pdb", b"ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let object = model.desktop.active_object_summaries()[0].uid;
+        let before = model.desktop.clone();
+        let create = |selection: &str| ModelRequest::CreateMolecularSurface {
+            object_uid: object.get(),
+            selection: selection.into(),
+            name: "surface".into(),
+            density: 2.,
+            probe_radius: 1.8,
+            backend: Some("rust".into()),
+        };
+        assert!(handle_model_request(&mut model, create("invalid (((")).is_err());
+        assert!(model.desktop.same_undo_state(&before));
+        assert!(model.undo_stack.is_empty());
+        handle_model_request(&mut model, create("chain A")).unwrap();
+        let surface = model.desktop.active_surface_summaries()[0].uid;
+        assert_eq!(model.undo_stack.len(), 1);
+        let before = model.desktop.clone();
+        assert!(handle_model_request(
+            &mut model,
+            ModelRequest::RegenerateSurface {
+                surface_uid: surface.get(),
+                density: 3.,
+                backend: Some("invalid".into())
+            }
+        )
+        .is_err());
+        assert!(model.desktop.same_undo_state(&before));
+        assert_eq!(model.undo_stack.len(), 1);
+        handle_model_request(
+            &mut model,
+            ModelRequest::RegenerateSurface {
+                surface_uid: surface.get(),
+                density: 3.,
+                backend: Some("auto".into()),
+            },
+        )
+        .unwrap();
+        let result = model.desktop.surface_summary(surface).unwrap();
+        assert_eq!(result.original_selection, "chain A");
+        assert_eq!(result.original_probe_radius, 1.8);
+        assert_eq!(result.original_density, 3.);
+        assert_eq!(
+            model.desktop.molecular_surface_backend(surface).as_deref(),
+            Some("rust")
+        );
+        assert_eq!(model.undo_stack.len(), 2);
+        model.undo(0).unwrap();
+        assert_eq!(
+            model
+                .desktop
+                .surface_summary(surface)
+                .unwrap()
+                .original_density,
+            2.
+        );
+        model.redo(0).unwrap();
+        assert_eq!(
+            model
+                .desktop
+                .surface_summary(surface)
+                .unwrap()
+                .original_density,
+            3.
+        );
+        model.desktop.new_scene("Other", true);
+        let before = model.desktop.clone();
+        assert!(handle_model_request(&mut model, create(""))
+            .err()
+            .unwrap()
+            .contains("active scene changed"));
+        assert!(model.desktop.same_undo_state(&before));
+        assert_eq!(model.undo_stack.len(), 2);
+    }
+
+    #[test]
     fn surface_apbs_and_morph_dialog_requests_write_and_update_data() {
         let root = option_env!("CUEMOL2_REF_DIR")
             .map(PathBuf::from)
@@ -26230,6 +26344,7 @@ mod tests {
                 name: "surface".to_string(),
                 density: 1.0,
                 probe_radius: 1.4,
+                backend: None,
             },
         )
         .unwrap();
@@ -26258,7 +26373,7 @@ mod tests {
         assert!(snapshot
             .surfaces
             .iter()
-            .any(|item| item.name == "sect1_surface"));
+            .any(|item| item.name == "sect_surface"));
         assert!(snapshot.status.starts_with("Surface cut:"));
 
         handle_model_request(

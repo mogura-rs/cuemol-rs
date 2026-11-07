@@ -6816,8 +6816,14 @@ impl DesktopAppState {
                     .flat_map(|object| object.renderers.into_iter().map(|renderer| renderer.name)),
             )
             .collect::<BTreeSet<_>>();
-        let renderer_name = (1_u64..)
-            .map(|index| format!("molsurf{index}"))
+        let renderer_name = (0_u64..)
+            .map(|index| {
+                if index == 0 {
+                    "molsurf".into()
+                } else {
+                    format!("molsurf({index})")
+                }
+            })
             .find(|candidate| !renderer_names.contains(candidate))
             .expect("the surface renderer name space cannot be exhausted");
 
@@ -6843,6 +6849,10 @@ impl DesktopAppState {
             renderer_node.set_str_attr("sel", selection_text);
         }
         renderer_node.set_str_attr("colormode", "molecule");
+        let mut coloring = LDom2Node::new();
+        coloring.set_tag_name("coloring");
+        coloring.set_type_name("CPKColoring");
+        renderer_node.append_child_node(coloring);
         object_node.append_child_node(renderer_node);
 
         let scene = self
@@ -7056,11 +7066,38 @@ impl DesktopAppState {
                 .scene_manager()
                 .scene(scene_uid)
                 .into_iter()
-                .flat_map(|scene| scene.loaded_surfaces())
-                .map(|surface| surface.name.as_str())
+                .flat_map(|scene| {
+                    scene
+                        .objects()
+                        .iter()
+                        .map(|object| object.name().to_string())
+                        .chain(
+                            scene
+                                .loaded_surfaces()
+                                .iter()
+                                .map(|object| object.name.clone()),
+                        )
+                        .chain(
+                            scene
+                                .loaded_lw_objects()
+                                .iter()
+                                .map(|object| object.name.clone()),
+                        )
+                })
+                .chain(
+                    self.density_map_summaries(scene_uid)
+                        .into_iter()
+                        .map(|object| object.name),
+                )
                 .collect::<BTreeSet<_>>();
-            let name = (1_u64..)
-                .map(|index| format!("sect{index}_{}", source.name))
+            let name = (0_u64..)
+                .map(|index| {
+                    if index == 0 {
+                        format!("sect_{}", source.name)
+                    } else {
+                        format!("sect{index}_{}", source.name)
+                    }
+                })
                 .find(|name| !existing_names.contains(name.as_str()))
                 .expect("the surface name space cannot be exhausted");
             let mut surface = source.clone();
@@ -8745,6 +8782,14 @@ impl DesktopAppState {
                 .objects()
                 .iter()
                 .any(|object| object.name() == candidate)
+                || scene
+                    .loaded_surfaces()
+                    .iter()
+                    .any(|object| object.name == candidate)
+                || scene
+                    .loaded_lw_objects()
+                    .iter()
+                    .any(|object| object.name == candidate)
                 || self
                     .density_maps
                     .values()
@@ -48880,17 +48925,18 @@ impl DesktopAppState {
                         }
                     }
                     object.set_modified(state.modified);
-                } else if let Some(surface) = self
+                } else if let Some((index, surface)) = self
                     .scene_manager_mut()
                     .scene_mut(Uid::new(state.scene_uid))
                     .and_then(|scene| {
                         scene
                             .loaded_surfaces_mut()
                             .iter_mut()
-                            .find(|surface| surface.uid.get() == state.uid)
+                            .enumerate()
+                            .find(|(_, surface)| surface.uid.get() == state.uid)
                     })
                 {
-                    sync_script_surface(surface, &state);
+                    sync_script_surface(surface, &state, index, &previous_styles);
                 } else if let Some(object) = self
                     .scene_manager_mut()
                     .scene_mut(Uid::new(state.scene_uid))
@@ -50154,17 +50200,18 @@ impl DesktopAppState {
             }
         }
         for state in pending_surfaces {
-            if let Some(surface) = self
+            if let Some((index, surface)) = self
                 .scene_manager_mut()
                 .scene_mut(Uid::new(state.scene_uid))
                 .and_then(|scene| {
                     scene
                         .loaded_surfaces_mut()
                         .iter_mut()
-                        .find(|surface| surface.uid.get() == state.uid)
+                        .enumerate()
+                        .find(|(_, surface)| surface.uid.get() == state.uid)
                 })
             {
-                sync_script_surface(surface, &state);
+                sync_script_surface(surface, &state, index, &previous_styles);
             }
         }
         for state in updated_scene_states {
@@ -51810,7 +51857,48 @@ fn sync_object_metadata_node(node: &mut LDom2Node, metadata: ScriptObjectMetadat
 }
 
 #[cfg(feature = "scripting")]
-fn sync_script_surface(surface: &mut LoadedSurface, state: &ScriptObj) {
+fn sync_script_surface(
+    surface: &mut LoadedSurface,
+    state: &ScriptObj,
+    index: usize,
+    styles: &StyleManager,
+) {
+    if !state.modified && !state.surface_mesh_modified {
+        let node = surface.qsc_node.as_ref();
+        let attr = |name: &str| {
+            node.map(|n| n.str_attr(name).to_string())
+                .unwrap_or_default()
+        };
+        let source = attr("src");
+        let source_type = attr("srctype");
+        let visible = attr("visible");
+        let unchanged = surface.name == state.name
+            && (visible.is_empty() || qsc_bool(&visible)) == state.visible
+            && node.is_some_and(|n| n.bool_attr("locked")) == state.locked
+            && node.is_some_and(|n| n.bool_attr("ui_collapsed")) == state.ui_collapsed
+            && attr("ui_order").parse::<i32>().unwrap_or(index as i32) == state.ui_order
+            && (if source.is_empty() {
+                "datachunk:"
+            } else {
+                &source
+            }) == state.source
+            && attr("alt_src") == state.alt_source
+            && (if source_type.is_empty() {
+                &surface.srctype
+            } else {
+                &source_type
+            }) == &state.source_type
+            && Matrix4::from_script_string(&attr("xformMat")).unwrap_or(Matrix4::IDENTITY)
+                == state.xform
+            && script_surface_renderers(surface, Uid::new(state.scene_uid), styles)
+                .iter()
+                .map(script_surface_renderer_node)
+                .eq(state.renderers.iter().map(script_surface_renderer_node));
+        // A read-only script must not normalize stored metadata or add an undo entry.
+        if unchanged {
+            return;
+        }
+    }
     surface.name = state.name.clone();
     let mut node = surface.qsc_node.clone().unwrap_or_else(|| {
         let mut node = LDom2Node::new();
@@ -72672,6 +72760,14 @@ attribute \"dep\" string \"positions\"
             .unwrap()
             .add_molecule("source", molecule);
 
+        app.set_object_coloring_details(
+            object_uid,
+            Some("SolidColoring".into()),
+            BTreeMap::new(),
+            Vec::new(),
+            Some("#00ff00".into()),
+        )
+        .unwrap();
         let surface_uid = app
             .create_molecular_surface_object(object_uid, "chain A", "sf_source", 2.0, 1.4)
             .unwrap();
@@ -72683,12 +72779,27 @@ attribute \"dep\" string \"positions\"
         assert_eq!(surface.original_probe_radius, 1.4);
         assert_eq!(surface.renderers.len(), 1);
         assert_eq!(surface.renderers[0].renderer_type, "molsurf");
+        assert_eq!(surface.renderers[0].name, "molsurf");
+        assert_eq!(
+            app.renderer_coloring_type(surface_uid, surface.renderers[0].uid)
+                .as_deref(),
+            Some("CPKColoring")
+        );
         assert_eq!(surface.renderers[0].selection, "chain A");
         assert!(
             app.active_render_snapshot("")
                 .unwrap()
                 .mesh_triangle_count()
                 > 0
+        );
+        let rendered = app.active_render_snapshot("").unwrap();
+        assert!(rendered.meshes.iter().flat_map(|mesh| &mesh.vertices).all(|vertex| (vertex.color[0] - 1.).abs() < 1e-6 && (vertex.color[1] - 1.).abs() < 1e-6 && (vertex.color[2] - 0.75).abs() < 1. / 255.), "The generated surface must use the reference CPK carbon color instead of the green molecule color");
+        let second = app
+            .create_molecular_surface_object(object_uid, "", "second", 2.0, 1.4)
+            .unwrap();
+        assert_eq!(
+            app.surface_summary(second).unwrap().renderers[0].name,
+            "molsurf(1)"
         );
     }
 
@@ -72777,6 +72888,46 @@ attribute \"dep\" string \"positions\"
         assert!(after_min_x - before_min_x > 9.0);
     }
 
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn surface_script_queries_preserve_storage_and_renderer_edits_still_apply() {
+        let mut app = DesktopAppState::new();
+        app.open_bytes("source.pdb", b"ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let molecule = app.active_object_summaries()[0].uid;
+        let surface = app
+            .create_molecular_surface_object_with_backend(
+                molecule, "chain A", "surface", 2., 1.8, "rust",
+            )
+            .unwrap();
+        let renderer = app.surface_summary(surface).unwrap().renderers[0].uid;
+        app.clear_all_scene_modified();
+        for source in ["print('query');".to_string(), format!("var s=cuemol.getObject({});print(s.orig_den);print(s.orig_prad);print(s.orig_sel.toString());print(s.sesbackend);", surface.get())] {
+            let before = app.clone();
+            app.run_script_js(&source).unwrap();
+            assert!(app.same_undo_state(&before), "read-only query changed the surface");
+        }
+        app.run_script_js(&format!(
+            "cuemol.getRenderer({}).alpha=0.4;",
+            renderer.get()
+        ))
+        .unwrap();
+        assert_eq!(
+            app.surface_summary(surface).unwrap().renderers[0].alpha,
+            0.4
+        );
+        app.run_script_js(&format!(
+            "var s=cuemol.getObject({});s.ui_order=7;s.orig_den=3;",
+            surface.get()
+        ))
+        .unwrap();
+        let summary = app.surface_summary(surface).unwrap();
+        assert_eq!(summary.ui_order, 7);
+        assert_eq!(summary.original_density, 3.);
+        let before = app.clone();
+        app.run_script_js("print('still read-only');").unwrap();
+        assert!(app.same_undo_state(&before));
+    }
+
     #[test]
     fn loaded_surface_cut_matches_reference_modes_and_camera_plane() {
         let mut app = DesktopAppState::new();
@@ -72817,6 +72968,10 @@ attribute \"dep\" string \"positions\"
         assert_eq!(normal, Vector4::new4(0.0, 0.0, -1.0, 0.0));
         assert_eq!(position, Vector4::new3(1.0, 2.0, 8.0));
 
+        app.scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("sect_surface", molecule);
         let summary = app
             .cut_loaded_surface_by_plane(
                 surface_uid,
