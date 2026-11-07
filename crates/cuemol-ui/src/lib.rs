@@ -104,3 +104,6 @@ pub mod surface;
 
 #[cfg(feature = "egui")]
 pub mod renderer;
+
+#[cfg(feature = "egui")]
+pub mod apbs;

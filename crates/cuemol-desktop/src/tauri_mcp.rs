@@ -14,6 +14,8 @@ impl AppModel {
             return;
         };
         let input = ApbsCalculationInput {
+            scene_uid: None,
+            request_id: None,
             object_uid,
             selection: args["selection"].as_str().unwrap_or("*").into(),
             potential_name: args["name"].as_str().unwrap_or("").into(),

@@ -953,6 +953,26 @@ yields between ray-tracing and denoising-guide batches so the viewport remains
 interactive. Stop in the Render window or Cancel in the status bar cancels it.
 Browser settings and startup scripts are stored in localStorage for that origin.
 
+### APBS electrostatic potential
+
+Open Tools > APBS elepot calculation to choose a molecule and optionally build a
+selection. Each opening resets the calculation options. PDB2PQR uses the force
+field from Settings; switching to the internal method exposes the hydrogen
+option. Set executable paths in Settings > Tools, or install the tool bundle.
+The application also checks PATH. Missing required tools disable Start.
+
+The potential name is suggested again when changing the target; leaving it blank
+uses the same automatic naming rule. Start runs the calculation asynchronously.
+The form shows the current stage and a bounded calculation log, while Stop cancels
+the job. Errors leave the draft open. Success adds an ElePotMap with its unit-cell
+renderer, records one undo step and closes the form. Failed or cancelled jobs do
+not add selection history. Generated map data is embedded by ordinary scene saves
+and remains available after temporary calculation files are removed.
+
+The browser displays the same options and explains its execution boundary.
+Run APBS in the native application, then import the resulting DX map into the
+browser.
+
 ### Trajectories and browser storage
 
 Browser MD playback keeps `File` handles and reads selected DCD/XTC/TRR/NetCDF/MDCRD

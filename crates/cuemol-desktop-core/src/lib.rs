@@ -17371,6 +17371,7 @@ impl DesktopAppState {
             .find(|renderer| renderer.uid == renderer_uid)
             .expect("APBS unit-cell renderer was just inserted");
         renderer.name = "unitcell".to_string();
+        map.source = "datachunk:".into();
         map.modified = false;
         Ok(map_uid)
     }
@@ -75302,7 +75303,22 @@ attribute \"dep\" string \"positions\"
         let snapshot = app.active_render_snapshot("").unwrap();
         assert_eq!(snapshot.bond_count(), 12);
         assert_eq!(snapshot.mesh_triangle_count(), 0);
-        let _ = std::fs::remove_file(path);
+        std::fs::remove_file(&path).unwrap();
+        let scene_path = path.with_extension("qsc");
+        app.save_active_scene_qsc(&scene_path).unwrap();
+        let document = std::fs::read(&scene_path).unwrap();
+        let text = String::from_utf8_lossy(&document);
+        assert!(!text.contains(path.to_string_lossy().as_ref()));
+        let mut restored = DesktopAppState::new();
+        restored.open_path(&scene_path).unwrap();
+        let maps = restored.active_density_map_summaries();
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].class_name, "ElePotMap");
+        assert_eq!(maps[0].counts, [2, 2, 2]);
+        assert_eq!(maps[0].min_density, -4.);
+        assert_eq!(maps[0].max_density, 4.);
+        assert_eq!(maps[0].renderers[0].renderer_type, "*unitcell");
+        std::fs::remove_file(scene_path).unwrap();
     }
 
     fn reference_test_data_root() -> Option<std::path::PathBuf> {

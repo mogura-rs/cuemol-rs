@@ -200,6 +200,11 @@ fn ready_apbs_output_is_discarded_after_cancel_or_mcp_disable() {
             .unwrap();
         let (reply, result) = mpsc::sync_channel(1);
         app.apbs_job = Some(NativeApbsJob {
+            progress: Arc::new(std::sync::Mutex::new(
+                crate::apbs_job::ApbsProgress::default(),
+            )),
+            dialog_generation: None,
+            selection: String::new(),
             receiver,
             cancel: Arc::new(AtomicBool::new(!remote)),
             potential_name: "cancelled".into(),

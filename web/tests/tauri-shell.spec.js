@@ -43,6 +43,13 @@ async function openShell(page, storage = {}, options = {}) {
       canUndo: false, canRedo: false, undoDescriptions: [], redoDescriptions: [], openedPaths: [],
       materialNames: [], logLines: [], status: 'Ready',
     };
+    if(options.apbsDialogs) {
+      snapshot.objects.push({...molecule,uid:5,name:'Second',renderers:[]});
+      window.__apbsSettings={apbsExecutable:'tools/apbs',pdb2pqrExecutable:'tools/pdb2pqr',forceField:'amber'};
+      window.__apbsJob=null;
+      window.__apbsResult=null;
+      window.__apbsSceneChanged=()=>{snapshot.activeSceneUid=9;};
+    }
     if(options.morphDialogs) {
       snapshot.objects.push({...molecule,uid:5,name:'Source',renderers:[]});
       snapshot.objects.push({...molecule,uid:7,name:'Existing morph',className:'MorphMol',renderers:[]});
@@ -155,6 +162,25 @@ async function openShell(page, storage = {}, options = {}) {
       if (options.updates && command === 'update_request') {
         const checking=args.operation==='check';
         return {currentVersion:'0.1.0',message:checking?'Checking for updates…':'CueMol 0.2.0 is available.',checking,installing:false,release:checking?null:{version:'0.2.0',url:'https://github.com/example/cuemol/releases/tag/v0.2.0',newer:true}};
+      }
+      if (options.apbsDialogs && command === 'get_apbs_dialog_state') {
+        return {...window.__apbsSettings,job:window.__apbsJob};
+      }
+      if (options.apbsDialogs && command === 'start_apbs_calculation') {
+        if(args.input.selection==='invalid (((') throw new Error('Invalid selection');
+        if(window.__apbsHoldStart) await new Promise(resolve=>{window.__apbsReleaseStart=resolve;});
+        window.__apbsJob={requestId:args.input.requestId,status:'Running PDB2PQR...',log:'Starting calculation',stopping:false};
+        return 'running';
+      }
+      if (options.apbsDialogs && command === 'cancel_apbs_calculation') {
+        if(window.__apbsJob?.requestId!==args.requestId)return 'stale';
+        window.__apbsJob.stopping=true;window.__apbsResult='error:APBS calculation cancelled';return 'stopping';
+      }
+      if (options.apbsDialogs && command === 'poll_apbs_calculation') {
+        if(window.__apbsJob?.requestId!==args.requestId)return 'stale';
+        if(!window.__apbsResult)return 'running';
+        const result=window.__apbsResult;window.__apbsResult=null;window.__apbsJob=null;
+        return result;
       }
       if(options.morphDialogs && ['initialize_morph_object','append_morph_frame','insert_morph_frame_from_file','remove_morph_frame'].includes(command)) {
         if(args.sceneUid!==snapshot.activeSceneUid)throw new Error('The active scene changed');
@@ -2984,5 +3010,102 @@ test('Tauri morph keeps successful files after an error and discards a late file
   await page.evaluate(async()=>{window.__morphSceneChanged();await mutate('get_snapshot');});
   await dialog.getByLabel('Add morph frame',{exact:true}).click();
   expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='insert_morph_frame_from_file').length)).toBe(2);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri APBS resets defaults, validates inline, and retains success history only', async ({page}, testInfo) => {
+  const errors = await openShell(page, {}, {apbsDialogs:true});
+  const dialog = page.locator('#reference-dialog');
+  const open = () => page.evaluate(() => showReferenceDialog('APBS elepot calculation'));
+  const starts = () => page.evaluate(() => window.__shellCalls.filter(c=>c.command==='start_apbs_calculation'));
+  await open();
+  await expect(dialog.locator('#dialog-title')).toHaveText('APBS electrostatic potential');
+  await expect(dialog.getByLabel('Target molecule',{exact:true})).toHaveValue('3');
+  await expect(dialog.getByLabel('Selection',{exact:true})).not.toBeChecked();
+  await expect(dialog.getByLabel('Selection code',{exact:true})).toHaveValue('');
+  await expect(dialog.getByLabel('Force field',{exact:true})).toHaveValue('amber');
+  await expect(dialog.getByLabel('Temperature (K)',{exact:true})).toHaveValue('298.15');
+  await expect(dialog.getByLabel('Temperature (K)',{exact:true})).toHaveAttribute('step','0.01');
+  await expect(dialog.getByLabel('APBS exe path',{exact:true})).toHaveCount(0);
+  await expect(dialog.getByLabel('Use hydrogen atoms',{exact:true})).toBeHidden();
+  await dialog.getByLabel('Target molecule',{exact:true}).selectOption('5');
+  await expect(dialog.getByLabel('Potential name',{exact:true})).toHaveValue('pot_Second');
+  await dialog.getByLabel('Potential name',{exact:true}).fill('custom');
+  await dialog.getByLabel('Target molecule',{exact:true}).selectOption('3');
+  await expect(dialog.getByLabel('Potential name',{exact:true})).toHaveValue('pot_Probe');
+  await dialog.getByLabel('Max grid size (Å)',{exact:true}).fill('11');
+  await expect(dialog.getByRole('button',{name:'Start',exact:true})).toBeDisabled();
+  await expect(dialog.getByRole('alert')).toContainText('between 0.1 and 10');
+  await dialog.getByLabel('Max grid size (Å)',{exact:true}).fill('1');
+  await dialog.getByLabel('Selection',{exact:true}).check();
+  await dialog.getByLabel('Selection code',{exact:true}).fill('invalid (((');
+  await dialog.getByRole('button',{name:'Start',exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('Invalid selection');
+  expect((await starts())).toHaveLength(1);
+  expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='inspector_request'&&c.args.tool==='selection_history'&&c.args.args.action==='remember'&&JSON.stringify(c.args).includes('invalid')).length)).toBe(0);
+  await dialog.getByLabel('Selection code',{exact:true}).fill('name CA');
+  await dialog.getByLabel('Potential name',{exact:true}).fill('');
+  await dialog.getByRole('button',{name:'Start',exact:true}).click();
+  await expect(dialog.getByRole('button',{name:'Stop',exact:true})).toBeEnabled();
+  await expect(dialog.getByRole('button',{name:'Close',exact:true}).last()).toBeDisabled();
+  await expect(dialog.getByLabel('Target molecule',{exact:true})).toBeDisabled();
+  await expect(dialog.getByRole('status')).toContainText('Running PDB2PQR');
+  await page.evaluate(()=>{window.__apbsJob.status='Running APBS...';window.__apbsJob.log='PDB2PQR complete\nSolving potential';});
+  await expect(dialog.getByRole('status')).toContainText('Running APBS');
+  await dialog.locator('summary').filter({hasText:'Calculation log'}).click();
+  await expect(dialog.locator('pre')).toContainText('Solving potential');
+  await page.screenshot({path:testInfo.outputPath('apbs-progress.png')});
+  const request = (await starts())[1].args.input;
+  expect(request).toMatchObject({sceneUid:1,objectUid:3,selection:'name CA',potentialName:'',forceField:'amber',temperature:298.15});
+  expect(request.requestId).toBeTruthy();
+  await dialog.getByRole('button',{name:'Stop',exact:true}).click();
+  await expect(dialog.getByRole('button',{name:'Start',exact:true})).toBeEnabled();
+  await expect(dialog.getByRole('status')).toContainText('stopped');
+  await expect(dialog.getByRole('alert')).toHaveText('');
+  await dialog.getByRole('button',{name:'Start',exact:true}).click();
+  await expect(dialog.getByRole('button',{name:'Stop',exact:true})).toBeEnabled();
+  await page.evaluate(()=>{window.__apbsResult='error:APBS solver failed';});
+  await expect(dialog.getByRole('alert')).toContainText('APBS solver failed');
+  await expect(dialog.getByRole('button',{name:'Start',exact:true})).toBeEnabled();
+  await dialog.getByRole('button',{name:'Start',exact:true}).click();
+  await expect(dialog.getByRole('button',{name:'Stop',exact:true})).toBeEnabled();
+  await page.evaluate(()=>{window.__apbsResult='complete:10';});
+  await expect(dialog).not.toBeVisible();
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='inspector_request'&&c.args.tool==='selection_history'&&c.args.args.action==='remember'&&c.args.args.expression==='name CA').length)).toBe(1);
+  await open();
+  await expect(dialog.getByLabel('Selection',{exact:true})).not.toBeChecked();
+  await expect(dialog.getByLabel('Selection code',{exact:true})).toHaveValue('');
+  await expect(dialog.getByLabel('Potential name',{exact:true})).toHaveValue('pot_Probe');
+  await expect(dialog.getByLabel('Method',{exact:true})).toHaveValue('pdb2pqr');
+  const count = (await starts()).length;
+  await page.evaluate(async()=>{window.__apbsSceneChanged();await mutate('get_snapshot');});
+  await dialog.getByRole('button',{name:'Start',exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('active scene changed');
+  expect((await starts())).toHaveLength(count);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri APBS gates missing tools and cancels a detached pending start by request ID', async ({page}) => {
+  const errors=await openShell(page, {}, {apbsDialogs:true});
+  const dialog=page.locator('#reference-dialog');
+  const open=()=>page.evaluate(()=>showReferenceDialog('APBS elepot calculation'));
+  await page.evaluate(()=>{window.__apbsSettings.pdb2pqrExecutable='';});
+  await open();
+  await expect(dialog.getByRole('button',{name:'Start',exact:true})).toBeDisabled();
+  await expect(dialog.getByRole('alert')).toContainText('PDB2PQR executable');
+  await dialog.getByLabel('Method',{exact:true}).selectOption('internal');
+  await expect(dialog.getByRole('button',{name:'Start',exact:true})).toBeEnabled();
+  await expect(dialog.getByLabel('Force field',{exact:true})).toBeHidden();
+  await expect(dialog.getByLabel('Use hydrogen atoms',{exact:true})).toBeVisible();
+  await page.evaluate(()=>{window.__apbsHoldStart=true;});
+  await dialog.getByRole('button',{name:'Start',exact:true}).click();
+  await expect(dialog.getByRole('button',{name:'Stop',exact:true})).toBeDisabled();
+  await expect.poll(()=>page.evaluate(()=>typeof window.__apbsReleaseStart)).toBe('function');
+  await page.evaluate(()=>showReferenceDialog('About config'));
+  await page.evaluate(()=>window.__apbsReleaseStart());
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='cancel_apbs_calculation').length)).toBeGreaterThan(0);
+  await expect.poll(()=>page.evaluate(()=>window.__apbsJob)).toBeNull();
+  await expect(dialog).toBeVisible();
+  expect(await page.evaluate(()=>{const calls=window.__shellCalls;return calls.find(c=>c.command==='start_apbs_calculation').args.input.requestId===calls.find(c=>c.command==='cancel_apbs_calculation').args.requestId;})).toBe(true);
   expect(errors).toEqual([]);
 });

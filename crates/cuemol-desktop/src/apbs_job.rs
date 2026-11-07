@@ -1,15 +1,44 @@
+use std::collections::VecDeque;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use crate::{GuiApbsChargeMethod, GuiApbsPaths};
 
 static NEXT_APBS_JOB_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Default)]
+pub(crate) struct ApbsProgress {
+    phase: &'static str,
+    lines: VecDeque<String>,
+}
+
+impl ApbsProgress {
+    pub(crate) fn status(&self) -> &'static str {
+        match self.phase {
+            "pdb2pqr" => "Running PDB2PQR...",
+            "APBS" => "Running APBS...",
+            _ => "Preparing calculation...",
+        }
+    }
+
+    pub(crate) fn log(&self) -> String {
+        self.lines.iter().cloned().collect::<Vec<_>>().join("\n")
+    }
+
+    fn line(&mut self, value: &[u8]) {
+        if self.lines.len() == 500 {
+            self.lines.pop_front();
+        }
+        self.lines
+            .push_back(String::from_utf8_lossy(value).into_owned());
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ApbsProcessTask {
@@ -36,11 +65,20 @@ pub(crate) fn create_apbs_work_dir() -> Result<PathBuf, String> {
     Ok(path)
 }
 
+#[cfg(test)]
 pub(crate) fn run_apbs_process(
     task: ApbsProcessTask,
     cancel: Arc<AtomicBool>,
 ) -> Result<ApbsProcessOutput, String> {
-    let result = run_apbs_process_inner(&task, &cancel);
+    run_apbs_process_with_progress(task, cancel, Arc::new(Mutex::new(ApbsProgress::default())))
+}
+
+pub(crate) fn run_apbs_process_with_progress(
+    task: ApbsProcessTask,
+    cancel: Arc<AtomicBool>,
+    progress: Arc<Mutex<ApbsProgress>>,
+) -> Result<ApbsProcessOutput, String> {
+    let result = run_apbs_process_inner(&task, &cancel, &progress);
     if result.is_err() {
         let _ = fs::remove_dir_all(&task.work_dir);
     }
@@ -50,6 +88,7 @@ pub(crate) fn run_apbs_process(
 fn run_apbs_process_inner(
     task: &ApbsProcessTask,
     cancel: &Arc<AtomicBool>,
+    progress: &Arc<Mutex<ApbsProgress>>,
 ) -> Result<ApbsProcessOutput, String> {
     if task.apbs_executable.trim().is_empty() {
         return Err("APBS executable path is required".to_string());
@@ -75,6 +114,7 @@ fn run_apbs_process_inner(
             &args,
             &task.work_dir,
             cancel,
+            progress,
         )?);
         ensure_nonempty_file(&task.paths.pqr_path, "pdb2pqr did not produce a PQR file")?;
     }
@@ -85,6 +125,7 @@ fn run_apbs_process_inner(
         &[task.paths.input_path.to_string_lossy().into_owned()],
         &task.work_dir,
         cancel,
+        progress,
     )?);
     if !task.paths.dx_path.is_file() {
         let name = task
@@ -115,7 +156,18 @@ fn run_command_cancelable(
     args: &[String],
     work_dir: &std::path::Path,
     cancel: &Arc<AtomicBool>,
+    progress: &Arc<Mutex<ApbsProgress>>,
 ) -> Result<String, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("APBS calculation cancelled".into());
+    }
+    if let Ok(mut state) = progress.lock() {
+        state.phase = if label == "pdb2pqr" {
+            "pdb2pqr"
+        } else {
+            "APBS"
+        };
+    }
     let mut command = Command::new(executable);
     command
         .args(args)
@@ -133,8 +185,10 @@ fn run_command_cancelable(
         .stderr
         .take()
         .ok_or_else(|| format!("failed to capture {label} errors"))?;
-    let stdout_reader = thread::spawn(move || read_process_stream(stdout));
-    let stderr_reader = thread::spawn(move || read_process_stream(stderr));
+    let stdout_progress = Arc::clone(progress);
+    let stderr_progress = Arc::clone(progress);
+    let stdout_reader = thread::spawn(move || read_process_stream(stdout, &stdout_progress));
+    let stderr_reader = thread::spawn(move || read_process_stream(stderr, &stderr_progress));
 
     let status = loop {
         if cancel.load(Ordering::Relaxed) {
@@ -177,7 +231,8 @@ fn run_command_cancelable(
     Ok(output)
 }
 
-fn read_process_stream(mut stream: impl Read) -> Vec<u8> {
+fn read_process_stream(mut stream: impl Read, progress: &Arc<Mutex<ApbsProgress>>) -> Vec<u8> {
+    let mut line = Vec::new();
     let mut output = Vec::new();
     let mut block = [0u8; 8192];
     while let Ok(n) = stream.read(&mut block) {
@@ -186,6 +241,22 @@ fn read_process_stream(mut stream: impl Read) -> Vec<u8> {
         }
         let keep = n.min((1024 * 1024usize).saturating_sub(output.len()));
         output.extend_from_slice(&block[..keep]);
+        for byte in &block[..n] {
+            if *byte == b'\n' || line.len() == 4096 {
+                if let Ok(mut state) = progress.lock() {
+                    state.line(&line);
+                }
+                line.clear();
+            }
+            if *byte != b'\n' {
+                line.push(*byte);
+            }
+        }
+    }
+    if !line.is_empty() {
+        if let Ok(mut state) = progress.lock() {
+            state.line(&line);
+        }
     }
     output
 }
@@ -251,6 +322,34 @@ mod tests {
         assert!(output.log.contains("apbs complete"));
         assert!(output.dx_path.exists());
         fs::remove_dir_all(work_dir).unwrap();
+    }
+
+    #[test]
+    fn streams_progress_before_completion_and_bounds_unterminated_lines() {
+        let progress = Arc::new(Mutex::new(ApbsProgress::default()));
+        let (read, mut write) = std::os::unix::net::UnixStream::pair().unwrap();
+        let worker_progress = Arc::clone(&progress);
+        let worker = thread::spawn(move || read_process_stream(read, &worker_progress));
+        use std::io::Write;
+        write.write_all(b"first phase\n").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !progress.lock().unwrap().log().contains("first phase") {
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!worker.is_finished());
+        for index in 0..600 {
+            writeln!(write, "line {index}").unwrap();
+        }
+        write.write_all(&vec![b'x'; 9000]).unwrap();
+        drop(write);
+        let retained = worker.join().unwrap();
+        assert!(retained.starts_with(b"first phase"));
+        let progress = progress.lock().unwrap();
+        assert_eq!(progress.lines.len(), 500);
+        assert!(!progress.log().contains("first phase"));
+        assert!(progress.lines.iter().all(|line| line.len() <= 4096));
+        assert_eq!(progress.lines.back().unwrap().len(), 808);
     }
 
     #[test]

@@ -30,9 +30,7 @@ pub(crate) use system_path::{open_system_path, reveal_system_path};
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 mod apbs_job;
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-pub(crate) use apbs_job::{
-    create_apbs_work_dir, run_apbs_process, ApbsProcessOutput, ApbsProcessTask,
-};
+pub(crate) use apbs_job::{create_apbs_work_dir, ApbsProcessOutput, ApbsProcessTask};
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 mod pov_job;

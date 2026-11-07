@@ -19,10 +19,10 @@ use cuemol_command::navigation::{AtomHit, Navigation, Tool as ViewportTool};
 
 use crate::{
     collect_pov_labels, collect_scene_pov_labels, create_apbs_work_dir, create_pov_work_dir,
-    overlay_pov_labels, run_apbs_process, run_pov_process, run_pov_process_with_poll, AnimKind,
-    ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions,
-    GuiApbsPaths, GuiAtomLabel, GuiLoadedPath, GuiPovSceneOptions, GuiStructObject,
-    PovProcessOptions, PovProcessOutput, PovProcessTask,
+    overlay_pov_labels, run_pov_process, run_pov_process_with_poll, AnimKind, ApbsProcessOutput,
+    ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions, GuiApbsPaths,
+    GuiAtomLabel, GuiLoadedPath, GuiPovSceneOptions, GuiStructObject, PovProcessOptions,
+    PovProcessOutput, PovProcessTask,
 };
 use cuemol_anim::{
     AnimMgr, AnimMotion, CamMotion, MolAnim, NoopAnimObj, ShowHideAnim, SimpleSpin, SlideInOutAnim,
@@ -1555,18 +1555,7 @@ struct GuiApplication {
     surface: cuemol_ui::surface::SurfaceDialog,
     surface_density: f64,
     surface_probe_radius: f64,
-    apbs_target: Option<cuemol_core::Uid>,
-    apbs_use_selection: bool,
-    apbs_selection: String,
-    apbs_name: String,
-    apbs_charge_method: GuiApbsChargeMethod,
-    apbs_force_field: String,
-    apbs_use_hydrogen: bool,
-    apbs_use_npbe: bool,
-    apbs_temperature: f64,
-    apbs_grid_spacing: f64,
-    apbs_water_dielectric: f64,
-    apbs_protein_dielectric: f64,
+    apbs_editor: cuemol_ui::apbs::ApbsDialog,
     apbs_executable: String,
     pdb2pqr_executable: String,
     apbs_job: Option<NativeApbsJob>,
@@ -2136,6 +2125,9 @@ struct AnimationMovieTask {
 struct NativeApbsJob {
     receiver: mpsc::Receiver<std::result::Result<ApbsProcessOutput, String>>,
     cancel: Arc<AtomicBool>,
+    progress: Arc<std::sync::Mutex<crate::apbs_job::ApbsProgress>>,
+    dialog_generation: Option<u64>,
+    selection: String,
     potential_name: String,
     scene_uid: cuemol_core::Uid,
     started: Instant,
@@ -4835,18 +4827,7 @@ impl GuiApplication {
             surface: cuemol_ui::surface::SurfaceDialog::default(),
             surface_density: 1.0,
             surface_probe_radius: 1.4,
-            apbs_target: None,
-            apbs_use_selection: false,
-            apbs_selection: String::new(),
-            apbs_name: String::new(),
-            apbs_charge_method: GuiApbsChargeMethod::Pdb2pqr,
-            apbs_force_field: "charmm".to_string(),
-            apbs_use_hydrogen: false,
-            apbs_use_npbe: false,
-            apbs_temperature: 298.15,
-            apbs_grid_spacing: 1.0,
-            apbs_water_dielectric: 78.54,
-            apbs_protein_dielectric: 2.0,
+            apbs_editor: Default::default(),
             apbs_executable: "apbs".to_string(),
             pdb2pqr_executable: "pdb2pqr".to_string(),
             apbs_job: None,
@@ -6638,14 +6619,18 @@ impl GuiApplication {
                 && self.selected_object.is_none()
                 && self.workspace_aux_selection.is_none()
                 && self.workspace_multiple_selection.is_empty();
-            let scene_response = cuemol_ui::shell::tree_row(
-                ui,
-                &scene_label,
-                cuemol_ui::shell::Icon::File,
-                selected_scene,
-                None,
-                None,
-            );
+            let scene_response = ui
+                .push_id(("workspace-scene", scene.uid.get()), |ui| {
+                    cuemol_ui::shell::tree_row(
+                        ui,
+                        &scene_label,
+                        cuemol_ui::shell::Icon::File,
+                        selected_scene,
+                        None,
+                        None,
+                    )
+                })
+                .inner;
             if scene_response.clicked() {
                 self.activate_workspace_scene(scene.uid, camera);
                 self.workspace_multiple_selection.clear();
@@ -17738,25 +17723,29 @@ impl GuiApplication {
             let _ = request.reply.send(Some(serde_json::json!({"jsonrpc":"2.0","id":request.message["id"],"result":{"content":[{"type":"text","text":payload.to_string()}],"isError":true}})));
             return;
         }
-        self.apbs_target = args["objId"].as_u64().map(cuemol_core::Uid::new);
-        self.apbs_selection = args["selection"].as_str().unwrap_or("*").to_string();
-        self.apbs_use_selection = true;
-        self.apbs_name = args["name"].as_str().unwrap_or("").to_string();
-        self.apbs_charge_method = if args["method"] == "internal" {
+        self.apbs_editor.object = args["objId"].as_u64().map(cuemol_core::Uid::new);
+        self.apbs_editor.selection = args["selection"].as_str().unwrap_or("*").to_string();
+        self.apbs_editor.use_selection = true;
+        self.apbs_editor.name = args["name"].as_str().unwrap_or("").to_string();
+        self.apbs_editor.options.charge_method = if args["method"] == "internal" {
             GuiApbsChargeMethod::Internal
         } else {
             GuiApbsChargeMethod::Pdb2pqr
         };
-        if let Some(value) = args["forceField"].as_str() {
-            self.apbs_force_field = value.to_string();
-        }
-        self.apbs_temperature = args["temperature"].as_f64().unwrap_or(298.15);
-        self.apbs_grid_spacing = args["gridSpacing"].as_f64().unwrap_or(1.);
-        self.apbs_water_dielectric = args["waterDielec"].as_f64().unwrap_or(78.54);
-        self.apbs_protein_dielectric = args["protDielec"].as_f64().unwrap_or(2.);
-        self.apbs_use_hydrogen = args["useHydrogen"] == true;
-        self.apbs_use_npbe = args["nonLinear"] == true;
-        self.start_apbs_calculation();
+        self.apbs_editor.force_field = args["forceField"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                cuemol_desktop_core::preferences::ToolPreferences::from_state(&self.state)
+                    .force_field
+            });
+        self.apbs_editor.options.temperature = args["temperature"].as_f64().unwrap_or(298.15);
+        self.apbs_editor.options.grid_spacing = args["gridSpacing"].as_f64().unwrap_or(1.);
+        self.apbs_editor.options.solvent_dielectric = args["waterDielec"].as_f64().unwrap_or(78.54);
+        self.apbs_editor.options.solute_dielectric = args["protDielec"].as_f64().unwrap_or(2.);
+        self.apbs_editor.options.use_hydrogen = args["useHydrogen"] == true;
+        self.apbs_editor.options.use_npbe = args["nonLinear"] == true;
+        self.start_apbs_calculation(false);
         if let Some(job) = &mut self.apbs_job {
             job.command = Some(request);
         } else {
@@ -17765,43 +17754,38 @@ impl GuiApplication {
         }
     }
 
-    fn start_apbs_calculation(&mut self) {
+    fn start_apbs_calculation(&mut self, from_dialog: bool) {
         if self.apbs_job.is_some() {
             return;
         }
-        let Some(object_uid) = self.apbs_target else {
-            self.set_status("No APBS target selected");
+        self.apbs_editor.error.clear();
+        self.apbs_editor.status.clear();
+        self.apbs_editor.log.clear();
+        if from_dialog {
+            if let Some(error) = self.apbs_editor.validation_error(&self.state) {
+                self.apbs_failed(error.to_string());
+                return;
+            }
+        }
+        let Some(object_uid) = self.apbs_editor.object else {
+            self.apbs_failed("No APBS target selected".into());
             return;
         };
-        self.state
-            .put_config_value("apbs:force_field", self.apbs_force_field.clone());
-        self.state.put_config_value(
-            "cuemol2.ui.apbs-exe-path",
-            self.apbs_executable.trim().to_string(),
-        );
-        self.state.put_config_value(
-            "cuemol2.ui.pdb2pqr-py-path",
-            self.pdb2pqr_executable.trim().to_string(),
-        );
-        let config_path = PathBuf::from(self.config_path.trim());
-        if config_path.is_absolute() {
-            let _ = self.state.save_config_file(config_path);
-        }
-        let potential_name = if self.apbs_name.trim().is_empty() {
+        let potential_name = if self.apbs_editor.name.trim().is_empty() {
             match self.state.suggested_apbs_potential_name(object_uid) {
                 Ok(name) => name,
                 Err(error) => {
-                    self.set_error(error);
+                    self.apbs_failed(error.to_string());
                     return;
                 }
             }
         } else {
-            self.apbs_name.trim().to_string()
+            self.apbs_editor.name.trim().to_string()
         };
         let work_dir = match create_apbs_work_dir() {
             Ok(path) => path,
             Err(error) => {
-                self.set_status(error);
+                self.apbs_failed(error);
                 return;
             }
         };
@@ -17811,19 +17795,19 @@ impl GuiApplication {
             input_path: work_dir.join("apbs_tmp.in"),
             dx_path: work_dir.join("apbs_pot.dx"),
         };
-        let selection = if self.apbs_use_selection {
-            self.apbs_selection.trim().to_string()
+        let selection = if self.apbs_editor.use_selection {
+            self.apbs_editor.selection.trim().to_string()
         } else {
             String::new()
         };
         let options = GuiApbsOptions {
-            charge_method: self.apbs_charge_method,
-            use_hydrogen: self.apbs_use_hydrogen,
-            use_npbe: self.apbs_use_npbe,
-            temperature: self.apbs_temperature,
-            grid_spacing: self.apbs_grid_spacing,
-            solvent_dielectric: self.apbs_water_dielectric,
-            solute_dielectric: self.apbs_protein_dielectric,
+            charge_method: self.apbs_editor.options.charge_method,
+            use_hydrogen: self.apbs_editor.options.use_hydrogen,
+            use_npbe: self.apbs_editor.options.use_npbe,
+            temperature: self.apbs_editor.options.temperature,
+            grid_spacing: self.apbs_editor.options.grid_spacing,
+            solvent_dielectric: self.apbs_editor.options.solvent_dielectric,
+            solute_dielectric: self.apbs_editor.options.solute_dielectric,
         };
         let summary = match self
             .state
@@ -17832,38 +17816,46 @@ impl GuiApplication {
             Ok(summary) => summary,
             Err(error) => {
                 let _ = fs::remove_dir_all(work_dir);
-                self.set_error(error);
+                self.apbs_failed(error.to_string());
                 return;
             }
         };
         let task = ApbsProcessTask {
             apbs_executable: self.apbs_executable.clone(),
             pdb2pqr_executable: self.pdb2pqr_executable.clone(),
-            force_field: self.apbs_force_field.clone(),
-            charge_method: self.apbs_charge_method,
+            force_field: self.apbs_editor.force_field.clone(),
+            charge_method: self.apbs_editor.options.charge_method,
             paths,
             work_dir,
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
+        let progress = Arc::new(std::sync::Mutex::new(
+            crate::apbs_job::ApbsProgress::default(),
+        ));
+        let worker_progress = Arc::clone(&progress);
         let (sender, receiver) = mpsc::channel();
         let failure_work_dir = task.work_dir.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("cuemol-apbs".to_string())
             .spawn(move || {
-                let _ = sender.send(run_apbs_process(task, worker_cancel));
+                let _ = sender.send(crate::apbs_job::run_apbs_process_with_progress(
+                    task,
+                    worker_cancel,
+                    worker_progress,
+                ));
             })
         {
             let _ = fs::remove_dir_all(failure_work_dir);
-            self.set_status(format!("Failed to start APBS worker: {error}"));
+            self.apbs_failed(format!("Failed to start APBS worker: {error}"));
             return;
-        }
-        if self.apbs_use_selection && !selection.is_empty() {
-            self.remember_selection_history(&selection);
         }
         self.apbs_job = Some(NativeApbsJob {
             receiver,
             cancel,
+            progress,
+            dialog_generation: from_dialog.then_some(self.apbs_editor.generation),
+            selection,
             potential_name,
             scene_uid: self
                 .state
@@ -17882,25 +17874,29 @@ impl GuiApplication {
     }
 
     fn open_apbs_tool(&mut self) {
-        let objects = self.state.active_object_summaries();
-        self.apbs_target = self
-            .selected_object
-            .filter(|uid| objects.iter().any(|object| object.uid == *uid))
-            .or_else(|| objects.first().map(|object| object.uid));
-        if let Some(target) = self.apbs_target {
-            self.apbs_selection = self.selection_text.clone();
-            self.apbs_use_selection = !self.apbs_selection.trim().is_empty();
-            self.apbs_name = self
-                .state
-                .suggested_apbs_potential_name(target)
+        if self.apbs_job.is_none() {
+            self.apbs_executable = cuemol_command::external::resolve(&self.state, "apbs")
+                .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            self.pdb2pqr_executable = cuemol_command::external::resolve(&self.state, "pdb2pqr")
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let field = self.state.config_value("apbs:force_field");
+            self.apbs_editor.opened(&self.state, &field);
         }
-        self.tool_dialog = Some("APBS elepot calculation".to_string());
+        self.tool_dialog = Some(cuemol_ui::apbs::TITLE.into());
+    }
+
+    fn apbs_failed(&mut self, error: String) {
+        self.apbs_editor.error = error.clone();
+        self.apbs_editor.status.clear();
+        self.set_status(error);
     }
 
     fn cancel_apbs_calculation(&mut self) {
         if let Some(job) = &self.apbs_job {
             job.cancel.store(true, Ordering::Relaxed);
+            self.apbs_editor.status = "Stopping APBS calculation...".into();
             self.set_status("Stopping APBS calculation...");
         }
     }
@@ -17909,6 +17905,12 @@ impl GuiApplication {
         let Some(mut job) = self.apbs_job.take() else {
             return;
         };
+        if let Ok(progress) = job.progress.lock() {
+            self.apbs_editor.log = progress.log();
+            if !job.cancel.load(Ordering::Relaxed) {
+                self.apbs_editor.status = progress.status().into();
+            }
+        }
         let is_agent = job.agent_reply.is_some();
         let cancelled_agent = job.agent_reply.as_ref().is_some_and(|r| r.is_closed())
             || job
@@ -17923,16 +17925,23 @@ impl GuiApplication {
             Err(mpsc::TryRecvError::Empty) => self.apbs_job = Some(job),
             Err(mpsc::TryRecvError::Disconnected) => {
                 job.reply(Err("APBS worker disconnected".into()));
-                self.set_status("APBS worker disconnected");
+                self.apbs_failed("APBS worker disconnected".into());
             }
             Ok(Err(error)) => {
                 job.reply(Err(error.clone()));
-                self.set_status(error);
+                if job.cancel.load(Ordering::Relaxed) {
+                    self.apbs_editor.error.clear();
+                    self.apbs_editor.status = "APBS calculation stopped.".into();
+                    self.set_status("APBS calculation stopped.");
+                } else {
+                    self.apbs_failed(error);
+                }
             }
             Ok(Ok(output)) => {
                 if job.cancel.load(Ordering::Relaxed) {
                     let _ = fs::remove_dir_all(&output.work_dir);
                     job.reply(Err("Cancelled".into()));
+                    self.apbs_editor.status = "APBS calculation stopped.".into();
                     return;
                 }
 
@@ -17972,7 +17981,15 @@ impl GuiApplication {
                             map_uid,
                             renderer_uid: None,
                         });
-                        self.tool_dialog = None;
+                        if !job.selection.is_empty() {
+                            self.remember_selection_history(&job.selection);
+                        }
+                        if job.dialog_generation == Some(self.apbs_editor.generation)
+                            && self.tool_dialog.as_deref() == Some(cuemol_ui::apbs::TITLE)
+                        {
+                            self.tool_dialog = None;
+                        }
+                        self.apbs_editor.status.clear();
                         self.rebuild_snapshot();
                         if is_agent {
                             self.agent.changed_scene = true;
@@ -17986,7 +18003,7 @@ impl GuiApplication {
                     }
                     Err(error) => {
                         job.reply(Err(error.to_string()));
-                        self.set_error(error);
+                        self.apbs_failed(error.to_string());
                     }
                 }
             }
@@ -19054,14 +19071,18 @@ impl GuiApplication {
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| tool.into())
         };
-        self.apbs_executable = resolve("apbs");
-        self.pdb2pqr_executable = resolve("pdb2pqr");
+        self.apbs_executable = cuemol_command::external::resolve(&self.state, "apbs")
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.pdb2pqr_executable = cuemol_command::external::resolve(&self.state, "pdb2pqr")
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
         self.pov_render_settings.executable = resolve("povray");
         self.animation_render_settings.povray_executable = resolve("povray");
         self.animation_render_settings.ffmpeg_executable = resolve("ffmpeg");
         let tools = cuemol_desktop_core::preferences::ToolPreferences::from_state(&self.state);
         self.pov_render_settings.include_dir = tools.povray_include;
-        self.apbs_force_field = tools.force_field;
+        self.apbs_editor.force_field = tools.force_field;
     }
 
     fn persist_config_state(&self) -> std::result::Result<(), String> {
@@ -19245,7 +19266,7 @@ impl GuiApplication {
         }
         let force_field = self.state.config_value("apbs:force_field");
         if !force_field.is_empty() {
-            self.apbs_force_field = force_field;
+            self.apbs_editor.force_field = force_field;
         }
         let apbs_executable = self.state.config_value("cuemol2.ui.apbs-exe-path");
         if !apbs_executable.trim().is_empty() {
@@ -23987,6 +24008,10 @@ impl GuiApplication {
         let Some(title) = self.tool_dialog.clone() else {
             return;
         };
+        if title == cuemol_ui::apbs::TITLE {
+            self.apbs_dialog(ctx);
+            return;
+        }
         if title == "Native rendering" {
             return;
         }
@@ -24024,7 +24049,6 @@ impl GuiApplication {
                 match title.as_str() {
                     "Mol bond editor" => self.bond_editor_tool_ui(ui),
                     "MolClient tools" => self.mol_client_tool_ui(ui),
-                    "APBS elepot calculation" => self.apbs_tool_ui(ui),
                     "About plugins" => self.plugin_tool_ui(ui),
                     "About config" => self.config_tool_ui(ui),
                     "Addon manager" => self.addon_tool_ui(ui),
@@ -24035,7 +24059,6 @@ impl GuiApplication {
                     }
                 }
                 let close_enabled = match title.as_str() {
-                    "APBS elepot calculation" => self.apbs_job.is_none(),
                     "POV-Ray rendering" => self.pov_render_job.is_none(),
                     _ => true,
                 };
@@ -24046,8 +24069,7 @@ impl GuiApplication {
                     close = true;
                 }
             });
-        let blocking_job = (title == "APBS elepot calculation" && self.apbs_job.is_some())
-            || (title == "POV-Ray rendering" && self.pov_render_job.is_some());
+        let blocking_job = title == "POV-Ray rendering" && self.pov_render_job.is_some();
         if (!open || close) && !blocking_job {
             if title == "Mol bond editor" {
                 self.bond_picker_target = None;
@@ -24407,157 +24429,36 @@ impl GuiApplication {
         }
     }
 
-    fn apbs_tool_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label("Calculate electrostatic potential by APBS:");
-        let objects = self.state.active_object_summaries();
-        if objects.is_empty() {
-            ui.weak("No molecular object is loaded.");
-            return;
-        }
-        if !objects
-            .iter()
-            .any(|object| Some(object.uid) == self.apbs_target)
-        {
-            self.apbs_target = self
-                .selected_object
-                .filter(|uid| objects.iter().any(|object| object.uid == *uid))
-                .or_else(|| objects.first().map(|object| object.uid));
-            if let Some(target) = self.apbs_target {
-                self.apbs_name = self
-                    .state
-                    .suggested_apbs_potential_name(target)
-                    .unwrap_or_default();
-            }
-        }
+    fn apbs_dialog(&mut self, ctx: &egui::Context) {
         let running = self.apbs_job.is_some();
-        ui.add_enabled_ui(!running, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("APBS exe path:");
-                ui.text_edit_singleline(&mut self.apbs_executable);
-            });
-            let previous_target = self.apbs_target;
-            let selected_name = objects
-                .iter()
-                .find(|object| Some(object.uid) == self.apbs_target)
-                .map_or("(none)", |object| object.name.as_str());
-            egui::ComboBox::from_label("Target molecule:")
-                .selected_text(selected_name)
-                .show_ui(ui, |ui| {
-                    for object in &objects {
-                        ui.selectable_value(&mut self.apbs_target, Some(object.uid), &object.name);
-                    }
-                });
-            if self.apbs_target != previous_target {
-                if let Some(target) = self.apbs_target {
-                    self.apbs_selection = self
-                        .state
-                        .molecule_selection_text(target)
-                        .unwrap_or_default()
-                        .to_string();
-                    self.apbs_name = self
-                        .state
-                        .suggested_apbs_potential_name(target)
-                        .unwrap_or_default();
-                }
-            }
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.apbs_use_selection, "Selection:");
-                ui.add_enabled(
-                    self.apbs_use_selection,
-                    egui::TextEdit::singleline(&mut self.apbs_selection)
-                        .desired_width(ui.available_width()),
+        let stopping = self
+            .apbs_job
+            .as_ref()
+            .is_some_and(|job| job.cancel.load(Ordering::Relaxed));
+        let mut open = true;
+        let mut action = None;
+        egui::Window::new(cuemol_ui::apbs::TITLE)
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(470.)
+            .show(ctx, |ui| {
+                action = self.apbs_editor.show(
+                    ui,
+                    &self.state,
+                    self.snapshot_revision,
+                    running,
+                    stopping,
+                    Some((&self.apbs_executable, &self.pdb2pqr_executable)),
                 );
             });
-            ui.horizontal(|ui| {
-                ui.label("Elepot name:");
-                ui.text_edit_singleline(&mut self.apbs_name);
-            });
-            ui.separator();
-            ui.label("Charge calculation method");
-            ui.radio_value(
-                &mut self.apbs_charge_method,
-                GuiApbsChargeMethod::Pdb2pqr,
-                "Use PDB2PQR",
-            );
-            ui.add_enabled_ui(
-                self.apbs_charge_method == GuiApbsChargeMethod::Pdb2pqr,
-                |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("pdb2pqr.py path:");
-                        ui.text_edit_singleline(&mut self.pdb2pqr_executable);
-                    });
-                    egui::ComboBox::from_label("Force field:")
-                        .selected_text(&self.apbs_force_field)
-                        .show_ui(ui, |ui| {
-                            for force_field in ["charmm", "amber", "tyl06", "peoepb", "swanson"] {
-                                ui.selectable_value(
-                                    &mut self.apbs_force_field,
-                                    force_field.to_string(),
-                                    force_field,
-                                );
-                            }
-                        });
-                },
-            );
-            ui.radio_value(
-                &mut self.apbs_charge_method,
-                GuiApbsChargeMethod::Internal,
-                "Use internal method",
-            );
-            ui.add_enabled(
-                self.apbs_charge_method == GuiApbsChargeMethod::Internal,
-                egui::Checkbox::new(&mut self.apbs_use_hydrogen, "Use hydrogen atoms"),
-            );
-            ui.separator();
-            ui.label("APBS Options");
-            ui.checkbox(&mut self.apbs_use_npbe, "Solve non-linear PBE");
-            ui.horizontal(|ui| {
-                ui.label("Temperature (K)");
-                ui.add(
-                    egui::DragValue::new(&mut self.apbs_temperature)
-                        .range(0.1..=1000.0)
-                        .speed(0.1),
-                );
-                ui.label("Max grid size (Å)");
-                ui.add(
-                    egui::DragValue::new(&mut self.apbs_grid_spacing)
-                        .range(0.1..=10.0)
-                        .speed(0.1),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.label("Water dielectric");
-                ui.add(
-                    egui::DragValue::new(&mut self.apbs_water_dielectric)
-                        .range(0.1..=200.0)
-                        .speed(0.1),
-                );
-                ui.label("Protein dielectric");
-                ui.add(
-                    egui::DragValue::new(&mut self.apbs_protein_dielectric)
-                        .range(0.1..=200.0)
-                        .speed(0.1),
-                );
-            });
-        });
-        if running {
-            ui.spinner();
-            ui.label("Running APBS...");
-            if ui.button("Stop").clicked() {
-                self.cancel_apbs_calculation();
-            }
-        } else if ui
-            .add_enabled(
-                self.apbs_target.is_some()
-                    && !self.apbs_name.trim().is_empty()
-                    && !self.apbs_executable.trim().is_empty()
-                    && (self.apbs_charge_method == GuiApbsChargeMethod::Internal
-                        || !self.pdb2pqr_executable.trim().is_empty()),
-                egui::Button::new("Start"),
-            )
-            .clicked()
-        {
-            self.start_apbs_calculation();
+        match action {
+            Some(cuemol_ui::apbs::Action::Start) => self.start_apbs_calculation(true),
+            Some(cuemol_ui::apbs::Action::Stop) => self.cancel_apbs_calculation(),
+            Some(cuemol_ui::apbs::Action::Close) => open = false,
+            None => {}
+        }
+        if !open && !running {
+            self.tool_dialog = None;
         }
     }
 
@@ -36370,11 +36271,51 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&script, permissions).unwrap();
 
-        app.apbs_target = Some(object_uid);
-        app.apbs_name = "pot_source".to_string();
-        app.apbs_charge_method = GuiApbsChargeMethod::Internal;
+        app.state.put_config_value(
+            "cuemol2.ui.apbs-exe-path",
+            script.to_string_lossy().into_owned(),
+        );
+        app.state.put_config_value("apbs:force_field", "amber");
+        app.selection_text = "name CB".into();
+        app.open_apbs_tool();
+        assert_eq!(app.apbs_editor.object, Some(object_uid));
+        assert_eq!(app.apbs_editor.options, GuiApbsOptions::default());
+        assert_eq!(app.apbs_editor.force_field, "amber");
+        assert_eq!(app.apbs_editor.name, "pot_source");
+        assert!(!app.apbs_editor.use_selection);
+        assert!(app.apbs_editor.selection.is_empty());
+        let saved_state = app.state.clone();
+        app.apbs_editor.options.charge_method = GuiApbsChargeMethod::Internal;
+        app.apbs_editor.force_field = "charmm".into();
+        app.apbs_editor.use_selection = true;
+        app.apbs_editor.selection = "invalid (((".into();
         app.apbs_executable = script.to_string_lossy().into_owned();
-        app.start_apbs_calculation();
+        app.start_apbs_calculation(true);
+        assert!(app.apbs_job.is_none());
+        assert!(!app.apbs_editor.error.is_empty());
+        assert!(app.error_alert.is_none());
+        assert!(saved_state.same_undo_state(&app.state));
+        assert!(app.undo_stack.is_empty());
+        assert!(app.selection_history.is_empty());
+        assert_eq!(app.state.config_value("apbs:force_field"), "amber");
+        app.apbs_editor.scene = None;
+        app.apbs_editor.selection = "chain A".into();
+        app.start_apbs_calculation(true);
+        assert!(app.apbs_editor.error.contains("active scene changed"));
+        app.open_apbs_tool();
+        assert_eq!(app.apbs_editor.options, GuiApbsOptions::default());
+        assert_eq!(app.apbs_editor.force_field, "amber");
+        assert!(!app.apbs_editor.use_selection);
+        assert!(app.apbs_editor.selection.is_empty());
+        assert!(app.apbs_editor.error.is_empty());
+        app.apbs_editor.options.charge_method = GuiApbsChargeMethod::Internal;
+        app.apbs_editor.use_selection = true;
+        app.apbs_editor.selection = "chain A".into();
+        app.apbs_editor.name.clear();
+        app.start_apbs_calculation(true);
+        assert!(app.apbs_job.is_some(), "{}", app.apbs_editor.error);
+        assert!(app.selection_history.is_empty());
+        app.tool_dialog = Some("About config".into());
         let deadline = Instant::now() + Duration::from_secs(3);
         while app.apbs_job.is_some() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
@@ -36386,7 +36327,15 @@ mod tests {
         assert_eq!(maps[0].name, "pot_source");
         assert_eq!(maps[0].class_name, "ElePotMap");
         assert_eq!(maps[0].renderers[0].renderer_type, "*unitcell");
-        assert!(app.tool_dialog.is_none());
+        assert_eq!(app.tool_dialog.as_deref(), Some("About config"));
+        assert!(app.apbs_editor.log.contains("complete"));
+        assert_eq!(app.selection_history, ["chain A"]);
+        assert_eq!(app.undo_stack.len(), 1);
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert!(app.state.active_density_map_summaries().is_empty());
+        app.redo(&mut camera);
+        assert_eq!(app.state.active_density_map_summaries().len(), 1);
         fs::remove_file(script).unwrap();
     }
 
@@ -38779,6 +38728,39 @@ mod tests {
                 },
             );
         }
+    }
+
+    #[test]
+    fn workspace_scene_rows_with_equal_names_have_distinct_widget_ids() {
+        let ctx = egui::Context::default();
+        ctx.options_mut(|options| options.warn_on_id_clash = true);
+        let mut app = GuiApplication::new();
+        app.state.new_scene("same", true);
+        app.state.new_scene("same", true);
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000., 2000.),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.workspace_section(ui, &mut CameraController::default());
+                });
+            },
+        );
+        fn conflict(shape: &egui::epaint::Shape) -> bool {
+            match shape {
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().any(conflict),
+                egui::epaint::Shape::Text(text) => {
+                    text.galley.job.text.contains("use of widget ID")
+                }
+                _ => false,
+            }
+        }
+        assert!(!output.shapes.iter().any(|shape| conflict(&shape.shape)));
     }
 
     /// Exercise the whole shell + every left-panel section headlessly so a runtime

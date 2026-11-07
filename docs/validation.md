@@ -1,5 +1,56 @@
 # Validation evidence
 
+## APBS controls, cancellation and saved potential maps
+
+Native egui and the browser share the APBS electrostatic-potential form. Tauri
+exposes matching controls. Each opening resets selection, method, hydrogen,
+nonlinear solving and numerical options, while retaining a valid target molecule
+and reading the default force field from Settings. Changing the target replaces
+the suggested potential name. Empty names use that suggestion when starting.
+Executable paths are resolved from shared Settings, bundled tools and PATH; missing
+required paths disable Start. The browser explains that APBS runs in the native
+application and disables execution; importing DX maps remains supported.
+
+The selection builder, method-dependent fields, numerical bounds and decimal
+steps match the reference form. Errors remain inline. Running jobs disable inputs
+and Close, expose Stop, and report PDB2PQR/APBS phases and streamed output. The log
+retains at most 500 lines with bounded long-line fragments. Native selection
+history is now recorded only after successful map insertion, and completing a
+remote job no longer closes an unrelated tool window. Tauri request IDs reject
+polls and cancellations from superseded dialogs; expected-scene checks reject
+stale targets before starting a worker. Detaching a pending form cancels its own
+job after startup, and cannot close a replacement dialog.
+
+The source comment promised an embedded APBS result, but the implementation kept
+the temporary DX path as an external source. The worker then deleted that path,
+so an ordinary scene save could leave the potential unavailable on reopening.
+Generated potentials now use embedded storage. A regression removes the original
+DX before saving and restores the potential class, grid values and unit-cell
+renderer from the saved scene. The Linux window check also exposed native scene
+rows sharing a widget ID when two scenes had the same name; rows now include the
+scene UID in their scope, and a headless UI regression checks for ID conflicts.
+
+Validation: both APBS core cases, 226 native tests and 195 Tauri tests pass. Five
+existing Tauri tests remain ignored. Process tests cover ordered external stages,
+cancellation, output arriving before EOF and bounded log retention. Two browser
+cases cover WebGL/WebGPU form defaults and the native execution boundary. Two
+Tauri DOM cases cover reset/target/name rules, missing tools, inline validation,
+live phases/logs, success-only history, stop/error recovery, pending-start
+detachment and stale scenes. They use mock IPC; the Rust model tests separately
+exercise request IDs, stale targets and map insertion. An initial guarded-dispatch
+implementation exhausted the test thread stack through recursive dispatch; the
+final code validates IDs before entering the existing nonrecursive dispatcher.
+
+Linux OS input against the rebuilt native binary confirms invalid-selection
+preservation, Stop without scene/history changes, a real bundled APBS calculation
+using internal charges, blank-name fallback, unchanged camera, one-step Undo/Redo,
+ordinary scene save/reload and reset options on reopening. The cancellation case
+holds the executable at a test launcher barrier before the solver; the subsequent
+successful run executes the real solver. Screenshots were inspected, including
+the corrected same-name scene rows. Native and WASM builds and formatting pass.
+Actual PDB2PQR execution and OS-level Tauri input are not newly exercised by these
+checks; the external-stage process tests use small executable fixtures.
+
 ## Explicit Morph conversion and frame editing
 
 Native and browser windows now share a dedicated Morph animation tool; Tauri

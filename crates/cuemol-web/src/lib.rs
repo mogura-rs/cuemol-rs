@@ -356,6 +356,8 @@ struct App {
     molecule_edits: cuemol_ui::molecule_edit::Dialogs,
     show_interaction: bool,
     surface: cuemol_ui::surface::SurfaceDialog,
+    show_apbs: bool,
+    apbs_editor: cuemol_ui::apbs::ApbsDialog,
     show_superposition: bool,
     superposition: cuemol_ui::superposition::SuperpositionDialog,
     show_secondary: bool,
@@ -579,6 +581,8 @@ impl App {
             molecule_edits: Default::default(),
             show_interaction: false,
             surface: cuemol_ui::surface::SurfaceDialog::default(),
+            show_apbs: false,
+            apbs_editor: Default::default(),
             show_superposition: false,
             superposition: cuemol_ui::superposition::SuperpositionDialog::default(),
             show_secondary: false,
@@ -1626,6 +1630,7 @@ impl eframe::App for App {
         self.tools_ui(ctx);
         self.interaction_ui(ctx);
         self.superposition_ui(ctx);
+        self.apbs_ui(ctx);
         self.new_renderer_ui(ctx);
         self.surface_ui(ctx);
         self.secondary_ui(ctx);

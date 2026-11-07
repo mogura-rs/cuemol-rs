@@ -26,10 +26,10 @@ use crate::offscreen::camera_mvp;
 use crate::offscreen::{camera_pick_mvp, encode_rgba_png, SceneRenderer};
 use crate::{
     collect_scene_pov_labels, create_apbs_work_dir, create_pov_work_dir, overlay_pov_labels,
-    pick_atom_screen, run_apbs_process, run_pov_process, run_pov_process_with_poll, AnimKind,
-    ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions,
-    GuiApbsPaths, GuiAtomLabel, GuiPovSceneOptions, PovProcessOptions, PovProcessOutput,
-    PovProcessTask, MOLECULE_RENDERER_TYPES,
+    pick_atom_screen, run_pov_process, run_pov_process_with_poll, AnimKind, ApbsProcessOutput,
+    ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions, GuiApbsPaths,
+    GuiAtomLabel, GuiPovSceneOptions, PovProcessOptions, PovProcessOutput, PovProcessTask,
+    MOLECULE_RENDERER_TYPES,
 };
 use cuemol_desktop_core::effects::ViewportOptions;
 
@@ -1493,6 +1493,10 @@ struct PreferencesUpdateDto {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ApbsCalculationInput {
+    #[serde(default)]
+    scene_uid: Option<u64>,
+    #[serde(default)]
+    request_id: Option<String>,
     object_uid: u64,
     selection: String,
     potential_name: String,
@@ -1649,6 +1653,8 @@ struct AppModel {
 struct TauriApbsJob {
     receiver: mpsc::Receiver<Result<ApbsProcessOutput, String>>,
     cancel: Arc<AtomicBool>,
+    progress: Arc<std::sync::Mutex<crate::apbs_job::ApbsProgress>>,
+    request_id: Option<String>,
     potential_name: String,
     scene_uid: Uid,
     started: std::time::Instant,
@@ -8248,6 +8254,9 @@ enum ModelRequest {
         dx_path: String,
     },
     StartApbsCalculation(ApbsCalculationInput),
+    ApbsDialogState,
+    PollApbsDialog(String),
+    CancelApbsDialog(String),
     PollApbsCalculation,
     CancelApbsCalculation,
     InitializeMorphObject {
@@ -9796,6 +9805,29 @@ fn handle_model_request(
     model: &mut AppModel,
     request: ModelRequest,
 ) -> Result<ModelResponse, String> {
+    let request = match request {
+        ModelRequest::PollApbsDialog(request_id) => {
+            if !model
+                .apbs_job
+                .as_ref()
+                .is_some_and(|job| job.request_id.as_deref() == Some(request_id.as_str()))
+            {
+                return Ok(ModelResponse::Message("stale".into()));
+            }
+            ModelRequest::PollApbsCalculation
+        }
+        ModelRequest::CancelApbsDialog(request_id) => {
+            if !model
+                .apbs_job
+                .as_ref()
+                .is_some_and(|job| job.request_id.as_deref() == Some(request_id.as_str()))
+            {
+                return Ok(ModelResponse::Message("stale".into()));
+            }
+            ModelRequest::CancelApbsCalculation
+        }
+        other => other,
+    };
     match request {
         ModelRequest::UpdateRequest(operation) => {
             match operation.as_str() {
@@ -12031,7 +12063,31 @@ fn handle_model_request(
             model.status = format!("APBS files written for {} atom(s)", summary.atom_count);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::ApbsDialogState => {
+            let resolve = |tool| cuemol_command::external::resolve(&model.desktop, tool)
+                .map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+            let preferences = cuemol_desktop_core::preferences::ToolPreferences::from_state(&model.desktop);
+            let job = model.apbs_job.as_ref().map(|job| {
+                let progress = job.progress.lock().ok();
+                serde_json::json!({"requestId": job.request_id,
+                    "stopping": job.cancel.load(Ordering::Relaxed),
+                    "status": progress.as_ref().map(|p| p.status()).unwrap_or("Running APBS..."),
+                    "log": progress.as_ref().map(|p| p.log()).unwrap_or_default()})
+            });
+            Ok(ModelResponse::Message(serde_json::json!({
+                "apbsExecutable": resolve("apbs"), "pdb2pqrExecutable": resolve("pdb2pqr"),
+                "forceField": preferences.force_field, "job": job,
+            }).to_string()))
+        }
+        ModelRequest::PollApbsDialog(_) | ModelRequest::CancelApbsDialog(_) => unreachable!("APBS request IDs were validated"),
         ModelRequest::StartApbsCalculation(mut input) => {
+            if let Some(scene_uid) = input.scene_uid {
+                if model.desktop.active_scene().map(Uid::get) != Some(scene_uid)
+                    || !model.desktop.active_object_summaries().iter().any(|o| o.uid.get() == input.object_uid)
+                {
+                    return Err("The active scene or target changed. Reopen APBS electrostatic potential.".into());
+                }
+            }
             input.apbs_executable = cuemol_command::external::resolve_default(
                 &model.desktop,
                 "apbs",
@@ -12097,11 +12153,13 @@ fn handle_model_request(
             };
             let cancel = Arc::new(AtomicBool::new(false));
             let worker_cancel = Arc::clone(&cancel);
+            let progress = Arc::new(std::sync::Mutex::new(crate::apbs_job::ApbsProgress::default()));
+            let worker_progress = Arc::clone(&progress);
             let (sender, receiver) = mpsc::channel();
             if let Err(error) = std::thread::Builder::new()
                 .name("cuemol-tauri-apbs".to_string())
                 .spawn(move || {
-                    let _ = sender.send(run_apbs_process(task, worker_cancel));
+                    let _ = sender.send(crate::apbs_job::run_apbs_process_with_progress(task, worker_cancel, worker_progress));
                 })
             {
                 let _ = fs::remove_dir_all(work_dir);
@@ -12110,6 +12168,8 @@ fn handle_model_request(
             model.apbs_job = Some(TauriApbsJob {
                 receiver,
                 cancel,
+                progress,
+                request_id: input.request_id,
                 potential_name,
                 scene_uid: model.desktop.scene_manager().scene_uid_for_object(object_uid).unwrap(),
                 started: std::time::Instant::now(),
@@ -15951,6 +16011,12 @@ fn write_apbs_files(
 }
 
 #[tauri::command]
+fn get_apbs_dialog_state(state: State<'_, ManagedState>) -> Result<serde_json::Value, String> {
+    let json = message_response(request_model(&state, ModelRequest::ApbsDialogState)?)?;
+    serde_json::from_str(&json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn start_apbs_calculation(
     input: ApbsCalculationInput,
     state: State<'_, ManagedState>,
@@ -15962,13 +16028,29 @@ fn start_apbs_calculation(
 }
 
 #[tauri::command]
-fn poll_apbs_calculation(state: State<'_, ManagedState>) -> Result<String, String> {
-    message_response(request_model(&state, ModelRequest::PollApbsCalculation)?)
+fn poll_apbs_calculation(
+    request_id: Option<String>,
+    state: State<'_, ManagedState>,
+) -> Result<String, String> {
+    message_response(request_model(
+        &state,
+        request_id
+            .map(ModelRequest::PollApbsDialog)
+            .unwrap_or(ModelRequest::PollApbsCalculation),
+    )?)
 }
 
 #[tauri::command]
-fn cancel_apbs_calculation(state: State<'_, ManagedState>) -> Result<String, String> {
-    message_response(request_model(&state, ModelRequest::CancelApbsCalculation)?)
+fn cancel_apbs_calculation(
+    request_id: Option<String>,
+    state: State<'_, ManagedState>,
+) -> Result<String, String> {
+    message_response(request_model(
+        &state,
+        request_id
+            .map(ModelRequest::CancelApbsDialog)
+            .unwrap_or(ModelRequest::CancelApbsCalculation),
+    )?)
 }
 
 #[tauri::command]
@@ -16995,6 +17077,7 @@ pub fn run() -> Result<(), tauri::Error> {
             cut_surface,
             write_apbs_files,
             start_apbs_calculation,
+            get_apbs_dialog_state,
             poll_apbs_calculation,
             cancel_apbs_calculation,
             initialize_morph_object,
@@ -26792,6 +26875,30 @@ mod tests {
         assert!(before.same_undo_state(&model.desktop));
     }
 
+    #[test]
+    fn apbs_dialog_rejects_stale_scene_and_target_before_starting_a_worker() {
+        let mut model = model_without_gpu();
+        let scene = model.desktop.active_scene().unwrap().get();
+        let before = model.desktop.clone();
+        for scene_uid in [scene + 1, scene] {
+            let input: ApbsCalculationInput = serde_json::from_value(serde_json::json!({
+                "sceneUid": scene_uid, "requestId": "stale-dialog", "objectUid": u64::MAX,
+                "selection": "", "potentialName": "", "chargeMethod": "internal",
+                "forceField": "charmm", "useHydrogen": false, "useNpbe": false,
+                "temperature": 298.15, "gridSpacing": 1., "waterDielectric": 78.54,
+                "proteinDielectric": 2., "apbsExecutable": "", "pdb2pqrExecutable": "",
+            }))
+            .unwrap();
+            let error = handle_model_request(&mut model, ModelRequest::StartApbsCalculation(input))
+                .err()
+                .unwrap();
+            assert!(error.contains("active scene or target changed"), "{error}");
+            assert!(model.apbs_job.is_none());
+            assert!(model.undo_stack.is_empty());
+            assert!(before.same_undo_state(&model.desktop));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn apbs_job_request_runs_and_loads_electrostatic_map() {
@@ -26829,6 +26936,8 @@ mod tests {
         let response = handle_model_request(
             &mut model,
             ModelRequest::StartApbsCalculation(ApbsCalculationInput {
+                scene_uid: Some(scene_uid.get()),
+                request_id: Some("apbs-dialog-test".into()),
                 object_uid: object_uid.get(),
                 selection: String::new(),
                 potential_name: "pot_source".to_string(),
@@ -26846,11 +26955,34 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(response, ModelResponse::Message(ref value) if value == "running"));
+        let initial = message_response(
+            handle_model_request(&mut model, ModelRequest::ApbsDialogState).unwrap(),
+        )
+        .unwrap();
+        let initial: serde_json::Value = serde_json::from_str(&initial).unwrap();
+        assert_eq!(initial["apbsExecutable"], script.to_string_lossy().as_ref());
+        assert_eq!(initial["job"]["requestId"], "apbs-dialog-test");
+        for request in [
+            ModelRequest::PollApbsDialog("old-dialog".into()),
+            ModelRequest::CancelApbsDialog("old-dialog".into()),
+        ] {
+            let response = handle_model_request(&mut model, request).unwrap();
+            assert!(matches!(response, ModelResponse::Message(ref state) if state == "stale"));
+            assert!(!model
+                .apbs_job
+                .as_ref()
+                .unwrap()
+                .cancel
+                .load(Ordering::Relaxed));
+        }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         let completed = loop {
             std::thread::sleep(std::time::Duration::from_millis(10));
-            let response =
-                handle_model_request(&mut model, ModelRequest::PollApbsCalculation).unwrap();
+            let response = handle_model_request(
+                &mut model,
+                ModelRequest::PollApbsDialog("apbs-dialog-test".into()),
+            )
+            .unwrap();
             let ModelResponse::Message(state) = response else {
                 panic!("expected APBS job state");
             };

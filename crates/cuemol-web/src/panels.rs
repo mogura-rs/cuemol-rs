@@ -269,6 +269,12 @@ impl App {
             self.show_superposition = true;
             return;
         }
+        if name == "calc_elepot" {
+            let force_field = self.state.config_value("apbs:force_field");
+            self.apbs_editor.opened(&self.state, &force_field);
+            self.show_apbs = true;
+            return;
+        }
         if name == "convert_to_morph" {
             self.open_morph();
             return;
@@ -571,6 +577,36 @@ impl App {
         if open {
             self.new_renderer = Some(dialog);
         }
+    }
+
+    pub(super) fn apbs_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_apbs {
+            return;
+        }
+        if self.apbs_editor.scene != self.state.active_scene() {
+            self.show_apbs = false;
+            self.message = "The active scene changed. Reopen APBS electrostatic potential.".into();
+            return;
+        }
+        let mut open = true;
+        let mut action = None;
+        let window = egui::Window::new(cuemol_ui::apbs::TITLE)
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(470.)
+            .show(ctx, |ui| {
+                action = self
+                    .apbs_editor
+                    .show(ui, &self.state, self.revision, false, false, None);
+            });
+        self.ui_rects.extend(self.apbs_editor.rects.clone());
+        if let Some(window) = window {
+            self.record_ui_rect("APBS window", &window.response);
+        }
+        if action == Some(cuemol_ui::apbs::Action::Close) {
+            open = false;
+        }
+        self.show_apbs = open;
     }
 
     pub(super) fn superposition_ui(&mut self, ctx: &egui::Context) {
