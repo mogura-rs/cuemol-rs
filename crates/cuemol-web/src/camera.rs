@@ -93,6 +93,7 @@ impl App {
                 }
                 self.prune_camera_files();
                 self.dirty = true;
+                self.remember_source();
                 self.message = format!("Loaded camera {name}");
             }
             Err(error) => self.message = error.to_string(),

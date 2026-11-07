@@ -196,6 +196,7 @@ fn build(args: &[String]) -> Result<()> {
             "kernels.js",
             "oidn.js",
             "movie.js",
+            "recent.js",
             "input.js",
             "loader.js",
             "loader-worker.js",

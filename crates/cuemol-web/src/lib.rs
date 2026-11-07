@@ -11,6 +11,7 @@ mod movie;
 mod navigation;
 use cuemol_command::navigation::{AtomHit, Navigation, Tool as ViewportTool};
 mod panels;
+mod recent;
 mod styles;
 mod trajectory;
 mod tritium;
@@ -47,6 +48,8 @@ thread_local! {
     static STATUS: RefCell<String> = RefCell::new(r#"{"busy":true,"scene":{"sceneId":0,"objects":[]}}"#.to_string());
 }
 enum Event {
+    RecentFiles(Vec<recent::RecentFile>),
+    FilePickerError(String),
     Movie(movie::Completion),
     Clipboard(clipboard::Completion),
     Input(Value),
@@ -102,6 +105,7 @@ fn js_error(error: JsValue) -> String {
 }
 #[wasm_bindgen]
 pub fn open_file(file: web_sys::File) {
+    recent::register(&file);
     if file.name().to_ascii_lowercase().ends_with(".qax") {
         if file.size() > 8_388_608. {
             enqueue(Event::Error(
@@ -128,6 +132,9 @@ pub fn open_files(files: js_sys::Array, dropped: bool) -> Result<(), JsValue> {
         .iter()
         .map(|file| file.dyn_into::<web_sys::File>())
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    for file in &files {
+        recent::register(file);
+    }
     enqueue(Event::Files(files, dropped));
     Ok(())
 }
@@ -138,6 +145,9 @@ pub fn open_files_with_options(files: js_sys::Array) -> Result<(), JsValue> {
         .iter()
         .map(|file| file.dyn_into::<web_sys::File>())
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    for file in &files {
+        recent::register(file);
+    }
     enqueue(Event::FilesWithOptions(files));
     Ok(())
 }
@@ -249,7 +259,7 @@ fn download_parts(name: &str, array: &js_sys::Array, mime: &str) -> Result<(), J
     Ok(())
 }
 fn choose_file() {
-    choose_file_input("files");
+    recent::choose();
 }
 fn choose_file_input(id: &str) {
     if let Some(input) = web_sys::window()
@@ -339,6 +349,8 @@ struct App {
     future: Vec<history::Entry>,
     agent_history: Option<HistoryEntry>,
     trajectories: BTreeMap<Uid, BrowserTrajectoryGroup>,
+    recent_files: Vec<recent::RecentFile>,
+    source_recent: Option<web_sys::File>,
     source_queue: VecDeque<loading::Source>,
     source_options: Option<loading::PendingOptions>,
     source_setup: Option<cuemol_desktop_core::GuiRendererSetup>,
@@ -562,6 +574,8 @@ impl App {
             agent_history: None,
             future: Vec::new(),
             trajectories: BTreeMap::new(),
+            recent_files: Vec::new(),
+            source_recent: None,
             source_queue: VecDeque::new(),
             source_options: None,
             source_setup: None,
@@ -880,6 +894,8 @@ impl App {
         for event in events {
             self.validate_source_scene();
             match event {
+                Event::RecentFiles(files) => self.recent_files = files,
+                Event::FilePickerError(error) => self.message = error,
                 Event::Clipboard(completion) => self.clipboard_complete(ctx, completion),
                 Event::ImportActions(name, source) => {
                     self.apply_action_intent(cuemol_ui::actions::Intent::Save {
@@ -1016,6 +1032,7 @@ impl App {
                         self.source_morph = None;
                         self.source_target = None;
                         self.source_options = None;
+                        self.source_recent = None;
                         self.busy = false;
                         if self.source_queue.is_empty() {
                             self.source_scene = None;
@@ -1096,6 +1113,7 @@ impl App {
                     self.push_history(before);
                     self.navigation.cancel();
                     self.revision = self.revision.wrapping_add(1);
+                    self.remember_source();
                     self.message = format!("Indexed {added} frames; {} frames across all blocks. Coordinates are read one frame at a time.", previous.0 + added);
                 }
                 Event::Frame(id, index, frame, revision) => {
@@ -1645,6 +1663,6 @@ impl eframe::App for App {
                 [rect.min.x, rect.min.y, rect.width(), rect.height()]
             })
             .collect();
-        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"geometryRevision":self.renderer.revision(),"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.trajectory_info().map_or(self.frame,|(_,_,frame)|frame),"busy":self.busy,"loading":self.source_active,"rendering":{"running":self.movie.running || self.render_cancel.is_some(),"movieMode":self.render_panel.movie_mode,"settings":self.render_panel.editor.snapshot(),"movieOptions":self.render_panel.movie,"historyCount":self.render_panel.history.len(),"current":self.render_panel.history.current(),"frame":self.render_panel.history.frame(),"message":self.render_panel.message,"progress":self.movie.progress},"lastCommand":self.last_command,"agent":self.agent.status(),"ui":{"keyboardInput":ctx.wants_keyboard_input(),"clipboardScope":format!("{:?}",self.clipboard_focus.scope),"modal":self.pending_close.is_some() || self.source_options.is_some(),"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
+        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"recentFiles":self.recent_files,"geometryRevision":self.renderer.revision(),"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.trajectory_info().map_or(self.frame,|(_,_,frame)|frame),"busy":self.busy,"loading":self.source_active,"rendering":{"running":self.movie.running || self.render_cancel.is_some(),"movieMode":self.render_panel.movie_mode,"settings":self.render_panel.editor.snapshot(),"movieOptions":self.render_panel.movie,"historyCount":self.render_panel.history.len(),"current":self.render_panel.history.current(),"frame":self.render_panel.history.frame(),"message":self.render_panel.message,"progress":self.movie.progress},"lastCommand":self.last_command,"agent":self.agent.status(),"ui":{"keyboardInput":ctx.wants_keyboard_input(),"clipboardScope":format!("{:?}",self.clipboard_focus.scope),"modal":self.pending_close.is_some() || self.source_options.is_some(),"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
     }
 }

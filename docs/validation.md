@@ -1,5 +1,29 @@
 # Validation evidence
 
+## Browser recent files
+
+The current menu audit found that the browser had no Open Recent workflow.
+The menu now records successful local imports, requests current files through
+persisted File System Access handles, and uses the same reader-options and
+transactional loading path for reopening. Input/drop fallbacks remain in the
+current tab. History stores handles and metadata, never molecular or trajectory
+contents; generated scene reloads and downloads are excluded. Same-named handles
+remain distinct, while repeated use of the same handle moves its existing entry.
+
+All 30 affected loading, reader-options and recent-file browser checks pass.
+The final history changes pass the three focused cases again. Twelve distribution
+helper checks pass, and the optimized WASM and unified CLI build successfully.
+A headed Linux Chromium run uses real file dialogs and its read-permission
+prompt without replacing either API. It opens a path containing spaces, reloads
+the page, approves access and reads edited contents. Reopening the same file
+keeps one recent entry. Native chooser cancellation and a missing file preserve
+the scene and history; Clear Menu remains empty after reload. The final run
+exits successfully with no page errors, and screenshots were inspected.
+
+This evidence covers Linux Chromium. Persisted handles still require browser
+permission, and input/drop File fallbacks do not survive closing the tab. The
+ongoing menu inventory and other platform checks remain separate work.
+
 ## Browser movie pickers and cancellation
 
 A headed Chromium window now exercises the real Linux directory and save

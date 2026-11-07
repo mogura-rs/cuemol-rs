@@ -27,6 +27,7 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window", "Navigator", "Clipboard", "ClipboardItem", "Document", "HtmlCanvasElement", "HtmlInputElement", "HtmlAnchorElement", "File", "FileList", "Blob", "BlobPropertyBag", "Url", "Storage", "Response", "RequestInit", "AbortController", "AbortSignal", "console"] }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 base64 = "0.22"

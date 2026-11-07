@@ -57,6 +57,14 @@ QSC and PyMOL scene files use the scene-opening rule independently of these
 object-file preferences. Browser file access uses the selected `File` objects;
 it does not require filesystem paths.
 
+The browser's File > Open Recent menu retains up to 20 successfully opened
+local files. Open File uses a file handle where supported, so reopening reads
+the current contents and may ask for permission again. Handles persist across
+page reloads; file contents are not copied into browser storage. Input-file
+and drop fallbacks retain the original File only while the tab remains open.
+Reopening still displays reader options. Failed or cancelled loads do not enter
+the menu, and Clear Menu removes the history without changing the scene.
+
 ### Reader options
 
 Native egui, the browser and Tauri show options before loading each supported

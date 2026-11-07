@@ -4,12 +4,13 @@
 <body><canvas id="viewport" aria-label="cuemol-rs molecular viewer"></canvas><div id="loading"><img src="./pkg/logo.png" width="128" height="128" alt=""><span>Loading cuemol-rs…</span></div><input id="files" type="file" multiple><input id="styles" type="file" accept=".xml,.xml.gz,.xml.bz2,.xml.xz" hidden>
 <input id="file-options" type="file" multiple hidden><input id="companion-file" type="file" hidden>
 <script type="module">
-import init, {start, open_file, open_files, open_files_with_options, choose_companion_file, add_morph_files, command, status, agent_turn, agent_cancel, view_input} from './pkg/cuemol_web.js';
+import init, {start, open_file, open_files, open_files_with_options, choose_companion_file, add_morph_files, command, status, agent_turn, agent_cancel, view_input, recent_files_changed, file_picker_error} from './pkg/cuemol_web.js';
 import {initKernels} from './kernels.js';
 import './oidn.js';
 import './movie.js';
 import {installViewInput, installShellInput} from './input.js';
 import {initLoader} from './loader.js';
+import {initRecentFiles} from './recent.js';
 const loading=document.getElementById('loading');
 globalThis.cuemolChooseMorphFiles=generation=>{
   const input=document.createElement('input');
@@ -30,6 +31,7 @@ try {
       return new Uint8Array(await response.arrayBuffer());
     }),
   ]);
+  const recent = initRecentFiles({open: files => open_files(files, false), notify: recent_files_changed, error: file_picker_error, fallback: () => document.getElementById('files').click()});
   loading.querySelector('span').textContent='Starting graphics…';
   document.addEventListener('dragover',e=>{e.preventDefault();e.stopImmediatePropagation();},true);
   document.addEventListener('drop',e=>{e.preventDefault();e.stopImmediatePropagation();open_files([...e.dataTransfer.files],true);},true);
@@ -40,7 +42,7 @@ try {
     catch(error) { console.warn('WebGPU is unavailable; using WebGL2.',error); }
   }
   performance.mark('cuemol-adapter-ready');
-  installShellInput(view_input, () => window.cuemol?.status(), () => document.getElementById('files').click());
+  installShellInput(view_input, () => window.cuemol?.status(), () => recent.choose());
   await start(document.getElementById('viewport'),!webgpu,uiFont); loading.remove();
   performance.mark('cuemol-graphics-ready');
   window.cuemol={backend:webgpu?'webgpu':'webgl',command:(name,args={})=>command(name,JSON.stringify(args)),status:()=>JSON.parse(status()),agent:{start:(prompt,settings,apiKey)=>agent_turn(prompt,JSON.stringify(settings),apiKey),cancel:()=>agent_cancel()}};

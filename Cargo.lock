@@ -1830,6 +1830,7 @@ dependencies = [
  "getrandom 0.3.4",
  "glam",
  "js-sys",
+ "serde",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",

@@ -348,12 +348,14 @@ impl App {
             .exact_height(26.)
             .show(ctx, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
-                    ui.menu_button("File", |ui| {
+                    let file_menu = ui.menu_button("File", |ui| {
                         if ui.button("New Tab").clicked() {
                             self.call("create_scene", json!({}));
                             ui.close();
                         }
-                        if ui.button("Open File…").clicked() {
+                        let open_file = ui.button("Open File…");
+                        self.record_ui_rect("Open File", &open_file);
+                        if open_file.clicked() {
                             choose_file();
                             ui.close();
                         }
@@ -371,6 +373,20 @@ impl App {
                             self.open_get_pdb();
                             ui.close();
                         }
+                        let recent = ui.menu_button("Open Recent", |ui| {
+                            if self.recent_files.is_empty() { ui.label("No recent files"); }
+                            for file in self.recent_files.clone() {
+                                let hint = if file.persistent { "Open the current file; the browser may request read permission." } else { "Available while this tab remains open." };
+                                let response = ui.button(&file.name).on_hover_text(hint);
+                                self.record_ui_rect(&format!("Recent file {}", file.id), &response);
+                                if response.clicked() { recent::reopen(&file.id); ui.close(); }
+                            }
+                            ui.separator();
+                            let clear = ui.add_enabled(!self.recent_files.is_empty(), egui::Button::new("Clear Menu"));
+                            self.record_ui_rect("Clear Recent", &clear);
+                            if clear.clicked() { recent::clear(); ui.close(); }
+                        });
+                        self.record_ui_rect("Open Recent", &recent.response);
                         ui.separator();
                         if ui.button("Save Scene").clicked() {
                             self.save_scene_download();
@@ -402,6 +418,7 @@ impl App {
                             ui.close();
                         }
                     });
+                    self.record_ui_rect("File menu", &file_menu.response);
                     let edit_menu = ui.menu_button("Edit", |ui| {
                         let undo = ui.add_enabled(self.clipboard_focus.text.is_some() || !self.history.is_empty(), egui::Button::new("Undo"));
                         self.record_ui_rect("Edit Undo", &undo);

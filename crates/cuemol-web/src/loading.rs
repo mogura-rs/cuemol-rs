@@ -107,6 +107,7 @@ impl App {
         self.source_morph = None;
         self.source_target = None;
         self.source_options = None;
+        self.source_recent = None;
         if self.source_active {
             self.busy = false;
         }
@@ -182,6 +183,12 @@ impl App {
         self.source_generation = self.source_generation.wrapping_add(1);
         self.source_scene = self.state.active_scene();
         let generation = self.source_generation;
+        self.source_recent = match &source {
+            Source::File(file, _) | Source::Options(file, _) | Source::Camera(file, _) => {
+                Some(file.clone())
+            }
+            _ => None,
+        };
         let name = source.name();
         let extension = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         self.message = format!("Loading {name}…");
@@ -645,6 +652,7 @@ impl App {
                     }
                 }
                 self.push_history(before);
+                self.remember_source();
                 self.message = format!("Loaded {name}");
             }
             Err(error) => {
@@ -676,6 +684,7 @@ impl App {
                 self.dirty = true;
                 self.push_history(before);
                 self.revision = self.revision.wrapping_add(1);
+                self.remember_source();
                 self.message = format!("Loaded ICC profile {name}");
                 if let Some(storage) =
                     web_sys::window().and_then(|window| window.local_storage().ok().flatten())
