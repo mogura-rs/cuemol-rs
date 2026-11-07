@@ -490,7 +490,7 @@ function paintCueMolPropertyRows() {
 
 function renderTritiumShell() {
   const scene = snapshot?.scenes.find((item) => item.active);
-  const title = scene?.name ? `${scene.modified ? "● " : ""}${scene.name} — cuemol-rs` : "cuemol-rs";
+  const title = scene?.name ? `${scene.modified ? "● " : ""}${scene.name} — CueMol3` : "CueMol3";
   if (document.title !== title) {
     document.title = title;
     const current = tauri?.webviewWindow?.getCurrentWebviewWindow?.();

@@ -376,7 +376,7 @@ impl NativeRunner {
             return;
         }
         let attributes = Window::default_attributes()
-            .with_title("cuemol-rs")
+            .with_title(cuemol_command::about::PRODUCT)
             .with_window_icon(application_icon())
             .with_inner_size(PhysicalSize::new(1024, 768));
         let window = match event_loop.create_window(attributes) {
@@ -866,12 +866,6 @@ fn exit_after_from_env() -> Option<Duration> {
         .parse::<u64>()
         .ok()?;
     Some(Duration::from_millis(millis))
-}
-
-fn native_window_command(executable: &Path) -> Command {
-    let mut command = Command::new(executable);
-    command.env_remove("CUEMOL_DESKTOP_EXIT_AFTER_MS");
-    command
 }
 
 fn spawn_process_exit_timer_from_env() {
@@ -2316,7 +2310,6 @@ enum MainShortcutCommand {
     SaveSceneAs,
     CloseTab,
     NewTab,
-    NewWindow,
     OpenFile,
     ReloadScene,
     SaveScene,
@@ -2329,14 +2322,13 @@ enum MainShortcutCommand {
 }
 
 impl MainShortcutCommand {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 13] = [
         Self::OpenScene,
         Self::SaveSceneAs,
         Self::RedoShift,
         Self::TogglePalette,
         Self::CloseTab,
         Self::NewTab,
-        Self::NewWindow,
         Self::OpenFile,
         Self::ReloadScene,
         Self::SaveScene,
@@ -2352,7 +2344,6 @@ impl MainShortcutCommand {
             Self::SaveSceneAs => (egui::Modifiers::COMMAND, egui::Key::S),
             Self::CloseTab => (egui::Modifiers::COMMAND, egui::Key::W),
             Self::NewTab => (egui::Modifiers::COMMAND, egui::Key::T),
-            Self::NewWindow => (egui::Modifiers::COMMAND, egui::Key::N),
             Self::OpenFile => (egui::Modifiers::COMMAND, egui::Key::O),
             Self::ReloadScene => (egui::Modifiers::COMMAND, egui::Key::R),
             Self::SaveScene => (egui::Modifiers::COMMAND, egui::Key::S),
@@ -5668,7 +5659,10 @@ impl GuiApplication {
                     }
                 });
                 ui.menu_button("Help", |ui| {
-                    if ui.button("About cuemol-rs").clicked() {
+                    if ui
+                        .button(format!("About {}", cuemol_command::about::PRODUCT))
+                        .clicked()
+                    {
                         self.about.open(cuemol_command::about::native_rows(
                             cuemol_command::about::Frontend::Egui,
                         ));
@@ -16282,7 +16276,6 @@ impl GuiApplication {
             Some(MainShortcutCommand::SaveSceneAs) => self.choose_save_scene(),
             Some(MainShortcutCommand::CloseTab) => self.close_current_scene(camera),
             Some(MainShortcutCommand::NewTab) => self.open_new_tab_dialog(),
-            Some(MainShortcutCommand::NewWindow) => self.new_window(),
             Some(MainShortcutCommand::OpenFile) => self.choose_open_file(camera),
             Some(MainShortcutCommand::ReloadScene) => self.reload_current_path(camera),
             Some(MainShortcutCommand::SaveScene) => self.save_current_scene(camera),
@@ -16964,20 +16957,6 @@ impl GuiApplication {
                     Err(error) => self.set_error(error),
                 }
             }
-        }
-    }
-
-    fn new_window(&mut self) {
-        let executable = match std::env::current_exe() {
-            Ok(executable) => executable,
-            Err(error) => {
-                self.set_status(format!("Failed to locate native executable: {error}"));
-                return;
-            }
-        };
-        match native_window_command(&executable).spawn() {
-            Ok(child) => self.set_status(format!("Opened new window (PID {})", child.id())),
-            Err(error) => self.set_status(format!("Failed to open new window: {error}")),
         }
     }
 
@@ -25306,7 +25285,7 @@ impl GuiApplication {
         }
         let mut open = true;
         let mut result = None;
-        egui::Window::new("Quit CueMol2")
+        egui::Window::new(format!("Quit {}", cuemol_command::about::PRODUCT))
             .default_width(420.0)
             .collapsible(false)
             .resizable(false)
@@ -31588,18 +31567,6 @@ mod tests {
             cuemol_command::render_settings(&app.state).unwrap()["width"],
             32
         );
-    }
-
-    #[test]
-    fn native_new_window_command_relaunches_without_test_exit_timer() {
-        let executable = Path::new("/tmp/cuemol-desktop");
-        let command = native_window_command(executable);
-
-        assert_eq!(command.get_program(), executable.as_os_str());
-        assert_eq!(command.get_args().count(), 0);
-        assert!(command.get_envs().any(|(key, value)| {
-            key == std::ffi::OsStr::new("CUEMOL_DESKTOP_EXIT_AFTER_MS") && value.is_none()
-        }));
     }
 
     #[test]

@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="cuemol-rs.png" alt="cuemol-rs icon" width="128">
+  <img src="cuemol-rs.png" alt="CueMol3 icon" width="128">
 </p>
 
-# cuemol-rs
+# CueMol3
 
 Molecular graphics for the desktop, browser and command line, built in Rust.
-cuemol-rs ports CueMol2's scene and scripting interfaces and CueMol3's Tritium UI
+This Rust port brings CueMol2's scene and scripting interfaces and CueMol3's Tritium UI
 to a shared wgpu viewport, with molecular dynamics playback and image rendering.
 
 [Open in browser](https://mogura-rs.github.io/cuemol-rs/) ·

@@ -164,11 +164,11 @@ for (const renderer of ['webgl', 'webgpu']) {
     await page.goto(`./?renderer=${renderer}`);
     await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout: 60000}).toBeGreaterThan(0);
     await click(page, 'Help menu');
-    await click(page, 'About cuemol-rs');
+    await click(page, 'About CueMol3');
     await click(page, 'Copy About');
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('Browser / OS: Mozilla/');
     const text = await page.evaluate(() => navigator.clipboard.readText());
-    expect(text).toMatch(/^cuemol-rs\nVersion: .+\nCommit: [a-f0-9]{40}\nDate: \d{4}-\d\d-\d\dT/);
+    expect(text).toMatch(/^CueMol3\nVersion: .+\nCommit: [a-f0-9]{40}\nDate: \d{4}-\d\d-\d\dT/);
     expect(text).toContain('Target: wasm32-unknown-unknown');
     expect(text).toMatch(/\nRust: rustc \d/);
     expect(text).toContain('Frontend: Browser (WASM)');
@@ -187,7 +187,7 @@ for (const renderer of ['webgl', 'webgpu']) {
     await click(page, 'Close About');
     await expect.poll(async () => (await status(page)).ui.rects['Copy About']).toBeUndefined();
     await click(page, 'Help menu');
-    await click(page, 'About cuemol-rs');
+    await click(page, 'About CueMol3');
     await page.keyboard.press('Escape');
     await expect.poll(async () => (await status(page)).ui.rects['Copy About']).toBeUndefined();
   });

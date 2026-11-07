@@ -1,5 +1,32 @@
 # Validation evidence
 
+## Product display name and obsolete window shortcut
+
+Native egui, Tauri and browser titles, About panels and copied runtime details
+now use the reference product name, CueMol3. macOS bundle display metadata uses
+the same name. Cargo package names, installed commands, bundle identifiers,
+stored preferences and archive paths retain their existing identities. The
+remaining native Ctrl/Command-N process-launch action was removed because the
+current reference omits New Window; New Tab remains available.
+
+The native GUI/library suite passes all 239 tests after removing the obsolete
+process-launch test. Shared UI passes 76 tests, Tauri application-info passes
+its focused model test, and all 68 shell contracts pass. Five focused Tauri
+DOM cases verify About clipboard content, the scene window title, theme,
+menus and shortcuts. Rebuilt WebGL/WebGPU About tests and the alternate tab
+shortcut test pass all three cases; the About screenshot was inspected.
+Normal Linux native and Tauri builds and the optimized WASM build pass.
+An X11 native window reports CueMol3, ignores Ctrl-N and exits normally on
+Alt-F4. On the authorized Apple-silicon host, the macOS packaging script
+completes and its plist contains CueMol3 display names with the existing
+executable and bundle identifier. That packaging check used an existing binary
+and does not establish a current macOS GUI release. Local sandboxed icon
+conversion failed, while the same packaging script succeeded on that host.
+Evidence is under `.cache/current-audit/product-*` and the corresponding
+`cuemol-product-*` Rust logs. The usage guide also now points stereo controls
+to View > View property; the direct View-menu description was stale.
+Platform-specific native menus remain a separate follow-up.
+
 ## Native exit with pending Rendering edits
 
 Native egui now forces the shared Rendering editor to commit pending settings

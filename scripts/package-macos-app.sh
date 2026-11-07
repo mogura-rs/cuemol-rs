@@ -12,8 +12,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleName</key><string>cuemol-rs</string>
-<key>CFBundleDisplayName</key><string>cuemol-rs</string>
+<key>CFBundleName</key><string>CueMol3</string>
+<key>CFBundleDisplayName</key><string>CueMol3</string>
 <key>CFBundleIdentifier</key><string>org.cuemol.cuemol3</string>
 <key>CFBundleExecutable</key><string>cuemol-rs</string>
 <key>CFBundleIconFile</key><string>cuemol-rs</string>

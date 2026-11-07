@@ -613,7 +613,7 @@ function recordStatus(message) {
   if (!message || statusTrail.at(-1) === message) return;
   statusTrail.push(message);
   statusTrail = statusTrail.slice(-80);
-  statusHistory.textContent = statusTrail.join("\n") || "cuemol-rs Rust core";
+  statusHistory.textContent = statusTrail.join("\n") || "CueMol3 Rust core";
   statusHistory.scrollTop = statusHistory.scrollHeight;
   const output = document.getElementById("output-history");
   output.textContent = statusHistory.textContent;
@@ -5971,7 +5971,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     "About plugins",
     "About config",
     "Addon manager",
-    "About cuemol-rs",
+    "About CueMol3",
   ].includes(title);
   const usesViewProperties = title === "View Property";
   const usesCameraProperties = title === "Camera Properties";
@@ -5988,7 +5988,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     "wide",
     usesGenericProperties ||
       usesPreferences ||
-      (usesApplicationInfo && title !== "About cuemol-rs"),
+      (usesApplicationInfo && title !== "About CueMol3"),
   );
   let applicationInfo = null;
   let viewProperties = null;
@@ -6075,21 +6075,21 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         const name = document.createElement("strong");
         name.textContent = feature;
         const source = document.createElement("small");
-        source.textContent = "Bundled with cuemol-rs";
+        source.textContent = "Bundled with CueMol3";
         row.append(name, source, state);
         features.append(row);
       }
       dialogContent.append(features);
     }
-  } else if (title === "About cuemol-rs") {
+  } else if (title === "About CueMol3") {
     const logo = document.createElement("img");
     logo.src = "logo.png";
-    logo.alt = "cuemol-rs";
+    logo.alt = "CueMol3";
     logo.width = 128;
     logo.height = 128;
     dialogContent.append(logo);
     const heading = document.createElement("h2");
-    heading.textContent = "cuemol-rs";
+    heading.textContent = "CueMol3";
     dialogContent.append(
       heading,
       dialogParagraph("Molecular visualization system — Rust desktop implementation."),
@@ -16285,7 +16285,7 @@ async function persistWindowGeometry(appWindow) {
       }),
     );
   } catch (error) {
-    console.warn("Cannot save cuemol-rs window geometry:", error);
+    console.warn("Cannot save CueMol3 window geometry:", error);
   }
 }
 
@@ -16330,7 +16330,7 @@ async function setupWindowGeometryPersistence() {
       );
     }
   } catch (error) {
-    console.warn("Cannot restore cuemol-rs window geometry:", error);
+    console.warn("Cannot restore CueMol3 window geometry:", error);
   }
   const scheduleSave = () => {
     clearTimeout(windowGeometrySaveTimer);

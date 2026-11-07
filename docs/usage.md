@@ -20,7 +20,7 @@ When the central area is narrow, bottom-panel tabs use icons; hover to see their
 names. If the icons still exceed the available width, scroll the tab strip
 horizontally. The panel's collapse/expand button remains at the right edge, and
 opening the panel restores its previous height.
-The View menu provides parallel and cross stereo, eye swapping, and angular
+View > View property provides parallel and cross stereo, eye swapping, and angular
 separation. Each eye has its own projection, picking, labels and post-processing;
 CPU image exports and offscreen depth captures use the same eye cameras.
 Hardware quad-buffer stereo is unavailable on the wgpu frontends.
@@ -33,7 +33,7 @@ drag and create one undo step when released. Escape cancels the drag and
 restores the original value and default state. Hold Shift for finer adjustments
 or Ctrl/Cmd for larger steps. Tauri also accepts dragging the field label.
 
-Use **Help → About cuemol-rs** to inspect the version, source commit, build time,
+Use **Help → About CueMol3** to inspect the version, source commit, build time,
 compiler, target and the libraries used by the selected frontend. **Copy** puts
 these rows on the clipboard for bug reports. Native builds include the OS
 release; browser and Tauri builds also include the browser or WebView user agent.
@@ -1182,7 +1182,7 @@ hydrogen-bond/bridge searches with bounded per-residue bond storage.
 
 The native and browser wgpu frontends implement Tritium's layout with Rust egui
 controls. The optional Tauri shell provides the same activity bar, inspector,
-themes and bottom docks through its webview. All show the `cuemol-rs` application
+themes and bottom docks through its webview. All show the `CueMol3` application
 name and the repository's PNG logo. Direct molecular
 surfaces support distance fields, EDTSurf and MeshMS on native and browser
 targets, with reference detail and surface-type controls. Saved molecular

@@ -2,7 +2,7 @@
 use serde::Deserialize;
 use std::{collections::BTreeMap, sync::OnceLock};
 
-pub const PRODUCT: &str = "cuemol-rs";
+pub const PRODUCT: &str = "CueMol3";
 pub type Rows = Vec<(String, String)>;
 
 #[derive(Clone, Copy)]

@@ -20,7 +20,7 @@ impl AboutDialog {
             return;
         }
         let mut close = false;
-        egui::Window::new("About cuemol-rs")
+        egui::Window::new(format!("About {}", about::PRODUCT))
             .open(&mut self.open)
             .collapsible(false)
             .resizable(false)

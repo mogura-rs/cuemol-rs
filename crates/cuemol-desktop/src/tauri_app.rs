@@ -2841,7 +2841,7 @@ impl AppModel {
             .collect();
         ApplicationInfoDto {
             about_rows: cuemol_command::about::native_rows(cuemol_command::about::Frontend::Tauri),
-            product_name: "cuemol-rs",
+            product_name: cuemol_command::about::PRODUCT,
             version: cuemol_command::update::current_version(),
             target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
             features,
@@ -18938,7 +18938,7 @@ mod tests {
         let ModelResponse::ApplicationInfo(info) = response else {
             panic!("expected application information");
         };
-        assert_eq!(info.product_name, "cuemol-rs");
+        assert_eq!(info.product_name, cuemol_command::about::PRODUCT);
         assert!(!info.plugins.is_empty());
         assert!(info
             .plugins

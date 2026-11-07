@@ -577,8 +577,8 @@ impl App {
                     });
                     self.record_ui_rect("Window menu", &window_menu.response);
                     let help = ui.menu_button("Help", |ui| {
-                        let about = ui.button("About cuemol-rs");
-                        self.record_ui_rect("About cuemol-rs", &about);
+                        let about = ui.button("About CueMol3");
+                        self.record_ui_rect("About CueMol3", &about);
                         if about.clicked() {
                             let runtime = web_sys::window().and_then(|window| window.navigator().user_agent().ok()).unwrap_or_else(|| "unavailable".into());
                             self.about.open(cuemol_command::about::rows(cuemol_command::about::Frontend::Browser, &runtime));

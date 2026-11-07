@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "cuemol-rs",
+  "productName": "CueMol3",
   "version": "0.1.0",
   "identifier": "org.cuemol.cuemol2",
   "build": {
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "cuemol-rs",
+        "title": "CueMol3",
         "width": 1280,
         "height": 800,
         "minWidth": 760,
