@@ -1033,7 +1033,7 @@
   },
   {
     "name": "render_image",
-    "description": "Render PNG using the bundled Rust Umbreon renderer. Optional sceneId and viewId select a target without changing the active view.",
+    "description": "Render PNG using the scene-selected Umbreon, NPR or native POV-Ray backend. An explicit style selects Umbreon GI or NPR. Optional sceneId and viewId select a target without changing the active view.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -5262,7 +5262,7 @@
   },
   {
     "name": "set_render_settings",
-    "description": "Set scene render parameters as key=value pairs separated by semicolons. Supported keys include width, height, unit, dpi, transparentBg, projection, clipPlane, edgeLines, and supported umbreon or umbreon_npr parameters. Unknown settings return an error.",
+    "description": "Set scene render parameters as key=value pairs separated by semicolons. Supported keys include width, height, unit, dpi, transparentBg, projection, clipPlane, edgeLines, and supported povray, umbreon or umbreon_npr parameters. Unknown settings return an error.",
     "inputSchema": {
       "type": "object",
       "properties": {

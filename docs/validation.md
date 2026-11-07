@@ -1,5 +1,56 @@
 # Validation evidence
 
+## Shared POV-Ray still-image rendering
+
+The native egui Rendering window now runs POV-Ray alongside Umbreon and NPR.
+The POV-Ray menu selects that backend in the shared window. Scene-owned typed
+settings control projection, stereo, clipping, shadows, radiosity, lighting,
+post-blending, transparency and pixel labels. Completed images use the same
+history, settings snapshot, DPI, Save and Copy paths. Executable/include paths
+resolve through the existing tool preferences and bundled defaults; unavailable
+paths disable Start with an inline explanation. Browser settings persist but
+execution explicitly requires the native application. The shared screenshot
+and image commands honor the stored backend; an explicit style selects Umbreon
+or NPR instead.
+
+Preparation exports the selected scene/view into an owned temporary directory.
+The process streams bounded diagnostics, supports cancellation before and during
+execution, validates its PNG dimensions, overlays projected labels and returns
+the common image payload. Failure leaves prior GUI results intact, and dropping
+the native application signals and briefly joins its render worker. Label
+rasterization is now a separate headless feature; only its GPU upload layer
+requires the offscreen renderer.
+
+The actual-window run exposed a crash when a 3000 by 2500 result exceeded the
+device's 2048-pixel texture limit. Preview uploads now use bounded tiles without
+downsampling. The viewer retains the original dimensions and image bytes, so
+history, 100% framing and file/clipboard output keep their resolution. A focused
+regression covers both initial display and reselecting an oversized image.
+
+All 83 command tests pass, with three optional tests ignored in the ordinary run.
+The new real-POV test was run explicitly and passes transparent output, label
+composition and file/image equality. All 231 native model tests, 68 shared egui
+tests and 194 macOS Tauri model tests pass; five existing Tauri tests remain
+ignored. Three core POV tests and six CPU font tests pass. Six browser cases
+cover backend settings, target behavior and the POV-Ray native requirement;
+the two POV-Ray cases pass again after the preview repair. Native and WASM
+builds pass. The Tauri rendering window and movie integration remain separate
+follow-up requirements.
+
+The final Linux OS-input run passes backend selection, real transparent rendering,
+invalid-setting failure preservation and cancellation with verified child-process
+exit. It then renders a 3000 by 2500 image, displays it without a texture-limit
+panic and copies the original dimensions. The active camera remains unchanged;
+screenshots were inspected. Earlier harness attempts did not wait for clipboard
+replacement or observed only the main thread's child list; those attempts are
+not counted as successful cancellation/output checks.
+
+Usage previously described only Umbreon/NPR in the shared window and has been
+updated. The current reference's POV-Ray backend also reads explicit lighting
+values regardless of its stored lightDefault flag; this implementation follows
+that behavior. Its reference exporter hardcodes pixel images off, whereas this
+port retains its existing optional label/image composition support.
+
 ## Render targets and scene-local rendering
 
 Native egui and browser Rendering windows now select any existing scene/view.

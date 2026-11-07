@@ -1288,6 +1288,27 @@ struct NativeFileReaderOptions<'a> {
 }
 
 #[derive(Debug)]
+struct NativeRenderWorker {
+    cancel: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for NativeRenderWorker {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !thread.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if thread.is_finished() {
+            let _ = thread.join();
+        }
+    }
+}
+
 struct GuiApplication {
     mcp_listen_port: Option<u16>,
     agent: cuemol_ui::AgentPanel,
@@ -1454,6 +1475,8 @@ struct GuiApplication {
     ray_size: [u32; 2],
     ray_panel: cuemol_ui::RenderPanel,
     ray_cancel: Option<Arc<AtomicBool>>,
+    ray_progress: Option<cuemol_command::pov::PovProgress>,
+    ray_worker: Option<NativeRenderWorker>,
     ray_job: Option<mpsc::Receiver<std::result::Result<serde_json::Value, String>>>,
     pov_render_settings: NativePovRenderSettings,
     pov_render_job: Option<NativePovRenderJob>,
@@ -4720,6 +4743,8 @@ impl GuiApplication {
             ray_size: [1200, 900],
             ray_panel: cuemol_ui::RenderPanel::default(),
             ray_cancel: None,
+            ray_progress: None,
+            ray_worker: None,
             ray_job: None,
             mcp_listen_port: None,
             pov_render_settings: NativePovRenderSettings::default(),
@@ -14965,6 +14990,7 @@ impl GuiApplication {
         self.tool_dialog = Some("Native rendering".into());
     }
 
+    #[cfg(test)]
     fn apply_native_render_settings(
         &mut self,
         settings: &str,
@@ -15068,6 +15094,11 @@ impl GuiApplication {
             self.ray_job.is_some(),
             cuemol_ui::RenderControls {
                 can_start: self.ray_panel.targets.current().is_some(),
+                pov_error: if self.ray_panel.editor.backend() == "povray" {
+                    cuemol_command::pov::availability(&self.state).err()
+                } else {
+                    None
+                },
                 view_size: if self.state.active_view_summary().map(|view| view.uid.get())
                     != self.ray_panel.targets.view()
                 {
@@ -15171,12 +15202,21 @@ impl GuiApplication {
                 );
                 match result {
                     Ok(prepared) => {
+                        self.ray_progress = prepared.pov_progress();
                         let (sender, receiver) = mpsc::channel();
                         let cancel = Arc::new(AtomicBool::new(false));
                         self.ray_cancel = Some(cancel.clone());
-                        std::thread::spawn(move || {
-                            let _ = sender
-                                .send(prepared.run_with_cancel(&cancel).map_err(|e| e.to_string()));
+                        let worker_cancel = cancel.clone();
+                        let thread = std::thread::spawn(move || {
+                            let _ = sender.send(
+                                prepared
+                                    .run_with_cancel(&worker_cancel)
+                                    .map_err(|e| e.to_string()),
+                            );
+                        });
+                        self.ray_worker = Some(NativeRenderWorker {
+                            cancel,
+                            thread: Some(thread),
                         });
                         self.ray_panel.begin(
                             ctx,
@@ -15209,6 +15249,12 @@ impl GuiApplication {
     }
 
     fn poll_native_render(&mut self, ctx: &egui::Context) {
+        if let Some(progress) = &self.ray_progress {
+            let log = progress.text();
+            if !log.is_empty() {
+                self.ray_panel.message = log;
+            }
+        }
         let Some(receiver) = self.ray_job.take() else {
             return;
         };
@@ -15222,13 +15268,34 @@ impl GuiApplication {
             Ok(Ok(value)) => self.ray_panel.result(ctx, &value),
         };
         self.ray_cancel = None;
+        self.ray_progress = None;
+        self.ray_worker = None;
         if let Err(error) = result {
             self.ray_panel.failed(error);
         }
-        self.set_status(self.ray_panel.message.clone());
+        self.set_status(
+            self.ray_panel
+                .message
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+        );
     }
 
     fn open_pov_render_tool(&mut self) {
+        self.open_native_render();
+        if self.ray_job.is_none() && self.ray_panel.editor.backend() != "povray" {
+            self.ray_panel
+                .editor
+                .values
+                .insert("backend".into(), serde_json::json!("povray"));
+            self.ray_panel.editor.edited(0.);
+        }
+    }
+
+    #[cfg(test)]
+    fn open_legacy_pov_render_tool(&mut self) {
         self.render_backend = "POV-Ray".to_string();
         self.pov_close_confirmation = false;
         if let Some(view) = self.state.active_view_summary() {
@@ -31590,6 +31657,50 @@ mod tests {
     }
 
     #[test]
+    fn native_render_worker_cancels_and_joins_when_the_application_is_dropped() {
+        let mut app = GuiApplication::new();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let finished = Arc::new(AtomicBool::new(false));
+        let worker_finished = finished.clone();
+        let thread = std::thread::spawn(move || {
+            while !worker_cancel.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            worker_finished.store(true, Ordering::Relaxed);
+        });
+        app.ray_worker = Some(NativeRenderWorker {
+            cancel: cancel.clone(),
+            thread: Some(thread),
+        });
+        drop(app);
+        assert!(cancel.load(Ordering::Relaxed) && finished.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn native_pov_menu_opens_shared_settings_and_records_one_scene_edit() {
+        let mut app = GuiApplication::new();
+        app.state.new_scene("pov", true);
+        app.open_pov_render_tool();
+        assert_eq!(app.tool_dialog.as_deref(), Some("Native rendering"));
+        assert_eq!(app.ray_panel.editor.backend(), "povray");
+        let mut camera = cuemol_qsys::Camera::new();
+        assert!(app.flush_native_render_settings(&mut camera, 1., true));
+        assert_eq!(
+            cuemol_command::render_settings(&app.state).unwrap()["backend"],
+            "povray"
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+        app.open_pov_render_tool();
+        assert!(app.flush_native_render_settings(&mut camera, 2., true));
+        assert_eq!(app.undo_stack.len(), 1);
+        let mut controller = CameraController::default();
+        app.undo(&mut controller);
+        app.sync_native_render_settings();
+        assert_eq!(app.ray_panel.editor.backend(), "umbreon");
+    }
+
+    #[test]
     fn native_render_target_edits_only_the_selected_scene_and_preserves_active_view() {
         let mut app = GuiApplication::new();
         let first = app.state.new_scene("first", true).result_scene;
@@ -36732,7 +36843,7 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&script, permissions).unwrap();
 
-        app.open_pov_render_tool();
+        app.open_legacy_pov_render_tool();
         let target_scene = app.pov_render_settings.target_scene_uid.unwrap();
         let mut target_camera = cuemol_qsys::Camera::new();
         target_camera.set_center(Vector4::new3(4.0, 5.0, 6.0));

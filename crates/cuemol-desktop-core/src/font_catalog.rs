@@ -28,9 +28,9 @@ pub fn families() -> Vec<String> {
         .as_ref()
         .is_none_or(|previous| previous.generation != generation)
     {
-        #[cfg(feature = "offscreen")]
+        #[cfg(feature = "text-rendering")]
         let names = crate::labels::font_families();
-        #[cfg(not(feature = "offscreen"))]
+        #[cfg(not(feature = "text-rendering"))]
         let names = Vec::new();
         *cache = Some(Catalog {
             generation,
@@ -61,25 +61,25 @@ fn build_families(mut names: Vec<String>) -> Vec<String> {
 }
 
 pub fn generation() -> u32 {
-    #[cfg(all(feature = "offscreen", target_arch = "wasm32"))]
+    #[cfg(all(feature = "text-rendering", target_arch = "wasm32"))]
     {
         return crate::labels::font_catalog_generation();
     }
-    #[cfg(not(all(feature = "offscreen", target_arch = "wasm32")))]
+    #[cfg(not(all(feature = "text-rendering", target_arch = "wasm32")))]
     {
         0
     }
 }
 
 pub fn request() {
-    #[cfg(all(feature = "offscreen", target_arch = "wasm32"))]
+    #[cfg(all(feature = "text-rendering", target_arch = "wasm32"))]
     crate::labels::request_font_catalog();
 }
 
 pub fn on_change(callback: impl Fn() + 'static) {
-    #[cfg(all(feature = "offscreen", target_arch = "wasm32"))]
+    #[cfg(all(feature = "text-rendering", target_arch = "wasm32"))]
     crate::labels::on_font_catalog_change(callback);
-    #[cfg(not(all(feature = "offscreen", target_arch = "wasm32")))]
+    #[cfg(not(all(feature = "text-rendering", target_arch = "wasm32")))]
     let _ = callback;
 }
 
@@ -115,7 +115,7 @@ pub fn css_family(family: &str) -> String {
 }
 
 pub fn preview(family: &str, text: &str, scale: f32) -> Option<FontPreview> {
-    #[cfg(feature = "offscreen")]
+    #[cfg(feature = "text-rendering")]
     {
         let image = crate::labels::rasterize_label(
             &crate::GuiAtomLabel {
@@ -140,14 +140,14 @@ pub fn preview(family: &str, text: &str, scale: f32) -> Option<FontPreview> {
             alpha: image.alpha,
         })
     }
-    #[cfg(not(feature = "offscreen"))]
+    #[cfg(not(feature = "text-rendering"))]
     {
         let _ = (family, text, scale);
         None
     }
 }
 
-#[cfg(all(test, feature = "offscreen", not(target_arch = "wasm32")))]
+#[cfg(all(test, feature = "text-rendering", not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

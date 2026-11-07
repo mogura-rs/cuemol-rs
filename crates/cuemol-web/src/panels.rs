@@ -228,6 +228,7 @@ impl App {
             self.render_cancel.is_some(),
             cuemol_ui::RenderControls {
                 can_start: !self.busy && self.render_panel.targets.current().is_some(),
+                pov_error: Some("POV-Ray runs in the native application. Choose Umbreon or Umbreon (NPR) to render here.".into()),
                 view_size: if self.state.active_view_summary().map(|view| view.uid.get())
                     != self.render_panel.targets.view()
                 {

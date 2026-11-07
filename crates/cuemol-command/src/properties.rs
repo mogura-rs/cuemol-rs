@@ -199,9 +199,9 @@ pub fn call_tool(
                         .unwrap_or_else(|| parsed.to_string());
                     property.parse(&text).is_ok()
                         && match local_key {
-                            "backend" => parsed
-                                .as_str()
-                                .is_some_and(|v| matches!(v, "" | "umbreon" | "umbreon_npr")),
+                            "backend" => parsed.as_str().is_some_and(|v| {
+                                matches!(v, "" | "umbreon" | "umbreon_npr" | "povray")
+                            }),
                             "projection" => parsed
                                 .as_str()
                                 .is_some_and(|v| matches!(v, "perspective" | "orthographic")),
@@ -213,9 +213,9 @@ pub fn call_tool(
                         }
                 } else {
                     match local_key {
-                        "backend" => parsed
-                            .as_str()
-                            .is_some_and(|v| matches!(v, "" | "umbreon" | "umbreon_npr")),
+                        "backend" => parsed.as_str().is_some_and(|v| {
+                            matches!(v, "" | "umbreon" | "umbreon_npr" | "povray")
+                        }),
                         "projection" => parsed
                             .as_str()
                             .is_some_and(|v| matches!(v, "perspective" | "orthographic")),

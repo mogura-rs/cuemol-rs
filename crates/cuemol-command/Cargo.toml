@@ -27,6 +27,7 @@ regex.workspace = true
 ryu-js = "1.0.2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cuemol-desktop-core = { workspace = true, features = ["text-rendering"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 semver = "1"
 tiny_http = "0.12"

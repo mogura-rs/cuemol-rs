@@ -9,6 +9,12 @@ use std::time::Duration;
 
 static NEXT_POV_JOB_ID: AtomicU64 = AtomicU64::new(1);
 
+pub fn availability(state: &cuemol_desktop_core::DesktopAppState) -> Result<(), String> {
+    crate::pov_render::tool_paths(state)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 pub fn run_cli_request(source: &str) -> Result<(), String> {
     let input: Box<dyn Read> = if source == "-" {
         Box::new(std::io::stdin())
@@ -247,6 +253,33 @@ pub fn povray_args(task: &PovProcessTask) -> Vec<String> {
     args
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct PovProgress(Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+
+impl PovProgress {
+    pub fn text(&self) -> String {
+        self.0
+            .lock()
+            .map(|lines| lines.iter().cloned().collect::<Vec<_>>().join("\n"))
+            .unwrap_or_default()
+    }
+
+    fn append(&self, bytes: &[u8]) {
+        let Ok(mut lines) = self.0.lock() else {
+            return;
+        };
+        for line in String::from_utf8_lossy(bytes)
+            .split(['\n', '\r'])
+            .filter(|line| !line.trim().is_empty())
+        {
+            lines.push_back(line.chars().take(4096).collect());
+            while lines.len() > 200 {
+                lines.pop_front();
+            }
+        }
+    }
+}
+
 pub fn run_pov_process(
     task: PovProcessTask,
     cancel: Arc<AtomicBool>,
@@ -257,17 +290,30 @@ pub fn run_pov_process(
 pub fn run_pov_process_with_poll(
     task: PovProcessTask,
     cancel: Arc<AtomicBool>,
-    mut poll: impl FnMut(),
+    poll: impl FnMut(),
 ) -> Result<PovProcessOutput, String> {
+    run_pov_process_with_progress(task, cancel, poll, None)
+}
+
+pub fn run_pov_process_with_progress(
+    task: PovProcessTask,
+    cancel: Arc<AtomicBool>,
+    mut poll: impl FnMut(),
+    progress: Option<PovProgress>,
+) -> Result<PovProcessOutput, String> {
+    poll();
+    if cancel.load(Ordering::Relaxed) {
+        return Err("POV-Ray rendering cancelled".into());
+    }
     let blend_groups = if task.options.post_blend {
         read_post_blend_groups(&task.input_path)?
     } else {
         Vec::new()
     };
     if blend_groups.is_empty() {
-        return run_single_pov_process_with_poll(task, cancel, &mut poll);
+        return run_single_pov_process_with_poll(task, cancel, &mut poll, progress.as_ref());
     }
-    run_post_blend_process(task, blend_groups, cancel, &mut poll)
+    run_post_blend_process(task, blend_groups, cancel, &mut poll, progress.as_ref())
 }
 
 fn run_post_blend_process(
@@ -275,6 +321,7 @@ fn run_post_blend_process(
     blend_groups: Vec<u8>,
     cancel: Arc<AtomicBool>,
     poll: &mut impl FnMut(),
+    progress: Option<&PovProgress>,
 ) -> Result<PovProcessOutput, String> {
     if task.output_path.exists() {
         fs::remove_file(&task.output_path).map_err(|error| {
@@ -299,14 +346,15 @@ fn run_post_blend_process(
         background_task.options.post_blend = false;
         background_task.options.blend_group = Some(10);
         let background =
-            run_single_pov_process_with_poll(background_task, Arc::clone(&cancel), poll)?;
+            run_single_pov_process_with_poll(background_task, Arc::clone(&cancel), poll, progress)?;
         let mut log = background.log;
         for (&group, layer_path) in blend_groups.iter().zip(&layer_paths) {
             let mut layer_task = task.clone();
             layer_task.output_path = layer_path.clone();
             layer_task.options.post_blend = false;
             layer_task.options.blend_group = Some(group);
-            let layer = run_single_pov_process_with_poll(layer_task, Arc::clone(&cancel), poll)?;
+            let layer =
+                run_single_pov_process_with_poll(layer_task, Arc::clone(&cancel), poll, progress)?;
             log.push_str(&layer.log);
         }
         let layers = layer_paths
@@ -354,7 +402,12 @@ fn run_single_pov_process_with_poll(
     task: PovProcessTask,
     cancel: Arc<AtomicBool>,
     poll: &mut impl FnMut(),
+    progress: Option<&PovProgress>,
 ) -> Result<PovProcessOutput, String> {
+    poll();
+    if cancel.load(Ordering::Relaxed) {
+        return Err("POV-Ray rendering cancelled".into());
+    }
     if task.executable.trim().is_empty() {
         return Err("POV-Ray executable path is required".to_string());
     }
@@ -394,8 +447,10 @@ fn run_single_pov_process_with_poll(
         .stderr
         .take()
         .ok_or_else(|| "failed to capture POV-Ray errors".to_string())?;
-    let stdout_reader = thread::spawn(move || read_process_stream(stdout));
-    let stderr_reader = thread::spawn(move || read_process_stream(stderr));
+    let stdout_progress = progress.cloned();
+    let stderr_progress = progress.cloned();
+    let stdout_reader = thread::spawn(move || read_process_stream(stdout, stdout_progress));
+    let stderr_reader = thread::spawn(move || read_process_stream(stderr, stderr_progress));
 
     let status = loop {
         if cancel.load(Ordering::Relaxed) {
@@ -627,7 +682,7 @@ fn blend_pov_passes_buffered(
     })
 }
 
-fn validate_options(options: &PovProcessOptions) -> Result<(), String> {
+pub(crate) fn validate_options(options: &PovProcessOptions) -> Result<(), String> {
     if options.width == 0 || options.height == 0 {
         return Err("POV-Ray image dimensions must be positive".to_string());
     }
@@ -648,7 +703,7 @@ fn validate_options(options: &PovProcessOptions) -> Result<(), String> {
     Ok(())
 }
 
-fn read_process_stream(mut stream: impl Read) -> Vec<u8> {
+fn read_process_stream(mut stream: impl Read, progress: Option<PovProgress>) -> Vec<u8> {
     let mut output = Vec::new();
     let mut block = [0u8; 8192];
     while let Ok(size) = stream.read(&mut block) {
@@ -657,6 +712,9 @@ fn read_process_stream(mut stream: impl Read) -> Vec<u8> {
         }
         let keep = size.min((1024 * 1024usize).saturating_sub(output.len()));
         output.extend_from_slice(&block[..keep]);
+        if let Some(progress) = &progress {
+            progress.append(&block[..size]);
+        }
     }
     output
 }
@@ -666,6 +724,47 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
+
+    #[test]
+    fn live_progress_can_cancel_before_process_exit_and_keeps_bounded_logs() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("povray");
+        fs::write(
+            &executable,
+            "#!/bin/sh\necho ready-to-cancel\nexec sleep 30\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let input = directory.path().join("render.pov");
+        fs::write(&input, "").unwrap();
+        let progress = PovProgress::default();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let start = std::time::Instant::now();
+        let error = run_pov_process_with_progress(
+            PovProcessTask {
+                executable: executable.to_string_lossy().into_owned(),
+                include_dir: String::new(),
+                input_path: input,
+                output_path: directory.path().join("render.png"),
+                options: Default::default(),
+            },
+            cancel.clone(),
+            || {
+                if progress.text().contains("ready-to-cancel") {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+            Some(progress.clone()),
+        )
+        .unwrap_err();
+        assert!(error.contains("cancelled"));
+        assert!(start.elapsed() < Duration::from_secs(5));
+        for _ in 0..300 {
+            progress.append(&vec![b'x'; 8192]);
+        }
+        assert_eq!(progress.text().lines().count(), 200);
+        assert!(progress.text().lines().all(|line| line.len() <= 4096));
+    }
 
     #[test]
     fn png_blending_preserves_rgb_rgba_rows_and_interlaced_input() {

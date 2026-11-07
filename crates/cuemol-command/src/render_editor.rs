@@ -121,7 +121,7 @@ impl RenderEditor {
         self.values = defaults();
         self.values.extend(stored.clone());
         self.changed_at = None;
-        if !matches!(self.text("backend"), "umbreon" | "umbreon_npr") {
+        if !matches!(self.text("backend"), "umbreon" | "umbreon_npr" | "povray") {
             self.values.insert("backend".into(), json!("umbreon"));
         }
         for prefix in ["umbreon", "umbreon_npr"] {

@@ -21,14 +21,20 @@ pub enum RenderAction {
 
 pub struct RenderControls {
     pub can_start: bool,
+    pub pov_error: Option<String>,
     pub view_size: [u32; 2],
+}
+
+struct PreviewTile {
+    texture: TextureHandle,
+    origin: egui::Vec2,
 }
 
 pub struct RenderPanel {
     tab: usize,
     pub editor: RenderEditor,
     pub targets: cuemol_command::render_editor::RenderTargets,
-    preview: Option<TextureHandle>,
+    preview: Option<Vec<PreviewTile>>,
     pub png: Option<Arc<[u8]>>,
     pub history: RenderHistory,
     pending_source: Option<RenderSource>,
@@ -114,14 +120,40 @@ impl RenderPanel {
             size[1],
             elapsed.map(|s| format!(" in {s:.1} s")).unwrap_or_default()
         );
+        if let Some(log) = value["_log"].as_str().filter(|log| !log.is_empty()) {
+            self.message.push('\n');
+            self.message.push_str(log);
+        }
         Ok(())
     }
 
     fn replace_preview(&mut self, ctx: &Context, png: Arc<[u8]>, image: image::RgbaImage) {
         let size = [image.width() as usize, image.height() as usize];
-        let image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
-        self.preview =
-            Some(ctx.load_texture("render-preview", image, egui::TextureOptions::LINEAR));
+        let limit = ctx.input(|input| input.max_texture_side).max(1);
+        let mut tiles = Vec::new();
+        for y in (0..size[1]).step_by(limit) {
+            for x in (0..size[0]).step_by(limit) {
+                let tile_size = [(size[0] - x).min(limit), (size[1] - y).min(limit)];
+                let tile = image::imageops::crop_imm(
+                    &image,
+                    x as u32,
+                    y as u32,
+                    tile_size[0] as u32,
+                    tile_size[1] as u32,
+                )
+                .to_image();
+                let color = egui::ColorImage::from_rgba_unmultiplied(tile_size, tile.as_raw());
+                tiles.push(PreviewTile {
+                    texture: ctx.load_texture(
+                        "render-preview",
+                        color,
+                        egui::TextureOptions::LINEAR,
+                    ),
+                    origin: egui::vec2(x as f32, y as f32),
+                });
+            }
+        }
+        self.preview = Some(tiles);
         self.viewer
             .replace(egui::vec2(size[0] as f32, size[1] as f32));
         self.png = Some(png);
@@ -183,8 +215,16 @@ impl RenderPanel {
                             egui::vec2(left_width, height),
                             egui::Layout::top_down(egui::Align::LEFT),
                             |ui| {
-                                action = self.preview(ui, (height - 176.).max(120.), running);
-                                let run = self.actions(ui, running, controls.can_start);
+                                let controls_height = if self.editor.backend() == "povray"
+                                    && controls.pov_error.is_some()
+                                {
+                                    230.
+                                } else {
+                                    176.
+                                };
+                                action =
+                                    self.preview(ui, (height - controls_height).max(120.), running);
+                                let run = self.actions(ui, running, &controls);
                                 if run != RenderAction::None {
                                     action = run;
                                 }
@@ -202,7 +242,7 @@ impl RenderPanel {
                 } else {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         action = self.preview(ui, 240., running);
-                        let run = self.actions(ui, running, controls.can_start);
+                        let run = self.actions(ui, running, &controls);
                         if run != RenderAction::None {
                             action = run;
                         }
@@ -341,7 +381,7 @@ impl RenderPanel {
         let painter = ui.painter().with_clip_rect(rect);
         painter.rect_filled(rect, 0., ui.visuals().panel_fill);
         self.viewer.viewport = rect.size();
-        if let Some(texture) = &self.preview {
+        if let Some(tiles) = &self.preview {
             if !self.viewer.fitted {
                 self.viewer.fit();
             }
@@ -388,12 +428,20 @@ impl RenderPanel {
                         );
                     }
                 }
-                painter.image(
-                    texture.id(),
-                    image_rect,
-                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1., 1.)),
-                    egui::Color32::WHITE,
-                );
+                for tile in tiles {
+                    let tile_rect = egui::Rect::from_min_size(
+                        image_rect.min + tile.origin * self.viewer.scale,
+                        tile.texture.size_vec2() * self.viewer.scale,
+                    );
+                    if tile_rect.intersects(visible) {
+                        painter.image(
+                            tile.texture.id(),
+                            tile_rect,
+                            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1., 1.)),
+                            egui::Color32::WHITE,
+                        );
+                    }
+                }
             }
         } else {
             let text = painter.layout(
@@ -411,8 +459,15 @@ impl RenderPanel {
         action
     }
 
-    fn actions(&mut self, ui: &mut egui::Ui, running: bool, can_start: bool) -> RenderAction {
+    fn actions(
+        &mut self,
+        ui: &mut egui::Ui,
+        running: bool,
+        controls: &RenderControls,
+    ) -> RenderAction {
         let mut action = RenderAction::None;
+        let available = self.editor.backend() != "povray" || controls.pov_error.is_none();
+        let can_start = controls.can_start && available;
         ui.separator();
         ui.horizontal_wrapped(|ui| {
             let response = ui.add_enabled(!running && can_start, egui::Button::new("Start Render"));
@@ -432,15 +487,17 @@ impl RenderPanel {
                 let before = self.editor.backend().to_string();
                 let mut backend = before.clone();
                 let response = egui::ComboBox::from_id_salt("render-backend")
-                    .selected_text(if backend == "umbreon_npr" {
-                        "Umbreon (NPR)"
-                    } else {
-                        "Umbreon"
+                    .selected_text(match backend.as_str() {
+                        "povray" => "POV-Ray",
+                        "umbreon_npr" => "Umbreon (NPR)",
+                        _ => "Umbreon",
                     })
                     .show_ui(ui, |ui| {
-                        for (id, label) in
-                            [("umbreon", "Umbreon"), ("umbreon_npr", "Umbreon (NPR)")]
-                        {
+                        for (id, label) in [
+                            ("umbreon", "Umbreon"),
+                            ("umbreon_npr", "Umbreon (NPR)"),
+                            ("povray", "POV-Ray"),
+                        ] {
                             let response = ui.selectable_value(&mut backend, id.into(), label);
                             self.record(&format!("Render backend {id}"), &response);
                         }
@@ -483,6 +540,11 @@ impl RenderPanel {
                 self.record("Render target", &response);
             });
         });
+        if self.editor.backend() == "povray" {
+            if let Some(error) = &controls.pov_error {
+                ui.colored_label(ui.visuals().warn_fg_color, error);
+            }
+        }
         ui.separator();
         ui.weak("Log");
         egui::ScrollArea::vertical()
@@ -767,7 +829,7 @@ impl RenderPanel {
             }
             let response = egui::CollapsingHeader::new(group)
                 .id_salt(("render-group", group))
-                .default_open(matches!(group, "Camera" | "Hatching"))
+                .default_open(matches!(group, "Camera" | "Hatching" | "POV-Ray"))
                 .show(ui, |ui| {
                     for (row, local) in selected {
                         self.property(ui, row, local);
@@ -825,10 +887,14 @@ impl RenderPanel {
                         .selected_text(current)
                         .show_ui(ui, |ui| {
                             for (choice, stored) in options.iter().zip(values) {
-                                ui.selectable_value(
+                                let response = ui.selectable_value(
                                     &mut value,
                                     stored.clone(),
                                     choice.as_str().unwrap(),
+                                );
+                                self.record(
+                                    &format!("Render {key} {}", choice.as_str().unwrap()),
+                                    &response,
                                 );
                             }
                         })
@@ -1000,6 +1066,40 @@ mod tests {
         assert_eq!(panel.history.selected(), Some(0));
         panel.clear_results();
         assert!(panel.history.is_empty() && panel.png.is_none() && panel.preview.is_none());
+    }
+
+    #[test]
+    fn large_render_previews_preserve_original_pixels_with_bounded_textures() {
+        let ctx = Context::default();
+        ctx.input_mut(|input| input.max_texture_side = 64);
+        let value = rendered([23, 45, 67, 128], [150, 100]);
+        let mut panel = RenderPanel::default();
+        panel.result(&ctx, &value).unwrap();
+        let expected = base64::engine::general_purpose::STANDARD
+            .decode(value["_image"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(panel.png.as_deref(), Some(expected.as_slice()));
+        assert_eq!(panel.viewer.size, egui::vec2(150., 100.));
+        let tiles = panel.preview.as_ref().unwrap();
+        assert_eq!(tiles.len(), 6);
+        assert_eq!(tiles[5].origin, egui::vec2(128., 64.));
+        assert_eq!(tiles[5].texture.size(), [22, 36]);
+        assert!(tiles
+            .iter()
+            .all(|tile| tile.texture.size().iter().all(|size| *size <= 64)));
+        assert_eq!(
+            tiles
+                .iter()
+                .map(|tile| tile.texture.size()[0] * tile.texture.size()[1])
+                .sum::<usize>(),
+            150 * 100
+        );
+        panel
+            .result(&ctx, &rendered([0, 0, 0, 255], [10, 20]))
+            .unwrap();
+        panel.select_result(&ctx, 0).unwrap();
+        assert_eq!(panel.preview.as_ref().unwrap().len(), 6);
+        assert_eq!(panel.png.as_deref(), Some(expected.as_slice()));
     }
 
     #[test]

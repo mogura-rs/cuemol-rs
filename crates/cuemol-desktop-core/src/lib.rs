@@ -122,7 +122,7 @@ use std::sync::{Mutex, OnceLock};
 mod center_mark;
 #[cfg(feature = "offscreen")]
 pub mod effects;
-#[cfg(feature = "offscreen")]
+#[cfg(feature = "text-rendering")]
 pub mod labels;
 mod memory_io;
 #[cfg(feature = "offscreen")]
@@ -15244,7 +15244,8 @@ impl DesktopAppState {
         camera: &Camera,
         options: GuiPovSceneOptions,
     ) -> Result<usize> {
-        let snapshot = self.render_snapshot(scene_uid, selection_text)?;
+        let mut snapshot = self.render_snapshot(scene_uid, selection_text)?;
+        self.apply_scene_color_proof_for(scene_uid, &mut snapshot)?;
         let background = self
             .scene_manager()
             .scene(scene_uid)
@@ -15271,6 +15272,7 @@ impl DesktopAppState {
             camera.set_perspective(perspective);
         }
         let mut exporter = PovSceneExporter::new();
+        exporter.set_perspective(camera.is_perspective());
         if let Some(scene) = self.scene_manager().scene(scene_uid) {
             let styles = self.scene_styles(scene);
             exporter.set_preamble(styles.get_config("pov", "preamble", scene_uid.get()));

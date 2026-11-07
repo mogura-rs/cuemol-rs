@@ -412,3 +412,35 @@ for (const backend of ['webgl', 'webgpu']) {
     expect(errors).toEqual([]);
   });
 }
+
+for (const backend of ['webgl','webgpu']) {
+  test(`POV-Ray settings persist while browser execution reports its native requirement (${backend})`, async ({page},testInfo) => {
+    const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    await open(page,backend);
+    await click(page,'Start Render');
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Rendered 64 × 48');
+    const previous=await save(page);
+    const read=async expression=>JSON.parse((await call(page,'execute_script',{source:`var r=scene.getAppData('render');print(${expression});`})).message).log.trim();
+    await click(page,'Render backend');await click(page,'Render backend povray');
+    await expect.poll(()=>read('r.backend')).toBe('povray');
+    await click(page,'Render settings Render');
+    await field(page,'Light intensity',1.1);
+    await click(page,'Radiosity mode');await click(page,'Render radiosityMode Fast');
+    await expect.poll(()=>read('r.povray.lightIntensity+":"+r.povray.radiosityMode')).toBe('1.1:Fast');
+    await click(page,'Start Render');
+    expect((await page.evaluate(()=>window.cuemol.status())).busy).toBe(false);
+    expect((await save(page)).equals(previous)).toBe(true);
+    const failed=await call(page,'get_screenshot');
+    expect(failed.message).toContain('POV-Ray runs in the native application');
+    await click(page,'Render backend');await click(page,'Render backend umbreon');
+    await expect.poll(()=>read('r.backend')).toBe('umbreon');
+    await click(page,'Render backend');await click(page,'Render backend povray');
+    await expect.poll(()=>read('r.povray.lightIntensity+":"+r.povray.radiosityMode')).toBe('1.1:Fast');
+    await page.screenshot({path:testInfo.outputPath(`render-pov-${backend}.png`)});
+    const viewport=page.viewportSize();
+    for(const key of ['Start Render','Render target','Radiosity mode']) {
+      const [x,y,w,h]=await rect(page,key);expect(x+w).toBeLessThanOrEqual(viewport.width);expect(y+h).toBeLessThanOrEqual(viewport.height);
+    }
+    expect(errors).toEqual([]);
+  });
+}

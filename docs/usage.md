@@ -855,6 +855,14 @@ its Detail tab edits hatch layers and tone specifications. Selecting a quality
 step changes its own settings, while manual edits are reflected as Custom.
 Switching the rendering backend retains each backend's scene settings.
 
+The native window also offers POV-Ray, including radiosity, lighting, shadows,
+stereo, clipping and post-blending. The POV-Ray menu opens this same window.
+It uses the executable and include directory selected in Settings > Tools,
+falling back to the bundled executable. Missing tools appear beside the disabled
+Start button. The browser can edit and save these settings, but POV-Ray execution
+requires the native application. Shared image commands also use a scene's selected
+POV-Ray backend; an explicit `style` argument selects the built-in renderer.
+
 Settings edits are stored after a short quiet period and grouped into one Undo
 entry. Closing the window, switching scenes or starting a render flushes pending
 edits to their original scene. Undo/Redo and other scene-setting edits reload the
@@ -883,7 +891,10 @@ result even when it exceeds that budget. Only the displayed image is decoded.
 Fit, 100% and the zoom buttons control image framing. Drag or scroll to pan;
 pinch or Ctrl/Command-wheel to zoom around the pointer. Switching results keeps
 framing, with the zoom adjusted for a different image size. Clipboard errors
-appear in the bounded, scrollable log. Tauri still uses its separate POV-Ray and
+appear in the bounded, scrollable log. POV-Ray also streams its process output
+there. Large previews use multiple GPU textures to preserve full-resolution
+viewing on devices with smaller texture limits; Save and Copy retain the original
+PNG. Tauri still uses its separate POV-Ray and
 animation windows; integrating its render history is tracked in the implementation
 checklist.
 

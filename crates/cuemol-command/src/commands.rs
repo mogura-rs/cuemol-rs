@@ -597,6 +597,36 @@ pub fn prepare_render(
             "render size must be positive and at most 32 megapixels",
         ));
     }
+    let output = if name == "render_image" {
+        Some(text(args, "fileName")?.to_string())
+    } else {
+        None
+    };
+    let dpi = settings
+        .get("dpi")
+        .and_then(Value::as_f64)
+        .unwrap_or(600.)
+        .clamp(1., 4800.);
+    if args["style"].is_null()
+        && settings
+            .get("backend")
+            .is_some_and(|value| value == "povray")
+    {
+        #[cfg(not(target_arch = "wasm32"))]
+        return Ok(PreparedRender {
+            backend: PreparedBackend::Pov(crate::pov_render::PreparedPovRender::prepare(
+                state,
+                scene_uid,
+                &camera,
+                &settings,
+                [width as u32, height as u32],
+            )?),
+            output,
+            dpi,
+        });
+        #[cfg(target_arch = "wasm32")]
+        return Err(CueMolError::invalid_argument("POV-Ray runs in the native application; choose Umbreon or Umbreon (NPR) in the browser"));
+    }
     let mut snapshot = state.render_snapshot(scene_uid, "")?;
     state.apply_scene_color_proof_for(scene_uid, &mut snapshot)?;
     let npr = args["style"]
@@ -639,23 +669,16 @@ pub fn prepare_render(
     } else {
         None
     };
-    let output = if name == "render_image" {
-        Some(text(args, "fileName")?.to_string())
-    } else {
-        None
-    };
     Ok(PreparedRender {
-        snapshot,
-        camera: camera.clone(),
-        background,
-        params,
-        hatch,
+        backend: PreparedBackend::Umbreon {
+            snapshot,
+            camera,
+            background,
+            params,
+            hatch,
+        },
         output,
-        dpi: settings
-            .get("dpi")
-            .and_then(Value::as_f64)
-            .unwrap_or(600.)
-            .clamp(1., 4800.),
+        dpi,
     })
 }
 
@@ -813,12 +836,20 @@ pub fn hatch_settings(p: &cuemol_render::HatchRenderParams) -> String {
         .join("; ")
 }
 
+enum PreparedBackend {
+    Umbreon {
+        snapshot: cuemol_render::RenderSceneSnapshot,
+        camera: Camera,
+        background: [f32; 4],
+        params: cuemol_render::UmbreonRenderParams,
+        hatch: Option<cuemol_render::HatchRenderParams>,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    Pov(crate::pov_render::PreparedPovRender),
+}
+
 pub struct PreparedRender {
-    snapshot: cuemol_render::RenderSceneSnapshot,
-    camera: Camera,
-    background: [f32; 4],
-    params: cuemol_render::UmbreonRenderParams,
-    hatch: Option<cuemol_render::HatchRenderParams>,
+    backend: PreparedBackend,
     output: Option<String>,
     dpi: f64,
 }
@@ -827,21 +858,38 @@ impl PreparedRender {
         self.output = None;
         self
     }
-
     pub fn with_dpi(mut self, dpi: f64) -> Self {
         self.dpi = dpi.clamp(1., 4800.);
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn pov_progress(&self) -> Option<crate::pov::PovProgress> {
+        match &self.backend {
+            PreparedBackend::Pov(render) => Some(render.progress()),
+            _ => None,
+        }
+    }
+
     pub fn run_with_cancel(self, cancel: &std::sync::atomic::AtomicBool) -> Result<Value> {
-        let frame = cuemol_render::render_umbreon_snapshot_with_cancel(
-            &self.snapshot,
-            &self.camera,
-            self.background,
-            &self.params,
-            self.hatch.as_ref(),
-            cancel,
-        )?;
+        let frame = match &self.backend {
+            PreparedBackend::Umbreon {
+                snapshot,
+                camera,
+                background,
+                params,
+                hatch,
+            } => cuemol_render::render_umbreon_snapshot_with_cancel(
+                snapshot,
+                camera,
+                *background,
+                params,
+                hatch.as_ref(),
+                cancel,
+            )?,
+            #[cfg(not(target_arch = "wasm32"))]
+            PreparedBackend::Pov(render) => render.run(cancel)?,
+        };
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(CueMolError::invalid_argument("Render cancelled"));
         }
@@ -849,24 +897,9 @@ impl PreparedRender {
     }
 
     pub fn run(self) -> Result<Value> {
-        let frame = if let Some(hatch) = &self.hatch {
-            cuemol_render::render_umbreon_npr_snapshot(
-                &self.snapshot,
-                &self.camera,
-                self.background,
-                &self.params,
-                hatch,
-            )?
-        } else {
-            cuemol_render::render_umbreon_snapshot(
-                &self.snapshot,
-                &self.camera,
-                self.background,
-                &self.params,
-            )?
-        };
-        self.encode(frame)
+        self.run_with_cancel(&std::sync::atomic::AtomicBool::new(false))
     }
+
     #[cfg(target_arch = "wasm32")]
     pub async fn run_async(self) -> Result<Value> {
         self.run_async_with_cancel(None).await
@@ -876,20 +909,29 @@ impl PreparedRender {
         self,
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<Value> {
+        let PreparedBackend::Umbreon {
+            snapshot,
+            camera,
+            background,
+            params,
+            hatch,
+        } = &self.backend;
         let frame = cuemol_render::render_umbreon_snapshot_async(
-            &self.snapshot,
-            &self.camera,
-            self.background,
-            &self.params,
-            self.hatch.as_ref(),
+            snapshot,
+            camera,
+            *background,
+            params,
+            hatch.as_ref(),
             cancel,
         )
         .await?;
         self.encode(frame)
     }
     fn encode(self, frame: cuemol_render::UmbreonFrame) -> Result<Value> {
-        let width = self.params.width;
-        let height = self.params.height;
+        let width = frame.width;
+        let height = frame.height;
+        #[cfg(not(target_arch = "wasm32"))]
+        let log = self.pov_progress().map(|progress| progress.text());
         let mut png = Vec::new();
         {
             let mut encoder = png::Encoder::new(&mut png, width as u32, height as u32);
@@ -918,7 +960,7 @@ impl PreparedRender {
             Ok(json!({"path":path,"width":width,"height":height}))
         } else {
             Ok(
-                json!({"width":width,"height":height,"_image":base64::engine::general_purpose::STANDARD.encode(png)}),
+                json!({"width":width,"height":height,"_image":base64::engine::general_purpose::STANDARD.encode(png),"_log":log}),
             )
         }
         #[cfg(target_arch = "wasm32")]
@@ -964,13 +1006,20 @@ mod render_target_tests {
         let before = state.clone();
         let args = json!({"sceneId":first.get(), "viewId":first_view.get()});
         let render = prepare_render(&state, &camera, "get_screenshot", &args).unwrap();
-        assert_eq!(render.snapshot, expected);
-        assert_eq!(render.camera.zoom(), 8.);
-        assert_eq!(render.background, [1., 0., 0., 1.]);
-        assert_eq!(
-            (render.params.width, render.params.height, render.dpi),
-            (64, 48, 72.)
-        );
+        let PreparedBackend::Umbreon {
+            snapshot,
+            camera: saved_camera,
+            background,
+            params,
+            ..
+        } = &render.backend
+        else {
+            panic!("unexpected backend")
+        };
+        assert_eq!(*snapshot, expected);
+        assert_eq!(saved_camera.zoom(), 8.);
+        assert_eq!(*background, [1., 0., 0., 1.]);
+        assert_eq!((params.width, params.height, render.dpi), (64, 48, 72.));
         assert_eq!(state.active_scene(), Some(second));
         assert!(before.same_undo_state(&state));
         assert_eq!(
@@ -980,8 +1029,16 @@ mod render_target_tests {
             72.
         );
         let default = prepare_render(&state, &camera, "get_screenshot", &json!({})).unwrap();
-        assert_eq!(default.camera.zoom(), 300.);
-        assert_eq!(default.snapshot.atom_count(), 0);
+        let PreparedBackend::Umbreon {
+            snapshot,
+            camera: render_camera,
+            ..
+        } = &default.backend
+        else {
+            panic!("unexpected backend")
+        };
+        assert_eq!(render_camera.zoom(), 300.);
+        assert_eq!(snapshot.atom_count(), 0);
         for bad in [
             json!({"sceneId":first.get(),"viewId":second_view.get()}),
             json!({"sceneId":0}),
