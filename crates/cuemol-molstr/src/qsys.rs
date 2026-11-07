@@ -1899,6 +1899,17 @@ impl MolScene {
         Uid::new(self.next_object_uid)
     }
 
+    /// Keep exposed identifiers reserved when comparing or restoring snapshots.
+    pub fn preserve_allocated_ids_from(&mut self, current: &Self) {
+        self.next_object_uid = self.next_object_uid.max(current.next_object_uid);
+        for object in &mut self.objects {
+            if let Some(previous) = current.object(object.uid) {
+                object.next_renderer_uid = object.next_renderer_uid.max(previous.next_renderer_uid);
+                object.mol.preserve_allocated_atom_ids_from(&previous.mol);
+            }
+        }
+    }
+
     pub fn apply_undo_changes(&mut self, from: &Self, to: &Self) {
         use cuemol_core::snapshot::{apply_map_changes, apply_value_change};
         apply_value_change(&mut self.name, &from.name, &to.name);
@@ -3609,6 +3620,16 @@ impl MolSceneManager {
 
     pub fn scene_mut(&mut self, uid: Uid) -> Option<&mut MolScene> {
         self.scenes.iter_mut().find(|scene| scene.uid == uid)
+    }
+
+    /// Restore a removed scene without reusing identifiers allocated after it.
+    pub fn restore_scene(&mut self, scene: MolScene, index: usize) -> bool {
+        if self.scene(scene.uid()).is_some() {
+            return false;
+        }
+        self.next_scene_uid = self.next_scene_uid.max(scene.uid().get().saturating_add(1));
+        self.scenes.insert(index.min(self.scenes.len()), scene);
+        true
     }
 
     pub fn destroy_scene(&mut self, uid: Uid) -> bool {

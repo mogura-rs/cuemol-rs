@@ -17,7 +17,14 @@ impl App {
                 self.save_scene_download();
             }
             "reload-scene" => self.reload_scene(),
-            "undo" | "redo" => self.call(action, json!({})),
+            "undo" | "redo" => self.call(
+                action,
+                if self.show_render && self.render_panel.focused {
+                    json!({"sceneId":self.render_panel.targets.scene()})
+                } else {
+                    json!({})
+                },
+            ),
             "settings" => {
                 self.settings_text = self.state.config_text();
                 self.show_settings = true;
@@ -802,6 +809,7 @@ impl App {
         }
     }
     pub(super) fn open_render(&mut self) {
+        self.render_panel.focused = true;
         self.flush_render_settings(0., true);
         self.sync_render_settings();
         self.show_render = true;

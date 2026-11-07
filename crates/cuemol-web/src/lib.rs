@@ -3,6 +3,7 @@ mod actions;
 mod camera;
 mod clipboard;
 mod console;
+mod history;
 mod input;
 mod loading;
 mod morph;
@@ -262,6 +263,7 @@ struct Target {
     id: egui::TextureId,
     size: [u32; 2],
 }
+#[derive(Clone)]
 struct HistoryEntry {
     record: cuemol_command::console::actions::Record,
     selection: String,
@@ -331,8 +333,9 @@ struct App {
     console_tool: String,
     console_args: String,
     message: String,
-    history: Vec<HistoryEntry>,
-    future: Vec<HistoryEntry>,
+    history: Vec<history::Entry>,
+    future: Vec<history::Entry>,
+    agent_history: Option<HistoryEntry>,
     trajectories: BTreeMap<Uid, BrowserTrajectoryGroup>,
     source_queue: VecDeque<loading::Source>,
     source_options: Option<loading::PendingOptions>,
@@ -553,6 +556,7 @@ impl App {
             console_args: "{}".into(),
             message,
             history: Vec::new(),
+            agent_history: None,
             future: Vec::new(),
             trajectories: BTreeMap::new(),
             source_queue: VecDeque::new(),
@@ -642,15 +646,6 @@ impl App {
         self.selected = snapshot.selected;
         self.playing = false;
         self.dirty = true;
-    }
-    fn checkpoint(&mut self) {
-        self.navigation.cancel();
-        self.revision = self.revision.wrapping_add(1);
-        self.history.push(self.capture_history());
-        if self.history.len() > 12 {
-            self.history.remove(0);
-        }
-        self.future.clear();
     }
     fn call(&mut self, name: &str, args: Value) {
         if name == "edit_animation_property" {
@@ -753,27 +748,17 @@ impl App {
             }
         }
         if name == "undo" || name == "redo" {
-            self.revision = self.revision.wrapping_add(1);
-            let snapshot = if name == "undo" {
-                self.history.pop()
-            } else {
-                self.future.pop()
-            };
-            if let Some(mut snapshot) = snapshot {
-                let mut current = self.capture_history();
-                current.record = snapshot.record.clone();
-                if name == "undo" {
-                    self.future.push(current);
-                } else {
-                    self.history.push(current);
-                }
-                snapshot.state.preserve_global_styles_from(&self.state);
-                snapshot.state.preserve_host_preferences_from(&self.state);
-                snapshot.camera = snapshot
-                    .state
-                    .preserve_view_state_from(&self.state, &self.camera);
-                self.restore_history(snapshot);
+            if !self.flush_render_settings(0., true) {
+                return;
             }
+            self.history_step(
+                if name == "undo" {
+                    cuemol_desktop_core::undo::Direction::Undo
+                } else {
+                    cuemol_desktop_core::undo::Direction::Redo
+                },
+                args["sceneId"].as_u64().map(Uid::new),
+            );
             return;
         }
         if name == "clear_undo" {
@@ -833,19 +818,6 @@ impl App {
                     self.navigation.cancel();
                     self.revision = self.revision.wrapping_add(1);
                 }
-                if let Some(mut before) = before.filter(|_| history_changed) {
-                    cuemol_command::retain_animation_seed_in_undo(
-                        &mut before.state,
-                        &self.state,
-                        name,
-                    );
-                    self.state.mark_scene_changes_since(&before.state);
-                    self.history.push(before);
-                    if self.history.len() > 12 {
-                        self.history.remove(0);
-                    }
-                    self.future.clear();
-                }
                 if view_property {
                     self.revision = self.revision.wrapping_add(1);
                 }
@@ -857,6 +829,17 @@ impl App {
                 }
                 if cuemol_command::selection::remember_property_edit(&mut self.state, name, &args) {
                     self.persist_selection_history();
+                }
+                if let Some(mut before) = before.filter(|_| history_changed) {
+                    cuemol_command::retain_animation_seed_in_undo(
+                        &mut before.state,
+                        &self.state,
+                        name,
+                    );
+                    self.state.mark_scene_changes_since(&before.state);
+                    self.trajectories
+                        .retain(|uid, _| self.state.scene_manager().object(*uid).is_some());
+                    self.push_history(before);
                 }
                 if mutating {
                     self.prune_camera_files();
@@ -915,24 +898,18 @@ impl App {
                             reply.try_send(Err("Scene changed before the frame was loaded".into()));
                         continue;
                     }
-                    let undo = (!self.agent.changed_scene).then(|| self.capture_history());
+                    if !self.agent.changed_scene {
+                        self.agent_history = Some(self.capture_history());
+                    }
                     let result = result.and_then(|frame| {
                         self.state
                             .apply_coordinate_frame(id, &frame)
                             .map_err(|e| e.to_string())
                     });
                     if result.is_ok() {
-                        if let Some(undo) = undo {
-                            self.state.mark_scene_changes_since(&undo.state);
-                            self.history.push(undo);
-                            self.future.clear();
-                            if self.history.len() > 12 {
-                                self.history.remove(0);
-                            }
-                        }
                         self.set_trajectory_frame_index(id, index);
                         self.dirty = true;
-                        self.agent.changed_scene = true;
+                        self.record_agent_history("set_frame");
                         self.revision = self.revision.wrapping_add(1);
                         self.agent.revision = self.revision;
                     }
@@ -1089,7 +1066,7 @@ impl App {
                         continue;
                     }
                     let previous = self.trajectory_state(id).unwrap_or((0, 0));
-                    self.checkpoint();
+                    let before = self.capture_history();
                     let added = trajectory.frames;
                     let group =
                         self.trajectories
@@ -1101,8 +1078,7 @@ impl App {
                     group.blocks.push(Rc::new(trajectory));
                     if previous.0 == 0 {
                         if let Err(error) = self.state.apply_coordinate_frame(id, &first_frame) {
-                            let snapshot = self.history.pop().unwrap();
-                            self.restore_history(snapshot);
+                            self.restore_history(before);
                             self.message = error.to_string();
                             continue;
                         }
@@ -1112,6 +1088,9 @@ impl App {
                     if let Some(scene) = self.state.scene_manager().scene_uid_for_object(id) {
                         self.state.mark_scene_modified(scene);
                     }
+                    self.push_history(before);
+                    self.navigation.cancel();
+                    self.revision = self.revision.wrapping_add(1);
                     self.message = format!("Indexed {added} frames; {} frames across all blocks. Coordinates are read one frame at a time.", previous.0 + added);
                 }
                 Event::Frame(id, index, frame, revision) => {

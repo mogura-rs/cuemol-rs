@@ -6,15 +6,13 @@ impl App {
             return;
         }
         let mut retained = std::collections::BTreeSet::new();
-        for state in std::iter::once(&self.state)
-            .chain(self.history.iter().map(|entry| &entry.state))
-            .chain(self.future.iter().map(|entry| &entry.state))
-        {
-            for scene in state.scene_summaries() {
-                for camera in state.camera_summaries(scene.uid) {
-                    retained.insert((scene.uid, camera.source));
-                }
+        for scene in self.state.scene_summaries() {
+            for camera in self.state.camera_summaries(scene.uid) {
+                retained.insert((scene.uid, camera.source));
             }
+        }
+        for entry in self.history.iter().chain(&self.future) {
+            retained.extend(entry.camera_sources.iter().cloned());
         }
         self.camera_files.retain(|key, _| retained.contains(key));
     }
@@ -90,11 +88,7 @@ impl App {
                 self.clipboard_camera = Some(name.clone());
                 if !before.state.same_scene_undo_state(&self.state) {
                     self.state.mark_scene_changes_since(&before.state);
-                    self.history.push(before);
-                    if self.history.len() > 12 {
-                        self.history.remove(0);
-                    }
-                    self.future.clear();
+                    self.push_history(before);
                     self.revision = self.revision.wrapping_add(1);
                 }
                 self.prune_camera_files();

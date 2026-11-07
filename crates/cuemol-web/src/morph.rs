@@ -123,11 +123,7 @@ impl App {
 
     fn finish_morph_edit(&mut self, before: HistoryEntry) {
         self.state.mark_scene_changes_since(&before.state);
-        self.history.push(before);
-        if self.history.len() > 12 {
-            self.history.remove(0);
-        }
-        self.future.clear();
+        self.push_history(before);
         self.navigation.cancel();
         self.revision = self.revision.wrapping_add(1);
         self.dirty = true;

@@ -9,6 +9,18 @@ pub struct BrowserTrajectoryGroup {
     pub current_frame: usize,
 }
 
+impl PartialEq for BrowserTrajectoryGroup {
+    fn eq(&self, other: &Self) -> bool {
+        self.current_frame == other.current_frame
+            && self.blocks.len() == other.blocks.len()
+            && self
+                .blocks
+                .iter()
+                .zip(&other.blocks)
+                .all(|(a, b)| std::rc::Rc::ptr_eq(a, b))
+    }
+}
+
 impl BrowserTrajectoryGroup {
     pub fn frame_count(&self) -> usize {
         self.blocks.iter().map(|block| block.frames).sum()

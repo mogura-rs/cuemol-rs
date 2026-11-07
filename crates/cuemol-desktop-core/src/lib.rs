@@ -20,6 +20,7 @@ mod selection_support;
 mod sequence;
 mod style_edit;
 mod style_state;
+pub mod undo;
 pub use selection_support::MAX_SELECTION_HISTORY;
 pub use sequence::{sequence_residue_number, GuiSequenceLayout};
 pub use style_edit::GuiStyleTarget;
@@ -766,7 +767,6 @@ pub struct DesktopAppState {
     async_readers: script_reader::AsyncReaders,
 }
 
-#[cfg(feature = "scripting")]
 #[derive(Debug, Clone, PartialEq)]
 struct DesktopSceneSnapshot {
     scene: MolScene,
@@ -50307,7 +50307,6 @@ impl DesktopAppState {
         Ok((log, selection))
     }
 
-    #[cfg(feature = "scripting")]
     fn capture_script_scene_snapshot(&self, scene_uid: Uid) -> Option<DesktopSceneSnapshot> {
         let scene = self.scene_manager().scene(scene_uid)?;
         let object_uids: BTreeSet<_> = scene.objects().iter().map(MolObject::uid).collect();
@@ -50337,7 +50336,6 @@ impl DesktopAppState {
         })
     }
 
-    #[cfg(feature = "scripting")]
     fn apply_script_scene_snapshot_changes(
         &mut self,
         from: &DesktopSceneSnapshot,
@@ -60830,7 +60828,7 @@ end_header
             .iter()
             .find(|object| object.name == "source-surface")
             .unwrap();
-        assert_eq!(surface.renderers[0].name, "molsurf 1");
+        assert_eq!(surface.renderers[0].name, "(molsurf)");
         assert_eq!(
             cuemol_lwview::read_qdf_lwobj_bytes(&surface.raw_data)
                 .unwrap()

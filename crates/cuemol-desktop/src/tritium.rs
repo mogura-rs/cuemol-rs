@@ -691,7 +691,7 @@ mod tests {
         app.bottom_tab = BottomTab::Trajectory;
         app.trajectory_playing = true;
         let old = app.capture_undo();
-        app.undo_stack.push(old);
+        app.push_undo_snapshot(old);
         app.state.set_plugin_enabled("mdtools", false).unwrap();
         app.state.set_plugin_enabled("catalog", false).unwrap();
         app.undo(&mut camera);

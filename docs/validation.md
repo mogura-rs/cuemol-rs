@@ -1,5 +1,45 @@
 # Validation evidence
 
+## Scene-scoped application history
+
+Native egui, Tauri and the browser now store shared document changes for the
+scenes affected by an edit. Rendering-window Undo/Redo selects the latest entry
+for its target scene, preserving unrelated edits, redo entries, live camera
+navigation and host preferences. Multi-scene operations remain atomic and reject
+out-of-order restoration across later changes to their linked scenes. Console
+and Agent turns still accumulate one history entry as their steps finish.
+Histories retain shared immutable molecular/map storage; grouped operations keep
+one temporary baseline only while running.
+
+Five shared regressions cover scene lifecycles and view restoration, monotonic
+identifiers, other-scene edits, later same-scene properties and modified flags.
+The modified-flag regression first failed after undoing two object creations;
+allocation limits are now normalized only for content comparison. Object and
+renderer identifiers remain reserved after Undo. The full shared core suite with
+the reference checkout passes 326 checks. A pre-existing lightweight-surface test
+still expected `molsurf 1` for an implicit renderer; its assertion now matches the
+implemented `(molsurf)` fallback.
+
+All 232 native model checks, 203 Tauri model checks and 68 shell contracts pass;
+six explicitly excluded Tauri checks need external tools or a GPU. A native egui
+key-event test and WebGL/WebGPU keyboard checks exercise inactive-target Undo and
+Redo. An actual Linux window run repeats target selection and Ctrl-Z/Shift-Ctrl-Z
+through OS input, preserving the other scene and camera, then verifies that a
+new first-scene DPI edit leaves the second scene redoable. Its screenshot and
+MCP-read values agree. A real Rust-model/Chrome run also verifies Tauri Ctrl-Z/Shift-Ctrl-Z across
+two scenes, unchanged live camera/navigation, and independent redo after an edit
+in the other scene. This adapter does not establish native WebView OS input.
+
+The browser-wide regression run exposed a separate Density Cell failure. The
+renderer command had reused the New Renderer dialog's filtered menu inventory,
+which excludes internal unit-cell renderers. The command now accepts the map's
+supported internal types while the dialog keeps its reference choices. The
+failure was reproduced in a command test; all 18 map-loading and renderer-option
+checks pass after the fix. All 21 browser Rendering and Density interaction
+checks pass against a fresh optimized WASM bundle. The complete 355-test browser
+run is still in progress; its terminal result will be recorded before this change
+is closed. The current macOS Tauri binary also builds.
+
 ## Restore still-image history after movie mode
 
 The shared Rendering panel now reloads its editor when applying history. A
@@ -56,8 +96,8 @@ Tauri animation window; both now describe the unified window. The old source
 contracts referenced that removed form and are updated to check the shared
 controls and runtime. Native WebView OS input and the actual file chooser,
 clipboard and Open/Reveal applications were not exercised by the Chrome adapter.
-Browser movie execution, target-scoped Undo and remaining reference details
-are still open.
+The scene-scoped history section above supersedes the target-Undo limitation.
+Browser movie execution and remaining reference details are still open.
 
 ## Native movie integration in the Rendering window
 
@@ -101,7 +141,8 @@ Focused regressions cover both orderings.
 The usage guide previously described a separate animation window for both native
 frontends. At that stage it described the unified egui window and the separate Tauri
 window. The Tauri integration above supersedes that limitation. Browser movie
-execution, target-scoped Undo and remaining reference details are still open.
+execution and remaining reference details are still open. The scene-scoped
+history section above supersedes the earlier target-Undo limitation.
 
 ## Shared movie output and sequential rendering
 
@@ -213,8 +254,8 @@ panels, the extracted View/Animation JavaScript and the current Get PDB, file,
 renderer and settings flows. All 68 source-contract checks pass. These are source
 packaging checks; the model and DOM tests above provide the behavioral evidence.
 Usage previously said Tauri retained a separate POV-Ray window without render
-history; it now describes the shared window. Movie integration and target-scoped
-Undo remain separate work.
+history; it now describes the shared window. Later sections above cover movie
+integration and scene-scoped Undo.
 
 ## Shared POV-Ray still-image rendering
 
@@ -297,10 +338,8 @@ the small-window layout check. Native and WASM builds pass.
 An actual Linux window run selects a different scene, edits its DPI, undoes and
 redoes the edit, renders/copies both targets at distinct dimensions, and verifies
 that the active scene and camera remain unchanged. Screenshots were inspected.
-These checks cover native egui/browser still images. Tauri integration and
-unified POV-Ray/movie rendering remain open. GUI Undo still uses the existing
-application-wide history; the reference window routes Undo to its target
-scene's history.
+These checks cover native egui/browser still images at that stage. Later sections
+above supersede its open Tauri, unified POV-Ray/movie and target-scoped Undo work.
 
 ## Shared render settings and scene edit transactions
 

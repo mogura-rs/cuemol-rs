@@ -5,6 +5,8 @@ use cuemol_command::animation_graph::{editor_time_ms, Graph as AnimationGraph};
 mod actions;
 #[path = "gui_clipboard.rs"]
 mod clipboard;
+#[path = "gui_history.rs"]
+mod history;
 #[path = "gui_movie.rs"]
 mod movie;
 #[path = "navigation.rs"]
@@ -1591,8 +1593,9 @@ struct GuiApplication {
     addon_dir: String,
     last_loaded_path: Option<PathBuf>,
     recent_paths: Vec<PathBuf>,
-    undo_stack: Vec<GuiUndoSnapshot>,
-    redo_stack: Vec<GuiUndoSnapshot>,
+    undo_stack: Vec<history::Entry>,
+    redo_stack: Vec<history::Entry>,
+    agent_history: Option<GuiUndoSnapshot>,
 
     status: String,
     log_lines: Vec<String>,
@@ -4867,6 +4870,7 @@ impl GuiApplication {
             recent_paths,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            agent_history: None,
 
             status: "Ready".to_string(),
             log_lines: Vec::new(),
@@ -4977,6 +4981,9 @@ impl GuiApplication {
                     let _ = reply.try_send(Err("An APBS calculation is already running".into()));
                     continue;
                 }
+                if !self.agent.changed_scene {
+                    self.agent_history = Some(self.capture_script_undo());
+                }
                 let (sender, receiver) = mpsc::sync_channel(1);
                 self.start_apbs_command(cuemol_command::transport::ApiRequest { endpoint: cuemol_command::transport::ApiEndpoint::Mcp,message:serde_json::json!({"jsonrpc":"2.0","id":0,"method":"tools/call","params":{"name":name,"arguments":arguments}}),reply:sender});
                 if let Some(job) = &mut self.apbs_job {
@@ -4999,15 +5006,15 @@ impl GuiApplication {
                 cuemol_command::is_view_property_write(&self.state, &name, &arguments);
             let script_before = (name == "execute_script").then(|| self.state.clone());
             let camera_before = view.clone();
-            let undo = (mutating && !self.agent.changed_scene).then(|| {
+            if mutating && !self.agent.changed_scene {
                 let mut undo = if name == "execute_script" {
                     self.capture_script_undo()
                 } else {
                     self.capture_undo()
                 };
                 undo.camera = Some(view.clone());
-                undo
-            });
+                self.agent_history = Some(undo);
+            }
             let result = if let Some(download) = download {
                 download.and_then(|data| {
                     cuemol_command::load_fetched(
@@ -5026,27 +5033,21 @@ impl GuiApplication {
                 .as_ref()
                 .is_none_or(|before| !before.same_undo_state(&self.state) || camera_before != view);
             if result.is_ok() && (mutating || view_change) && changed {
-                let history_changed = undo
-                    .as_ref()
-                    .is_some_and(|undo| !undo.state.same_scene_undo_state(&self.state));
-                if let Some(mut undo) = undo.filter(|_| history_changed) {
-                    cuemol_command::retain_animation_seed_in_undo(
-                        &mut undo.state,
-                        &self.state,
-                        &name,
-                    );
-                    self.push_undo_snapshot(undo);
-                }
-                self.agent.changed_scene |= history_changed;
                 camera.apply_qsys_camera(&view);
                 camera.read_view_options(&self.state);
                 let _ = self.state.set_active_view_camera(&view);
                 self.sync_active_scene_properties();
                 self.invalidate_molecule_panel_caches();
                 self.rebuild_snapshot();
+                if mutating {
+                    self.record_agent_history(&name);
+                }
                 self.agent.revision = self.snapshot_revision;
             }
             let _ = reply.try_send(result);
+        }
+        if !self.agent.running() {
+            self.agent_history = None;
         }
         if let Some(prompt) = self.agent.show(ctx) {
             self.agent.start(
@@ -9306,13 +9307,13 @@ impl GuiApplication {
             .try_for_each(|target| self.set_workspace_target_visible(target, visible));
         match result {
             Ok(()) => {
-                self.push_undo_snapshot_for_scene(undo, None);
                 self.state.mark_scenes_modified(
                     targets
                         .iter()
                         .copied()
                         .map(NativeWorkspaceTarget::scene_uid),
                 );
+                self.push_undo_snapshot_for_scene(undo, None);
                 self.rebuild_snapshot();
                 self.set_status(if visible {
                     format!("Show {} Workspace items", targets.len())
@@ -9502,7 +9503,6 @@ impl GuiApplication {
             .try_for_each(|target| self.destroy_workspace_target(target));
         match result {
             Ok(()) => {
-                self.push_undo_snapshot_for_scene(undo, None);
                 self.state.mark_scenes_modified(
                     targets
                         .iter()
@@ -9513,6 +9513,7 @@ impl GuiApplication {
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
                 self.workspace_multiple_selection.clear();
+                self.push_undo_snapshot_for_scene(undo, None);
                 self.rebuild_snapshot();
                 self.set_status(format!("Destroy {} Workspace items", targets.len()));
             }
@@ -13704,10 +13705,10 @@ impl GuiApplication {
             }
         }
         if changed && run.checkpoint.scene_changed() && cuemol_command::tool_records_history(name) {
-            if let Some(mut before) = run.undo.take() {
+            if let Some(before) = run.undo.as_mut() {
                 cuemol_command::retain_animation_seed_in_undo(&mut before.state, &self.state, name);
                 before.record = self.console_session.action_record.clone();
-                self.push_undo_snapshot(before);
+                self.update_grouped_undo(before.clone());
             }
         }
         let changed = changed && (cuemol_command::tool_changes_scene(name) || view_changed);
@@ -14983,6 +14984,7 @@ impl GuiApplication {
     }
 
     fn open_native_render(&mut self) {
+        self.ray_panel.focused = true;
         let mut camera = self
             .state
             .active_view_camera()
@@ -15145,6 +15147,25 @@ impl GuiApplication {
             }
         }
         match action {
+            cuemol_ui::RenderAction::Undo | cuemol_ui::RenderAction::Redo => {
+                if let Some(scene) = self.ray_panel.targets.scene() {
+                    let mut history_camera = camera.clone();
+                    self.history_step(
+                        &mut history_camera,
+                        if action == cuemol_ui::RenderAction::Undo {
+                            cuemol_desktop_core::undo::Direction::Undo
+                        } else {
+                            cuemol_desktop_core::undo::Direction::Redo
+                        },
+                        Some(cuemol_core::Uid::new(scene)),
+                    );
+                    let _ = self
+                        .state
+                        .set_active_view_camera(&history_camera.to_qsys_camera("__current"));
+                    self.pending_script_view = true;
+                    self.sync_native_render_settings();
+                }
+            }
             cuemol_ui::RenderAction::Target(view) => {
                 self.ray_panel.targets.select(view);
                 self.sync_native_render_settings();
@@ -18218,7 +18239,7 @@ impl GuiApplication {
                             .density_map_summary(map_uid)
                             .expect("APBS potential was just inserted")
                             .scene_uid;
-                        if !is_agent || !self.agent.changed_scene {
+                        if !is_agent {
                             self.push_undo_snapshot(undo);
                         }
 
@@ -18241,6 +18262,7 @@ impl GuiApplication {
                         self.apbs_editor.status.clear();
                         self.rebuild_snapshot();
                         if is_agent {
+                            self.record_agent_history("calc_elepot");
                             self.agent.changed_scene = true;
                             self.agent.revision = self.snapshot_revision;
                         }
@@ -26940,11 +26962,12 @@ impl GuiApplication {
         {
             self.state.mark_scene_modified(scene_uid);
         }
-        self.undo_stack.push(snapshot);
+        let entry = history::Entry::new(snapshot, self, scene);
+        self.redo_stack.retain(|redo| !entry.overlaps(redo));
+        self.undo_stack.push(entry);
         if self.undo_stack.len() > 50 {
             self.undo_stack.remove(0);
         }
-        self.redo_stack.clear();
     }
 
     fn push_script_undo_snapshot(&mut self, snapshot: GuiUndoSnapshot) -> bool {
@@ -26997,49 +27020,11 @@ impl GuiApplication {
     }
 
     fn undo(&mut self, camera: &mut CameraController) {
-        self.cancel_numeric_previews(camera);
-        let Some(mut snapshot) = self.undo_stack.pop() else {
-            self.set_status("Nothing to undo");
-            return;
-        };
-        let mut redo = self.capture_undo();
-        if snapshot.camera.is_some() {
-            redo.camera = Some(camera.to_qsys_camera("__current"));
-        }
-        redo.record = snapshot.record.clone();
-        snapshot.state.preserve_global_styles_from(&self.state);
-        snapshot.state.preserve_host_preferences_from(&self.state);
-        snapshot.camera = Some(
-            snapshot
-                .state
-                .preserve_view_state_from(&self.state, &camera.to_qsys_camera("__current")),
-        );
-        self.restore_undo_snapshot(snapshot, camera);
-        self.redo_stack.push(redo);
-        self.set_status("Undo");
+        self.history_step(camera, cuemol_desktop_core::undo::Direction::Undo, None);
     }
 
     fn redo(&mut self, camera: &mut CameraController) {
-        self.cancel_numeric_previews(camera);
-        let Some(mut snapshot) = self.redo_stack.pop() else {
-            self.set_status("Nothing to redo");
-            return;
-        };
-        let mut undo = self.capture_undo();
-        if snapshot.camera.is_some() {
-            undo.camera = Some(camera.to_qsys_camera("__current"));
-        }
-        undo.record = snapshot.record.clone();
-        snapshot.state.preserve_global_styles_from(&self.state);
-        snapshot.state.preserve_host_preferences_from(&self.state);
-        snapshot.camera = Some(
-            snapshot
-                .state
-                .preserve_view_state_from(&self.state, &camera.to_qsys_camera("__current")),
-        );
-        self.restore_undo_snapshot(snapshot, camera);
-        self.undo_stack.push(undo);
-        self.set_status("Redo");
+        self.history_step(camera, cuemol_desktop_core::undo::Direction::Redo, None);
     }
 
     fn clear_undo_data(&mut self) {
@@ -31715,6 +31700,55 @@ mod tests {
             150.
         );
         assert_eq!(app.ray_panel.editor.number("dpi"), 150.);
+    }
+
+    #[test]
+    fn native_render_keyboard_undo_uses_the_inactive_target_scene() {
+        let mut app = GuiApplication::new();
+        let first = app.state.active_scene().unwrap();
+        let first_view = app.state.active_view_summary().unwrap().uid.get();
+        let mut camera = CameraController::default();
+        let mut current = camera.to_qsys_camera("__current");
+        app.apply_native_render_settings_to(Some(first.get()), "dpi=72", &mut current)
+            .unwrap();
+        let second = app.state.new_scene("Second", true).result_scene;
+        app.apply_native_render_settings_to(Some(second.get()), "dpi=150", &mut current)
+            .unwrap();
+        app.open_native_render();
+        app.ray_panel.targets.select(first_view);
+        app.sync_native_render_settings();
+        let before_view = camera.to_qsys_camera("__current");
+        {
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1280., 900.))
+                .build(|ctx| app.ui(ctx, &mut camera));
+            harness.run();
+            harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+            harness.run();
+        }
+        assert_eq!(app.ray_panel.editor.number("dpi"), 600.);
+        assert_eq!(
+            cuemol_command::scene_render_settings(&app.state, second).unwrap()["dpi"],
+            150
+        );
+        assert_eq!(app.state.active_scene(), Some(second));
+        assert_eq!(camera.to_qsys_camera("__current"), before_view);
+        {
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1280., 900.))
+                .build(|ctx| app.ui(ctx, &mut camera));
+            harness.run();
+            harness.key_press_modifiers(
+                egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+                egui::Key::Z,
+            );
+            harness.run();
+        }
+        assert_eq!(app.ray_panel.editor.number("dpi"), 72.);
+        assert_eq!(
+            cuemol_command::scene_render_settings(&app.state, second).unwrap()["dpi"],
+            150
+        );
     }
 
     #[test]

@@ -870,6 +870,12 @@ open editor. Target selects a scene and view without activating it. Its settings
 geometry, background and saved camera are used for rendering; the active view
 uses its live camera. Changing the main window's active view also changes the
 render target, while ordinary scene updates retain a manual target choice.
+With the Rendering window focused, Ctrl/Command-Z and its redo shortcut act on
+the selected target scene. Later edits in other scenes and their redo entries
+remain intact. Text fields keep their own text-editing shortcuts. An operation
+that changes multiple scenes remains one history step; later edits to any linked
+scene must be undone before that step. The main workspace history controls retain
+their ordinary chronological behavior.
 Start Render uses these target values. Stop and failures
 retain completed results. Current view and fixed image-size presets are available;
 when dimensions use inches, centimeters or millimeters, changing DPI preserves

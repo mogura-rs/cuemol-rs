@@ -2,6 +2,7 @@ use super::*;
 
 impl RenderPanel {
     pub fn request_mode(&mut self, movie: bool) {
+        self.focused = true;
         self.movie_mode = movie;
         self.editor.set_size(
             if movie { [320, 240] } else { [1200, 1200] },

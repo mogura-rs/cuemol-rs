@@ -318,24 +318,47 @@ pub struct SceneAppData {
 
 impl SceneAppData {
     pub fn apply_undo_changes(&mut self, from: &Self, to: &Self) {
-        use cuemol_core::snapshot::{apply_map_changes, apply_map_changes_with};
-        apply_map_changes_with(
-            &mut self.entries,
-            &from.entries,
-            &to.entries,
-            |current, before, after| {
-                if let (
-                    AppDataEntry::Render(current),
-                    AppDataEntry::Render(before),
-                    AppDataEntry::Render(after),
-                ) = (&mut *current, before, after)
-                {
-                    apply_map_changes(&mut current.overrides, &before.overrides, &after.overrides);
-                } else {
-                    current.clone_from(after);
+        use cuemol_core::snapshot::apply_map_changes;
+        let keys = from
+            .entries
+            .keys()
+            .chain(to.entries.keys())
+            .collect::<std::collections::BTreeSet<_>>();
+        for key in keys {
+            let previous = from.entries.get(key);
+            let next = to.entries.get(key);
+            if previous == next {
+                continue;
+            }
+            let render = |entry: Option<&AppDataEntry>| {
+                entry.is_none() || matches!(entry, Some(AppDataEntry::Render(_)))
+            };
+            if render(previous) && render(next) {
+                if let Some(AppDataEntry::Render(current)) = self.entries.get_mut(key) {
+                    let empty = BTreeMap::new();
+                    let previous_overrides = match previous {
+                        Some(AppDataEntry::Render(settings)) => &settings.overrides,
+                        _ => &empty,
+                    };
+                    let next_overrides = match next {
+                        Some(AppDataEntry::Render(settings)) => &settings.overrides,
+                        _ => &empty,
+                    };
+                    apply_map_changes(&mut current.overrides, previous_overrides, next_overrides);
+                    if next.is_none() && current.overrides.is_empty() {
+                        self.entries.remove(key);
+                    }
+                    continue;
                 }
-            },
-        );
+            }
+            if let Some(next) = next {
+                if previous.is_none() || self.entries.contains_key(key) {
+                    self.entries.insert(key.clone(), next.clone());
+                }
+            } else {
+                self.entries.remove(key);
+            }
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &RenderSettings)> {

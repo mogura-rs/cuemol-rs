@@ -112,11 +112,7 @@ impl App {
                 }
             }
         }
-        self.history.push(previous);
-        if self.history.len() > 12 {
-            self.history.remove(0);
-        }
-        self.future.clear();
+        self.push_history(previous);
         self.revision = self.revision.wrapping_add(1);
         self.navigation.cancel();
         self.dirty = true;

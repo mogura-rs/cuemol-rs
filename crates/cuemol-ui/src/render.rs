@@ -17,6 +17,8 @@ pub enum RenderAction {
     Save,
     Copy,
     UseSettings,
+    Undo,
+    Redo,
     Target(u64),
     MovieMode(bool),
     StartMovie(bool),
@@ -48,6 +50,7 @@ pub struct RenderPanel {
     pub png: Option<Arc<[u8]>>,
     pub history: RenderHistory,
     pub movie_mode: bool,
+    pub focused: bool,
     pub movie: cuemol_command::movie::MovieOptions,
     pub movie_loaded: bool,
     pub temporary_directory: String,
@@ -85,6 +88,7 @@ impl Default for RenderPanel {
             png: None,
             history: RenderHistory::default(),
             movie_mode: false,
+            focused: true,
             movie: Default::default(),
             movie_loaded: false,
             temporary_directory: String::new(),
@@ -243,7 +247,7 @@ impl RenderPanel {
             (available.x - 40.).min(1000.),
             (available.y - 80.).min(700.),
         );
-        egui::Window::new("Rendering")
+        let window = egui::Window::new("Rendering")
             .id(egui::Id::new("render-window"))
             .open(open)
             .collapsible(false)
@@ -298,6 +302,36 @@ impl RenderPanel {
                     });
                 }
             });
+        if let Some(window) = window {
+            if ctx.input(|input| input.pointer.any_pressed()) {
+                if let Some(position) = ctx.pointer_latest_pos() {
+                    let layer = ctx.layer_id_at(position);
+                    if layer.is_none_or(|layer| layer.order <= egui::Order::Middle) {
+                        self.focused = layer == Some(window.response.layer_id);
+                    }
+                }
+            }
+            if self.focused
+                && !ctx.wants_keyboard_input()
+                && !egui::Popup::is_any_open(ctx)
+                && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            {
+                for (modifiers, key, edit) in [
+                    (
+                        egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+                        egui::Key::Z,
+                        RenderAction::Redo,
+                    ),
+                    (egui::Modifiers::COMMAND, egui::Key::Y, RenderAction::Redo),
+                    (egui::Modifiers::COMMAND, egui::Key::Z, RenderAction::Undo),
+                ] {
+                    if ctx.input_mut(|input| input.consume_key(modifiers, key)) {
+                        action = edit;
+                        break;
+                    }
+                }
+            }
+        }
         if self.confirm_clear {
             egui::Window::new("Clear render history")
                 .id(egui::Id::new("clear-render-history"))

@@ -580,11 +580,6 @@ impl App {
                 if source.is_none() {
                     self.state.mark_scene_changes_since(&before.state);
                 }
-                self.history.push(before);
-                if self.history.len() > 12 {
-                    self.history.remove(0);
-                }
-                self.future.clear();
                 if source.is_some() {
                     self.last_scene = source;
                 }
@@ -649,6 +644,7 @@ impl App {
                         self.fit(false);
                     }
                 }
+                self.push_history(before);
                 self.message = format!("Loaded {name}");
             }
             Err(error) => {
@@ -667,7 +663,7 @@ impl App {
     pub(super) fn apply_profile(&mut self, name: &str, bytes: &[u8]) {
         match cuemol_gfx::cms::register_icc_profile(name, bytes) {
             Ok(()) => {
-                self.checkpoint();
+                let before = self.capture_history();
                 self.state.put_config_value("color:icc_profile", name);
                 if let Some(scene) = self
                     .state
@@ -678,6 +674,8 @@ impl App {
                     scene.set_scene_attribute("icc_filename", name);
                 }
                 self.dirty = true;
+                self.push_history(before);
+                self.revision = self.revision.wrapping_add(1);
                 self.message = format!("Loaded ICC profile {name}");
                 if let Some(storage) =
                     web_sys::window().and_then(|window| window.local_storage().ok().flatten())

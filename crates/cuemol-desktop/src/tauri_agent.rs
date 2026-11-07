@@ -77,6 +77,8 @@ impl AppModel {
                 self.begin_remote_edit()?;
                 self.stop_console();
                 self.sync_view_camera()?;
+                self.agent_history =
+                    Some(history::Group::new(self.capture_script_undo(), "AI Agent"));
                 self.agent.start(
                     &mut self.desktop,
                     &mut self.camera,
@@ -97,6 +99,20 @@ impl AppModel {
         if !self.agent.settings.enabled {
             self.agent.cancel("AI Agent plugin disabled.");
         }
+    }
+
+    pub(super) fn record_agent_history(&mut self, name: &str) {
+        let Some(mut history) = self.agent_history.take() else {
+            return;
+        };
+        cuemol_command::retain_animation_seed_in_undo(
+            &mut history.before.desktop,
+            &self.desktop,
+            name,
+        );
+        self.agent.changed_scene |=
+            self.update_grouped_undo(history.before.clone(), history.record.clone());
+        self.agent_history = Some(history);
     }
 
     pub(super) fn poll_agent(&mut self) -> (bool, bool) {
@@ -173,8 +189,6 @@ impl AppModel {
                     continue;
                 }
             }
-            let before =
-                (changes_scene && !self.agent.changed_scene).then(|| self.capture_script_undo());
             let result = if let Some(download) = download {
                 download.and_then(|data| {
                     cuemol_command::load_fetched(
@@ -190,18 +204,6 @@ impl AppModel {
                     .map_err(|error| error.to_string())
             };
             if result.is_ok() && changes_view {
-                if let Some(mut before) =
-                    before.filter(|before| !before.desktop.same_scene_undo_state(&self.desktop))
-                {
-                    cuemol_command::retain_animation_seed_in_undo(
-                        &mut before.desktop,
-                        &self.desktop,
-                        &name,
-                    );
-                    self.status = "AI Agent".into();
-                    self.push_script_undo(before);
-                    self.agent.changed_scene = true;
-                }
                 if name == "set_mol_selection" {
                     self.selection = arguments["selection"].as_str().unwrap_or("").into();
                 } else if name == "execute_script" {
@@ -217,9 +219,15 @@ impl AppModel {
                 let _ = self.desktop.set_active_view_camera(&self.camera);
                 self.sync_active_scene_properties();
                 self.invalidate_snapshot(false);
+                if changes_scene {
+                    self.record_agent_history(&name);
+                }
                 self.agent.revision = self.snapshot_revision;
             }
             let _ = reply.try_send(result);
+        }
+        if !self.agent.running() {
+            self.agent_history = None;
         }
         (
             before != self.agent.change_id,

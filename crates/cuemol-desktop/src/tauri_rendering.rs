@@ -346,13 +346,20 @@ impl Rendering {
             }
             "undo" | "redo" => {
                 self.sync(model, true)?;
-                model.restore_animation_playback(false)?;
-                model.animation_elapsed = 0.;
-                if operation == "undo" {
-                    model.undo(0)?;
-                } else {
-                    model.redo(0)?;
-                }
+                let scene = self
+                    .targets
+                    .scene()
+                    .map(Uid::new)
+                    .ok_or("Render scene is no longer available")?;
+                model.history_step(
+                    if operation == "undo" {
+                        cuemol_desktop_core::undo::Direction::Undo
+                    } else {
+                        cuemol_desktop_core::undo::Direction::Redo
+                    },
+                    0,
+                    Some(scene),
+                )?;
                 self.sync(model, false)?;
                 self.scene_changed = true;
             }
@@ -602,6 +609,137 @@ mod tests {
             model.poll_rendering();
         }
         assert!(model.rendering.job.is_none(), "{}", model.rendering.message);
+    }
+
+    #[test]
+    fn rendering_undo_uses_the_target_scene_and_retains_other_scene_redo() {
+        let mut model = model();
+        let first = model.desktop.active_scene().unwrap();
+        let first_view = model.desktop.active_view_summary().unwrap().uid.get();
+        model.rendering_request("open", &json!({})).unwrap();
+        edit(&mut model, "dpi", json!(72));
+        model.rendering_request("flush", &json!({})).unwrap();
+        let second = model.desktop.new_scene("Second", true).result_scene;
+        let second_view = model.desktop.active_view_summary().unwrap().uid.get();
+        model.rendering_request("poll", &json!({})).unwrap();
+        edit(&mut model, "dpi", json!(150));
+        model.rendering_request("flush", &json!({})).unwrap();
+        let camera = model.camera.clone();
+        model
+            .rendering_request("target", &json!({"viewId":first_view}))
+            .unwrap();
+        model.rendering_request("undo", &json!({})).unwrap();
+        assert_eq!(
+            cuemol_command::scene_render_settings(&model.desktop, first)
+                .unwrap()
+                .get("dpi")
+                .cloned()
+                .unwrap_or(json!(600)),
+            600
+        );
+        assert_eq!(
+            cuemol_command::scene_render_settings(&model.desktop, second).unwrap()["dpi"],
+            150.
+        );
+        assert_eq!(model.desktop.active_scene(), Some(second));
+        assert_eq!(model.camera, camera);
+        model.rendering_request("redo", &json!({})).unwrap();
+        assert_eq!(
+            cuemol_command::scene_render_settings(&model.desktop, first).unwrap()["dpi"],
+            72.
+        );
+        model.rendering_request("undo", &json!({})).unwrap();
+        model
+            .rendering_request("target", &json!({"viewId":second_view}))
+            .unwrap();
+        model.rendering_request("undo", &json!({})).unwrap();
+        assert_eq!(model.redo_stack.len(), 2);
+        model
+            .rendering_request("target", &json!({"viewId":first_view}))
+            .unwrap();
+        edit(&mut model, "dpi", json!(300));
+        model.rendering_request("flush", &json!({})).unwrap();
+        assert_eq!(model.redo_stack.len(), 1);
+        model
+            .rendering_request("target", &json!({"viewId":second_view}))
+            .unwrap();
+        model.rendering_request("redo", &json!({})).unwrap();
+        assert_eq!(
+            cuemol_command::scene_render_settings(&model.desktop, first).unwrap()["dpi"],
+            300.
+        );
+        assert_eq!(
+            cuemol_command::scene_render_settings(&model.desktop, second).unwrap()["dpi"],
+            150.
+        );
+    }
+
+    #[test]
+    fn rendering_scoped_undo_rejects_out_of_order_linked_scene_edits() {
+        use cuemol_desktop_core::undo::Direction;
+        let mut model = model();
+        let first = model.desktop.active_scene().unwrap();
+        let second = model.desktop.new_scene("Second", true).result_scene;
+        let before = model.capture_undo();
+        model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(first)
+            .unwrap()
+            .set_name("First linked");
+        model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(second)
+            .unwrap()
+            .set_name("Second linked");
+        model.push_undo(before);
+        let before = model.capture_undo();
+        model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(second)
+            .unwrap()
+            .set_name("Second later");
+        model.push_undo(before);
+        let error = model
+            .history_step(Direction::Undo, 0, Some(first))
+            .unwrap_err();
+        assert!(error.contains("linked scenes"));
+        assert_eq!(model.undo_stack.len(), 2);
+        assert!(model.redo_stack.is_empty());
+        assert_eq!(
+            model.desktop.scene_manager().scene(second).unwrap().name(),
+            "Second later"
+        );
+        model
+            .history_step(Direction::Undo, 0, Some(second))
+            .unwrap();
+        model.history_step(Direction::Undo, 0, Some(first)).unwrap();
+        assert_eq!(
+            model.desktop.scene_manager().scene(first).unwrap().name(),
+            "render test"
+        );
+        assert_eq!(
+            model.desktop.scene_manager().scene(second).unwrap().name(),
+            "Second"
+        );
+        assert!(model.history_step(Direction::Redo, 0, Some(second)).is_ok());
+        assert_eq!(
+            model.desktop.scene_manager().scene(first).unwrap().name(),
+            "First linked"
+        );
+        assert_eq!(
+            model.desktop.scene_manager().scene(second).unwrap().name(),
+            "Second linked"
+        );
+        model
+            .history_step(Direction::Redo, 0, Some(second))
+            .unwrap();
+        assert_eq!(
+            model.desktop.scene_manager().scene(second).unwrap().name(),
+            "Second later"
+        );
     }
 
     #[test]

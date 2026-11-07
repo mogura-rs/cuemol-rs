@@ -150,27 +150,25 @@ impl AppModel {
                 self.desktop.clear_scene_modified(scene);
             }
         }
-        if changed && run.checkpoint.scene_changed() && cuemol_command::tool_records_history(name) {
-            if let Some(mut before) = run.undo.take() {
-                cuemol_command::retain_animation_seed_in_undo(
-                    &mut before.desktop,
-                    &self.desktop,
-                    name,
-                );
-                self.status = "Console command".into();
-                self.push_undo(before);
-                if let Some(entry) = self.undo_stack.last_mut() {
-                    entry.record = self.console_session.action_record.clone();
-                    entry.description = entry.record.label();
-                }
-            }
-        }
         if changed && (cuemol_command::tool_changes_scene(name) || view_changed) {
             self.console_session.scene_changed();
             run.changed = true;
             self.invalidate_snapshot(false);
             self.touch_structure_details();
             self.sync_active_scene_properties();
+        }
+        if changed && run.checkpoint.scene_changed() && cuemol_command::tool_records_history(name) {
+            if let Some(before) = run.undo.as_mut() {
+                cuemol_command::retain_animation_seed_in_undo(
+                    &mut before.desktop,
+                    &self.desktop,
+                    name,
+                );
+                self.update_grouped_undo(
+                    before.clone(),
+                    self.console_session.action_record.clone(),
+                );
+            }
         }
         run.revision = self.snapshot_revision;
         run.camera = self.camera.clone();

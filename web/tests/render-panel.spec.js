@@ -387,6 +387,41 @@ for (const backend of ['webgl', 'webgpu']) {
 }
 
 for (const backend of ['webgl', 'webgpu']) {
+  test(`Rendering keyboard history stays with the selected scene (${backend})`, async ({page}) => {
+    await open(page, backend);
+    const script = async source => JSON.parse((await call(page, 'execute_script', {source})).message).log.trim();
+    const first = (await page.evaluate(() => window.cuemol.status())).scene.sceneId;
+    const firstView = Number(await script('print(scene.activeViewID);'));
+    await call(page, 'clear_undo');
+    await call(page, 'set_render_settings', {settings:'dpi=72'});
+    await call(page, 'create_scene', {name:'Second'});
+    const second = (await page.evaluate(() => window.cuemol.status())).scene.sceneId;
+    const secondView = Number(await script('print(scene.activeViewID);'));
+    await call(page, 'set_render_settings', {settings:'dpi=150'});
+    const camera = await page.evaluate(() => window.cuemol.status().view);
+    const read = id => script(`var r=cuemol.getScene(${id}).getAppData('render'); print(r?r.dpi:600);`);
+    await click(page, 'Render target'); await click(page, `Render target ${firstView}`);
+    await click(page, 'Render settings Image');
+    await page.keyboard.press('ControlOrMeta+z');
+    await expect.poll(() => read(first)).toBe('300');
+    expect(await read(second)).toBe('150');
+    expect((await page.evaluate(() => window.cuemol.status())).scene.sceneId).toBe(second);
+    expect(await page.evaluate(() => window.cuemol.status().view)).toEqual(camera);
+    await page.keyboard.press('ControlOrMeta+Shift+z');
+    await expect.poll(() => read(first)).toBe('72');
+    await page.keyboard.press('ControlOrMeta+z');
+    await expect.poll(() => read(first)).toBe('300');
+    await click(page, 'Render target'); await click(page, `Render target ${secondView}`);
+    await click(page, 'Render settings Image');
+    await page.keyboard.press('ControlOrMeta+z');
+    await expect.poll(() => read(second)).toBe('600');
+    await call(page, 'set_render_settings', {sceneId:first, settings:'dpi=120'});
+    await page.keyboard.press('ControlOrMeta+Shift+z');
+    await expect.poll(() => read(second)).toBe('150');
+    expect(await read(first)).toBe('120');
+    expect(await page.evaluate(() => window.cuemol.status().view)).toEqual(camera);
+  });
+
   test(`Render target owns settings and camera while the active view stays unchanged (${backend})`, async ({page}, testInfo) => {
     const errors = []; page.on('pageerror', error => errors.push(error.message));
     await open(page, backend);

@@ -172,15 +172,11 @@ impl App {
             changed && (run.checkpoint.scene_changed() || view_changed) && !result.is_null(),
         );
         if changed && run.checkpoint.scene_changed() && cuemol_command::tool_records_history(name) {
-            if let Some(mut before) = run.undo.take() {
+            if let Some(before) = run.undo.as_mut() {
                 cuemol_command::retain_animation_seed_in_undo(&mut before.state, &self.state, name);
                 before.record = self.console_session.action_record.clone();
                 self.state.mark_scene_changes_since(&before.state);
-                self.history.push(before);
-                if self.history.len() > 12 {
-                    self.history.remove(0);
-                }
-                self.future.clear();
+                self.push_history(before.clone());
             }
         }
         if changed && (cuemol_command::tool_changes_scene(name) || view_changed) {

@@ -97,6 +97,9 @@ impl App {
                 continue;
             }
             let mutating = cuemol_command::tool_changes_scene(&name);
+            if mutating && !self.agent.changed_scene {
+                self.agent_history = Some(self.capture_history());
+            }
             let undo = (mutating && (!self.agent.changed_scene || name == "execute_script"))
                 .then(|| self.capture_history());
             let result = if let Some(download) = download {
@@ -125,25 +128,7 @@ impl App {
                     before.camera != self.camera || !before.state.same_undo_state(&self.state)
                 });
             if result.is_ok() && mutating && changed {
-                let history_changed = undo.as_ref().is_some_and(|undo| {
-                    undo.camera != self.camera || !undo.state.same_scene_undo_state(&self.state)
-                });
-                if let Some(mut undo) =
-                    undo.filter(|_| history_changed && !self.agent.changed_scene)
-                {
-                    cuemol_command::retain_animation_seed_in_undo(
-                        &mut undo.state,
-                        &self.state,
-                        &name,
-                    );
-                    self.state.mark_scene_changes_since(&undo.state);
-                    self.history.push(undo);
-                    self.future.clear();
-                    if self.history.len() > 12 {
-                        self.history.remove(0);
-                    }
-                }
-                self.agent.changed_scene |= history_changed;
+                self.record_agent_history(&name);
                 self.dirty = true;
                 self.revision = self.revision.wrapping_add(1);
                 self.agent.revision = self.revision;
@@ -158,6 +143,9 @@ impl App {
                 ctx,
                 self.revision,
             );
+        }
+        if !self.agent.running() {
+            self.agent_history = None;
         }
         if let Some(history) = self.agent.take_prompt_history_changed() {
             if let Some(storage) =
@@ -259,6 +247,20 @@ impl App {
         }
         self.ui_rects.extend(self.render_panel.rects.clone());
         self.show_render = open;
+        if matches!(
+            action,
+            cuemol_ui::RenderAction::Undo | cuemol_ui::RenderAction::Redo
+        ) {
+            self.call(
+                if action == cuemol_ui::RenderAction::Undo {
+                    "undo"
+                } else {
+                    "redo"
+                },
+                json!({"sceneId":self.render_panel.targets.scene()}),
+            );
+            self.sync_render_settings();
+        }
         if let cuemol_ui::RenderAction::MovieMode(movie) = action {
             self.flush_render_settings(ctx.input(|i| i.time), true);
             self.render_panel.request_mode(movie);

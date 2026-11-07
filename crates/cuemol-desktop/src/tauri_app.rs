@@ -39,6 +39,8 @@ mod actions;
 mod agent;
 #[path = "tauri_console.rs"]
 mod console;
+#[path = "tauri_history.rs"]
+mod history;
 #[path = "tauri_inspector.rs"]
 mod inspector;
 #[path = "tauri_mcp.rs"]
@@ -1650,6 +1652,7 @@ struct AppModel {
     remote_console: Option<cuemol_command::transport::ConsoleReply>,
     updates: cuemol_command::update::UpdateRuntime,
     agent: cuemol_ui::agent_runtime::AgentSession,
+    agent_history: Option<history::Group>,
     agent_wake: cuemol_ui::agent_runtime::Wake,
 }
 
@@ -1805,7 +1808,9 @@ struct AppModelUndo {
 #[derive(Clone)]
 struct AppModelUndoEntry {
     record: cuemol_command::console::actions::Record,
-    snapshot: AppModelUndo,
+    changes: Arc<cuemol_desktop_core::undo::ChangeSet>,
+    values: history::ModelChanges,
+    scopes: BTreeSet<Uid>,
     description: String,
 }
 
@@ -1928,6 +1933,7 @@ impl AppModel {
             remote_console: None,
             updates: Default::default(),
             agent: Default::default(),
+            agent_history: None,
             agent_wake: Arc::new(|| {}),
             log_lines: startup_log.lines().map(str::to_string).collect(),
             status,
@@ -7646,18 +7652,15 @@ impl AppModel {
         } else {
             self.status.clone()
         };
-        self.undo_stack.push(AppModelUndoEntry {
-            record: cuemol_command::console::actions::Record::new(&description, "gui"),
-            snapshot,
-            description,
-        });
-        if self.undo_stack.len() > 50 {
-            self.undo_stack.remove(0);
-        }
         if let Some(scene_uid) = scene {
             self.desktop.mark_scene_modified(scene_uid);
         }
-        self.redo_stack.clear();
+        let entry = AppModelUndoEntry::new(snapshot, self, scene, description);
+        self.redo_stack.retain(|redo| !entry.overlaps(redo));
+        self.undo_stack.push(entry);
+        if self.undo_stack.len() > 50 {
+            self.undo_stack.remove(0);
+        }
     }
 
     fn push_script_undo(&mut self, snapshot: AppModelUndo) -> bool {
@@ -7703,81 +7706,11 @@ impl AppModel {
     }
 
     fn undo(&mut self, depth: usize) -> Result<(), String> {
-        self.flush_rendering()?;
-        let count = depth.saturating_add(1).min(self.undo_stack.len());
-        if count == 0 {
-            self.status = "Nothing to undo".to_string();
-            return Ok(());
-        }
-        let mut description = String::new();
-        for _ in 0..count {
-            let mut entry = self.undo_stack.pop().expect("undo count is bounded");
-            let redo = self.capture_undo();
-            description = entry.description.clone();
-            entry
-                .snapshot
-                .desktop
-                .preserve_global_styles_from(&self.desktop);
-            entry
-                .snapshot
-                .desktop
-                .preserve_host_preferences_from(&self.desktop);
-            entry.snapshot.camera = entry
-                .snapshot
-                .desktop
-                .preserve_view_state_from(&self.desktop, &self.camera);
-            let options = entry.snapshot.desktop.active_view_options();
-            entry.snapshot.trans_mms = options.trans_mms;
-            entry.snapshot.rot_mms = options.rot_mms;
-            entry.snapshot.swap_stereo_eyes = options.swap_stereo_eyes;
-            self.restore_undo(entry.snapshot)?;
-            self.redo_stack.push(AppModelUndoEntry {
-                record: entry.record,
-                snapshot: redo,
-                description: entry.description,
-            });
-        }
-        self.status = format!("Undo: {description}");
-        Ok(())
+        self.history_step(cuemol_desktop_core::undo::Direction::Undo, depth, None)
     }
 
     fn redo(&mut self, depth: usize) -> Result<(), String> {
-        self.flush_rendering()?;
-        let count = depth.saturating_add(1).min(self.redo_stack.len());
-        if count == 0 {
-            self.status = "Nothing to redo".to_string();
-            return Ok(());
-        }
-        let mut description = String::new();
-        for _ in 0..count {
-            let mut entry = self.redo_stack.pop().expect("redo count is bounded");
-            let undo = self.capture_undo();
-            description = entry.description.clone();
-            entry
-                .snapshot
-                .desktop
-                .preserve_global_styles_from(&self.desktop);
-            entry
-                .snapshot
-                .desktop
-                .preserve_host_preferences_from(&self.desktop);
-            entry.snapshot.camera = entry
-                .snapshot
-                .desktop
-                .preserve_view_state_from(&self.desktop, &self.camera);
-            let options = entry.snapshot.desktop.active_view_options();
-            entry.snapshot.trans_mms = options.trans_mms;
-            entry.snapshot.rot_mms = options.rot_mms;
-            entry.snapshot.swap_stereo_eyes = options.swap_stereo_eyes;
-            self.restore_undo(entry.snapshot)?;
-            self.undo_stack.push(AppModelUndoEntry {
-                record: entry.record,
-                snapshot: undo,
-                description: entry.description,
-            });
-        }
-        self.status = format!("Redo: {description}");
-        Ok(())
+        self.history_step(cuemol_desktop_core::undo::Direction::Redo, depth, None)
     }
 
     fn clear_undo(&mut self) {
@@ -12245,7 +12178,7 @@ fn handle_model_request(
                     }
                     model.status = format!("APBS calculation complete: {}", job.potential_name);
                     model.invalidate_snapshot(false);
-                    if !is_agent || !model.agent.changed_scene { model.push_undo(undo); }
+                    if is_agent { model.record_agent_history("calc_elepot"); } else { model.push_undo(undo); }
                     if is_agent {
                         model.agent.changed_scene = true;
                         model.agent.revision = model.snapshot_revision;
@@ -17543,6 +17476,7 @@ mod tests {
             remote_console: None,
             updates: Default::default(),
             agent: Default::default(),
+            agent_history: None,
             agent_wake: Arc::new(|| {}),
             log_lines: Vec::new(),
             status: "Ready".to_string(),
