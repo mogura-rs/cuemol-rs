@@ -251,6 +251,10 @@ impl App {
     }
 
     pub(super) fn select_tool(&mut self, name: &str) {
+        if let Some(kind) = cuemol_ui::molecule_edit::Kind::from_command(name) {
+            self.molecule_edits.open(kind, &self.state, self.selected);
+            return;
+        }
         if name == "analyze_interactions" {
             self.interaction.opened(&self.state, self.selected);
             self.show_interaction = true;
@@ -371,6 +375,81 @@ impl App {
         self.settings_draft = if open && !reloaded { Some(draft) } else { None };
         self.show_settings = open;
     }
+    pub(super) fn molecule_edit_ui(&mut self, ctx: &egui::Context) {
+        let Some(kind) = self.molecule_edits.active else {
+            return;
+        };
+        if self.molecule_edits.draft().scene != self.state.active_scene() {
+            self.molecule_edits.active = None;
+            self.message = "The active scene changed. Reopen the molecule edit dialog.".into();
+            return;
+        }
+        let mut open = true;
+        let mut action = None;
+        let window = egui::Window::new(kind.title())
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(550.)
+            .show(ctx, |ui| {
+                action = self
+                    .molecule_edits
+                    .draft_mut()
+                    .show(ui, &self.state, self.revision);
+            });
+        self.ui_rects
+            .extend(self.molecule_edits.draft().rects.clone());
+        if let Some(window) = window {
+            self.record_ui_rect("Molecule edit window", &window.response);
+        }
+        match action {
+            Some(cuemol_ui::molecule_edit::Action::Accept) => {
+                let draft = self.molecule_edits.draft();
+                let args = draft
+                    .validation_error(&self.state)
+                    .map_or_else(|| draft.arguments(), Err);
+                match args {
+                    Ok(args) => {
+                        if self.call_shared(kind.command(), args) {
+                            let count = serde_json::from_str::<serde_json::Value>(&self.message)
+                                .ok()
+                                .and_then(|v| v[kind.result_key()].as_u64())
+                                .unwrap_or(0);
+                            if kind == cuemol_ui::molecule_edit::Kind::Chain || count > 0 {
+                                let draft = self.molecule_edits.draft();
+                                self.selected = if kind == cuemol_ui::molecule_edit::Kind::Merge {
+                                    draft.target
+                                } else {
+                                    draft.object
+                                };
+                                self.state.remember_selection(&draft.selection);
+                                self.persist_selection_history();
+                                self.message = format!("{}: {count} atom(s)", kind.title());
+                                open = false;
+                            } else {
+                                self.message = kind.no_result().into();
+                                self.molecule_edits
+                                    .draft_mut()
+                                    .error
+                                    .clone_from(&self.message);
+                            }
+                        } else {
+                            self.molecule_edits
+                                .draft_mut()
+                                .error
+                                .clone_from(&self.message);
+                        }
+                    }
+                    Err(error) => self.molecule_edits.draft_mut().error = error.into(),
+                }
+            }
+            Some(cuemol_ui::molecule_edit::Action::Cancel) => open = false,
+            None => {}
+        }
+        if !open {
+            self.molecule_edits.active = None;
+        }
+    }
+
     pub(super) fn interaction_ui(&mut self, ctx: &egui::Context) {
         if !self.show_interaction {
             return;

@@ -16436,6 +16436,11 @@ impl DesktopAppState {
         let count = selected_residue_atom_count(object.mol(), &selector);
         let changed =
             MolAnlManager::new().change_chain_name(object.mol_mut(), &selector, chain_name.trim());
+        if count > 0 && !changed {
+            return Err(CueMolError::invalid_argument(
+                "Chain edit was rejected: a destination residue already exists",
+            ));
+        }
         Ok(if changed { count } else { 0 })
     }
 
@@ -16462,12 +16467,13 @@ impl DesktopAppState {
             .object_mut(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
         let count = selected_residue_atom_count(object.mol(), &selector);
-        let manager = MolAnlManager::new();
-        let changed = if renumber {
-            manager.renum_res_index(object.mol_mut(), &selector, shift_mode, value)
-        } else {
-            manager.shift_res_index(object.mol_mut(), &selector, shift_mode, value)
-        };
+        let changed = MolAnlManager::new().change_residue_indices(
+            object.mol_mut(),
+            &selector,
+            shift_mode,
+            value,
+            renumber,
+        )?;
         Ok(if changed { count } else { 0 })
     }
 

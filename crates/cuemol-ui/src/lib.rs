@@ -88,3 +88,6 @@ pub mod file_options;
 
 #[cfg(feature = "egui")]
 pub mod interaction;
+
+#[cfg(feature = "egui")]
+pub mod molecule_edit;

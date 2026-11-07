@@ -159,6 +159,12 @@ async function openShell(page, storage = {}, options = {}) {
       if (command === 'get_preferences') return structuredClone(preferences);
       if (command === 'set_preferences') { preferences=structuredClone(args.preferences);return {preferences,status:'Options updated'}; }
       if (command === 'get_snapshot') return snapshot;
+      if (options.moleculeEdits && ['delete_atoms','change_chain','renumber_residues','merge_molecules'].includes(command)) {
+        if (args.selection === 'invalid (((') throw new Error('Invalid selection');
+        snapshot.status = args.selection === 'none' && command !== 'change_chain' ? 'No atoms matched the selection' : 'Edited molecule';
+        if (command === 'renumber_residues' && !args.shiftMode && args.value === 1) snapshot.status = 'Residue index change was rejected';
+        return structuredClone(snapshot);
+      }
       if (options.interactions && command === 'calculate_contacts') {
         if(args.selection1 === 'invalid (((') throw new Error('Invalid selection');
         snapshot.status=args.selection1 === 'none' ? 'No interaction was found' : 'Defined 1 interaction(s) in measure';
@@ -2384,5 +2390,113 @@ test('Tauri interaction analysis validates inputs, remembers molecules and enabl
   await dialog.getByLabel('Max labels',{exact:true}).fill('29');
   await expect(dialog.getByRole('button',{name:'OK',exact:true})).toBeDisabled();
   await expect(dialog.getByRole('alert')).toContainText('active scene changed');
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri molecule edit dialogs validate, confirm and retain failed requests', async ({page}, testInfo) => {
+  const errors = await openShell(page, {}, {interactions: true, moleculeEdits: true});
+  const dialog = page.locator('#reference-dialog');
+  const open = async title => {
+    await page.locator('summary').filter({hasText: /^Edit$/}).click();
+    await page.locator(`[data-dialog="${title}"]`).click();
+  };
+  const last = command => page.evaluate(command => window.__shellCalls.filter(c => c.command === command).at(-1)?.args, command);
+  await open('Delete mol atoms');
+  await expect(dialog.getByLabel('Selection', {exact:true})).toHaveValue('');
+  await expect(dialog.getByRole('button', {name:'Delete', exact:true})).toBeDisabled();
+  await dialog.getByRole('button', {name:'Choose Selection', exact:true}).click();
+  await dialog.getByRole('button', {name:'Selection choice *', exact:true}).click();
+  await expect(dialog.getByRole('button', {name:'Delete', exact:true})).toBeEnabled();
+  await dialog.getByLabel('Selection', {exact:true}).fill('none');
+  await dialog.getByRole('button', {name:'Delete', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toHaveText('No atoms matched the selection');
+  await dialog.getByLabel('Selection', {exact:true}).fill('invalid (((');
+  await dialog.getByRole('button', {name:'Delete', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('Invalid selection');
+  await expect(dialog.getByLabel('Selection', {exact:true})).toHaveValue('invalid (((');
+  await dialog.getByLabel('Molecule', {exact:true}).selectOption('5');
+  await dialog.getByLabel('Selection', {exact:true}).fill('*');
+  await dialog.getByRole('button', {name:'Delete', exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  expect(await last('delete_atoms')).toEqual({objectUid:5, selection:'*'});
+  await open('Delete mol atoms');
+  await expect(dialog.getByLabel('Molecule', {exact:true})).toHaveValue('5');
+  await expect(dialog.getByLabel('Selection', {exact:true})).toHaveValue('');
+  await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
+
+  await open('Change chain ID');
+  await expect(dialog.getByLabel('New chain ID', {exact:true})).toHaveValue('');
+  await dialog.getByLabel('New chain ID', {exact:true}).fill(' ');
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog.getByText('Chain ID < > will be converted to <_>. Change the chain ID?', {exact:true})).toBeVisible();
+  expect(await last('change_chain')).toBeUndefined();
+  await dialog.getByRole('button', {name:'No', exact:true}).click();
+  await dialog.getByLabel('New chain ID', {exact:true}).fill(' AB ');
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog.getByLabel('New chain ID', {exact:true})).toBeDisabled();
+  await page.screenshot({path:testInfo.outputPath('tauri-chain-confirm.png')});
+  await dialog.getByRole('button', {name:'Yes', exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  expect(await last('change_chain')).toEqual({objectUid:3, selection:'', chainName:'AB'});
+  await open('Change chain ID');
+  await dialog.getByLabel('New chain ID', {exact:true}).fill(' ');
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await dialog.getByRole('button', {name:'Yes', exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  expect((await last('change_chain')).chainName).toBe('_');
+
+  await open('Change residue number');
+  await expect(dialog.getByLabel('Mode', {exact:true})).toHaveValue('shift');
+  await expect(dialog.getByLabel('Residue index', {exact:true})).toHaveValue('1');
+  await expect(dialog.getByLabel('Renumber', {exact:true})).not.toBeChecked();
+  await dialog.getByLabel('Mode', {exact:true}).selectOption('start');
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toHaveText('Residue index change was rejected');
+  await dialog.getByLabel('Mode', {exact:true}).selectOption('shift');
+  await dialog.getByLabel('Residue index', {exact:true}).fill('0');
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('must not be zero');
+  await dialog.getByLabel('Residue index', {exact:true}).fill('2147483648');
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('integer range');
+  expect((await last('renumber_residues')).shiftMode).toBe(false);
+  await dialog.getByLabel('Residue index', {exact:true}).fill('1.5');
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  expect(await last('renumber_residues')).toEqual({objectUid:3, selection:'', shiftMode:true, value:1, renumber:false});
+  await open('Change residue number');
+  await dialog.getByLabel('Mode', {exact:true}).selectOption('start');
+  await dialog.getByLabel('Residue index', {exact:true}).fill('10000');
+  await dialog.getByLabel('Renumber', {exact:true}).check();
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await dialog.getByRole('button', {name:'No', exact:true}).click();
+  expect((await last('renumber_residues')).value).toBe(1);
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await dialog.getByRole('button', {name:'Yes', exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  expect(await last('renumber_residues')).toEqual({objectUid:3, selection:'', shiftMode:false, value:10000, renumber:true});
+
+  await open('Merge molecule');
+  await dialog.getByLabel('From molecule', {exact:true}).selectOption('3');
+  await dialog.getByLabel('To molecule', {exact:true}).selectOption('3');
+  await expect(dialog.getByRole('button', {name:'OK', exact:true})).toBeDisabled();
+  await dialog.getByLabel('To molecule', {exact:true}).selectOption('5');
+  await dialog.getByLabel('Copy (keep source atoms)', {exact:true}).uncheck();
+  await dialog.getByLabel('Selection', {exact:true}).fill('invalid (((');
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('Invalid selection');
+  await dialog.getByLabel('Selection', {exact:true}).fill('');
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  expect(await last('merge_molecules')).toEqual({sourceObjectUid:3,targetObjectUid:5,selection:'',copy:false});
+  await open('Merge molecule');
+  await expect(dialog.getByLabel('From molecule', {exact:true})).toHaveValue('3');
+  await expect(dialog.getByLabel('To molecule', {exact:true})).toHaveValue('5');
+  await expect(dialog.getByLabel('Copy (keep source atoms)', {exact:true})).toBeChecked();
+  await page.evaluate(async () => { window.__interactionSceneChanged(); await mutate('get_snapshot'); });
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('active scene changed');
+  expect((await last('merge_molecules')).copy).toBe(false);
   expect(errors).toEqual([]);
 });

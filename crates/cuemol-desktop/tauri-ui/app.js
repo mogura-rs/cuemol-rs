@@ -217,8 +217,7 @@ const molstructSelectedKeys = new Set();
 const molstructOpenKeys = new Set();
 let molstructSelectionAnchor = null;
 let selectionObjectUid = null;
-let mergeMoleculeSourceUid = null;
-let mergeMoleculeTargetUid = null;
+const moleculeEditHistory = new Map();
 let coloringTargetKey = null;
 let symmetryTargetKey = null;
 let densityPanelTargetKey = null;
@@ -5761,6 +5760,134 @@ async function showEditInteractionListDialog(object, renderer) {
   });
 }
 
+function resolveChainInput(raw) {
+  if (raw === "") throw new Error("New chain ID is empty.");
+  const value = raw.trim();
+  if (!value) return {value: "_", confirmation: "Chain ID < > will be converted to <_>. Change the chain ID?"};
+  if (value.length > 1) return {value, confirmation: "Chain ID longer than 1 character does not conform to the PDB format. Change the chain ID?"};
+  return {value};
+}
+
+function resolveResidueInput(shift, raw) {
+  const value = parseInt(raw, 10);
+  if (Number.isNaN(value)) throw new Error(shift ? "Invalid residue shift value." : "Invalid start residue number.");
+  if (!Number.isInteger(value) || value < -2147483648 || value > 2147483647) throw new Error("Residue number is outside the supported integer range.");
+  if (shift && value === 0) throw new Error("Residue shift value must not be zero.");
+  return {value, confirmation: !shift && (value < -999 || value > 9999)
+    ? "Residue number larger than 4 digits does not conform to the PDB format. Change the residue index?" : null};
+}
+
+function showMoleculeEditFields(title) {
+  const merge = title === "Merge molecule";
+  const deleting = title === "Delete mol atoms";
+  const chain = title === "Change chain ID";
+  const residue = title === "Change residue number";
+  if (residue) dialogTitle.textContent = "Change residue index";
+  const sceneUid = snapshot.activeSceneUid;
+  const objects = activeObjects();
+  const previous = moleculeEditHistory.get(title) || {};
+  const validId = id => objects.some(object => object.uid === id) ? id : null;
+  const fields = dialogGroup(merge ? "From" : "Molecule");
+  const options = objects.map(object => [object.uid, object.name]);
+  if (merge || objects.length === 0) options.unshift(["", "Select molecule"]);
+  const object = dialogSelect(merge ? "From molecule" : "Molecule", options,
+    validId(previous.object) ?? (merge ? "" : validId(selectedObjectUid) ?? objects[0]?.uid ?? ""), fields);
+  const picker = dialogSelectionField("Selection", "", () => Number(object.value), fields);
+  const selection = picker.input;
+  const target = merge ? dialogSelect("To molecule", options, validId(previous.target) ?? "", fields) : null;
+  const copy = merge ? dialogCheckbox("Copy (keep source atoms)", true, fields) : null;
+  const chainName = chain ? dialogField("New chain ID", "", "text", fields) : null;
+  const mode = residue ? dialogSelect("Mode", [["shift", "Shift by"], ["start", "Start from"]], "shift", fields) : null;
+  const value = residue ? dialogField("Residue index", "1", "text", fields) : null;
+  const renumber = residue ? dialogCheckbox("Renumber", false, fields) : null;
+  const warning = dialogParagraph(deleting ? "Use * to select all atoms." : "");
+  fields.append(warning);
+  const errorMessage = dialogParagraph("");
+  errorMessage.setAttribute("role", "alert");
+  dialogContent.append(errorMessage);
+  const confirmation = document.createElement("div");
+  confirmation.hidden = true;
+  const confirmationMessage = dialogParagraph("");
+  confirmation.append(confirmationMessage);
+  dialogContent.append(confirmation);
+  let pending = null;
+  let submitting = false;
+  const validate = () => {
+    if (snapshot.activeSceneUid !== sceneUid) return "The active scene changed. Reopen the molecule edit dialog.";
+    if (!activeObjects().some(item => item.uid === Number(object.value))) return "Select a molecule.";
+    if (merge && !activeObjects().some(item => item.uid === Number(target.value))) return "Select a destination molecule.";
+    if (merge && object.value === target.value) return "Source and destination must be different molecules.";
+    if (deleting && !selection.value.trim()) return "Enter an explicit selection to delete atoms.";
+    if (chain && chainName.value === "") return "New chain ID is empty.";
+    return "";
+  };
+  const update = (clearError = true) => {
+    moleculeEditHistory.set(title, {object: Number(object.value) || null, target: Number(target?.value) || null});
+    fields.disabled = submitting || Boolean(pending);
+    picker.setEnabled(!fields.disabled && Boolean(object.value));
+    apply.disabled = fields.disabled || Boolean(validate());
+    if (clearError) {
+      const error = validate();
+      errorMessage.textContent = ["New chain ID is empty.", "Enter an explicit selection to delete atoms."].includes(error) ? "" : error;
+    }
+    if (chain) warning.textContent = chainName.value.trim().length > 1 ? "Chain ID longer than 1 character does not conform to the PDB format." : "";
+    confirmation.hidden = !pending;
+  };
+  const commit = async request => {
+    const error = validate();
+    if (error || submitting) { if (error) errorMessage.textContent = error; return; }
+    pending = null;
+    submitting = true;
+    update();
+    const success = await mutate(request.command, request.args, renderShell, true,
+      error => { errorMessage.textContent = String(error); });
+    submitting = false;
+    if (!fields.isConnected) return;
+    if (success && !["No atoms matched the selection", "Residue index change was rejected"].includes(snapshot.status)) {
+      rememberSelection(request.selection);
+      referenceDialog.close();
+    } else {
+      if (success) errorMessage.textContent = snapshot.status;
+      update(false);
+    }
+  };
+  const apply = button(deleting ? "Delete" : "OK", deleting ? "dialog-primary danger" : "dialog-primary", async () => {
+    if (validate() || pending || submitting) { update(); return; }
+    try {
+      const request = {selection: selection.value, args: {objectUid: Number(object.value), selection: selection.value}};
+      let message = null;
+      if (merge) {
+        request.command = "merge_molecules";
+        request.args = {sourceObjectUid: Number(object.value), targetObjectUid: Number(target.value), selection: selection.value, copy: copy.checked};
+      } else if (deleting) request.command = "delete_atoms";
+      else if (chain) {
+        const result = resolveChainInput(chainName.value);
+        message = result.confirmation;
+        request.command = "change_chain";
+        request.args.chainName = result.value;
+      } else {
+        const result = resolveResidueInput(mode.value === "shift", value.value);
+        message = result.confirmation;
+        request.command = "renumber_residues";
+        Object.assign(request.args, {shiftMode: mode.value === "shift", value: result.value, renumber: renumber.checked});
+      }
+      if (message) {
+        pending = request;
+        confirmationMessage.textContent = message;
+        update();
+      } else await commit(request);
+    } catch (error) { errorMessage.textContent = String(error); }
+  });
+  confirmation.append(button("Yes", "dialog-primary", async () => { if (pending) await commit(pending); }),
+    button("No", "", () => { pending = null; update(); }));
+  for (const input of [object, target, selection, copy, chainName, mode, value, renumber].filter(Boolean)) {
+    input.addEventListener("input", () => update());
+    input.addEventListener("change", () => update());
+  }
+  dialogActions(button("Cancel", "", () => referenceDialog.close()), apply);
+  update();
+}
+
 async function showReferenceDialog(title, initialTrajectoryPaths = []) {
   if (referenceDialog.open) referenceDialog.close();
   if (title === 'Scene Properties' || title === 'View Property') {
@@ -8510,167 +8637,8 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       referenceDialog.close();
     });
     dialogActions(save);
-  } else if (title === "Merge molecule") {
-    const objects = activeObjects();
-    if (objects.length < 2) {
-      dialogContent.append(dialogParagraph("At least two molecular objects are required."));
-    } else {
-      if (!objects.some((object) => object.uid === mergeMoleculeSourceUid)) {
-        mergeMoleculeSourceUid = null;
-      }
-      if (!objects.some((object) => object.uid === mergeMoleculeTargetUid)) {
-        mergeMoleculeTargetUid = null;
-      }
-      const objectOptions = [
-        ["", "Select object"],
-        ...objects.map((object) => [object.uid, object.name]),
-      ];
-      const fromSection = dialogGroup("From");
-      const source = dialogSelect(
-        "From molecule",
-        objectOptions,
-        mergeMoleculeSourceUid ?? "",
-        fromSection,
-      );
-      const selection = dialogField("Selection", "", "text", fromSection);
-      const toSection = dialogGroup("To");
-      const target = dialogSelect(
-        "To molecule",
-        objectOptions,
-        mergeMoleculeTargetUid ?? "",
-        toSection,
-      );
-      const sameMolecule = dialogParagraph(
-        "Source and destination must be different molecules.",
-      );
-      sameMolecule.hidden = true;
-      toSection.append(sameMolecule);
-      const options = dialogGroup("Options");
-      const copy = dialogCheckbox("Copy (keep source atoms)", true, options);
-      const merge = button("OK", "dialog-primary", async () => {
-        await mutate("merge_molecules", {
-          sourceObjectUid: Number(source.value),
-          selection: selection.value,
-          targetObjectUid: Number(target.value),
-          copy: copy.checked,
-        });
-        rememberSelection(selection.value);
-        referenceDialog.close();
-      });
-      const updateMergeState = () => {
-        mergeMoleculeSourceUid = source.value ? Number(source.value) : null;
-        mergeMoleculeTargetUid = target.value ? Number(target.value) : null;
-        const same =
-          mergeMoleculeSourceUid !== null &&
-          mergeMoleculeSourceUid === mergeMoleculeTargetUid;
-        sameMolecule.hidden = !same;
-        merge.disabled =
-          mergeMoleculeSourceUid === null || mergeMoleculeTargetUid === null || same;
-      };
-      source.addEventListener("change", updateMergeState);
-      target.addEventListener("change", updateMergeState);
-      dialogActions(merge);
-      updateMergeState();
-    }
-  } else if (title === "Delete mol atoms") {
-    const objects = activeObjects();
-    if (objects.length === 0) {
-      dialogContent.append(dialogParagraph("Select a molecular object first."));
-    } else {
-      const object = dialogSelect(
-        "Molecule",
-        objects.map((candidate) => [candidate.uid, candidate.name]),
-        selectedObjectUid ?? objects[0].uid,
-      );
-      const selection = dialogField("Selection", snapshot.selection);
-      const apply = button("OK", "dialog-primary", async () => {
-        await mutate("delete_atoms", {
-          objectUid: Number(object.value),
-          selection: selection.value,
-        });
-        rememberSelection(selection.value);
-        referenceDialog.close();
-      });
-      dialogActions(apply);
-    }
-  } else if (title === "Change chain ID") {
-    const objects = activeObjects();
-    if (objects.length === 0) {
-      dialogContent.append(dialogParagraph("Select a molecular object first."));
-    } else {
-      const object = dialogSelect(
-        "Molecule",
-        objects.map((candidate) => [candidate.uid, candidate.name]),
-        selectedObjectUid ?? objects[0].uid,
-      );
-      const selection = dialogField("Selection", snapshot.selection);
-      const chainName = dialogField("New chain ID", "A");
-      const apply = button("OK", "dialog-primary", async () => {
-        if (chainName.value.trim() === "") return;
-        await mutate("change_chain", {
-          objectUid: Number(object.value),
-          selection: selection.value,
-          chainName: chainName.value,
-        });
-        rememberSelection(selection.value);
-        referenceDialog.close();
-      });
-      dialogActions(apply);
-    }
-  } else if (title === "Change residue number") {
-    dialogTitle.textContent = "Change residue index";
-    const objects = activeObjects();
-    if (objects.length === 0) {
-      dialogContent.append(dialogParagraph("Select a molecular object first."));
-    } else {
-      const object = dialogSelect(
-        "Molecule",
-        objects.map((candidate) => [candidate.uid, candidate.name]),
-        selectedObjectUid ?? objects[0].uid,
-      );
-      const selection = dialogField("Selection", snapshot.selection);
-      const modeField = (label, checked, initialValue) => {
-        const wrapper = document.createElement("label");
-        wrapper.className = "dialog-field";
-        const caption = document.createElement("span");
-        const mode = document.createElement("input");
-        mode.type = "radio";
-        mode.name = "residue-index-mode";
-        mode.checked = checked;
-        caption.append(mode, document.createTextNode(label));
-        const input = document.createElement("input");
-        input.type = "number";
-        input.value = initialValue;
-        wrapper.append(caption, input);
-        dialogContent.append(wrapper);
-        return { mode, input };
-      };
-      const shift = modeField("Shift by:", true, "1");
-      const start = modeField("Start from:", false, "1");
-      const renumber = dialogCheckbox("Renumber", false);
-      const syncMode = () => {
-        shift.input.disabled = !shift.mode.checked;
-        start.input.disabled = !start.mode.checked;
-      };
-      shift.mode.addEventListener("change", syncMode);
-      start.mode.addEventListener("change", syncMode);
-      syncMode();
-      const apply = button("OK", "dialog-primary", async () => {
-        const shiftMode = shift.mode.checked;
-        const value = Number(shiftMode ? shift.input.value : start.input.value);
-        if (!Number.isInteger(value) || (shiftMode && value === 0)) return;
-        await mutate("renumber_residues", {
-          objectUid: Number(object.value),
-          selection: selection.value,
-          shiftMode,
-          value,
-          renumber: renumber.checked,
-        });
-        rememberSelection(selection.value);
-        referenceDialog.close();
-      });
-      dialogActions(apply);
-    }
+  } else if (["Merge molecule", "Delete mol atoms", "Change chain ID", "Change residue number"].includes(title)) {
+    showMoleculeEditFields(title);
   } else if (title === "Animation object properties") {
     const pending = pendingAnimationAdd;
     const object = pending?.object || snapshot?.animationObjects.find(

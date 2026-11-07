@@ -1014,14 +1014,6 @@ impl Default for NativeMdTrajectoryDraft {
     }
 }
 
-#[derive(Debug, Clone)]
-struct NativeMergeMoleculeDraft {
-    source_object: Option<cuemol_core::Uid>,
-    target_object: Option<cuemol_core::Uid>,
-    selection: String,
-    copy: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativePngUnit {
     Pixel,
@@ -1341,9 +1333,7 @@ struct GuiApplication {
     pdb_fetch_fofc: bool,
     pdb_map_source: String,
     md_trajectory_draft: Option<NativeMdTrajectoryDraft>,
-    merge_molecule_draft: Option<NativeMergeMoleculeDraft>,
-    merge_source_object: Option<cuemol_core::Uid>,
-    merge_target_object: Option<cuemol_core::Uid>,
+    molecule_edits: cuemol_ui::molecule_edit::Dialogs,
     png_export_draft: Option<NativePngExportDraft>,
     scene_save_draft: Option<NativeSceneSaveDraft>,
     new_tab_draft: Option<NativeNewTabDraft>,
@@ -1532,9 +1522,6 @@ struct GuiApplication {
     show_view_props: bool,
     view_properties_draft: Option<NativeViewProperties>,
     view_property_selected: usize,
-    show_delete_dialog: bool,
-    show_chain_dialog: bool,
-    show_residue_dialog: bool,
     show_renderer_dialog: bool,
     new_renderer_owner: Option<NativePropertyObject>,
     new_renderer_group: Option<String>,
@@ -1545,14 +1532,6 @@ struct GuiApplication {
     new_renderer_selection: String,
     new_renderer_recenter: bool,
     new_renderer_density_move_view: bool,
-    delete_object: Option<cuemol_core::Uid>,
-    chain_object: Option<cuemol_core::Uid>,
-    chain_edit_value: String,
-    residue_object: Option<cuemol_core::Uid>,
-    residue_shift_mode: bool,
-    residue_shift_value: String,
-    residue_start_value: String,
-    residue_renumber: bool,
     tool_dialog: Option<String>,
     show_get_pdb: bool,
     show_console: bool,
@@ -4692,9 +4671,7 @@ impl GuiApplication {
             pdb_fetch_fofc: false,
             pdb_map_source: "RCSB_CIF".to_string(),
             md_trajectory_draft: None,
-            merge_molecule_draft: None,
-            merge_source_object: None,
-            merge_target_object: None,
+            molecule_edits: Default::default(),
             png_export_draft: None,
             scene_save_draft: None,
             new_tab_draft: None,
@@ -4850,9 +4827,6 @@ impl GuiApplication {
             show_view_props: false,
             view_properties_draft: None,
             view_property_selected: 0,
-            show_delete_dialog: false,
-            show_chain_dialog: false,
-            show_residue_dialog: false,
             show_renderer_dialog: false,
             new_renderer_owner: None,
             new_renderer_group: None,
@@ -4863,14 +4837,6 @@ impl GuiApplication {
             new_renderer_selection: String::new(),
             new_renderer_recenter: true,
             new_renderer_density_move_view: false,
-            delete_object: None,
-            chain_object: None,
-            chain_edit_value: "A".to_string(),
-            residue_object: None,
-            residue_shift_mode: true,
-            residue_shift_value: "1".to_string(),
-            residue_start_value: "1".to_string(),
-            residue_renumber: false,
             tool_dialog: None,
             show_get_pdb: false,
             show_console: false,
@@ -5718,22 +5684,19 @@ impl GuiApplication {
                     }
                     ui.separator();
                     if ui.button("Merge molecule...").clicked() {
-                        self.open_merge_molecule_dialog();
+                        self.open_molecule_edit(cuemol_ui::molecule_edit::Kind::Merge);
                         ui.close();
                     }
                     if ui.button("Delete mol atoms...").clicked() {
-                        self.delete_object = self.selected_object;
-                        self.show_delete_dialog = true;
+                        self.open_molecule_edit(cuemol_ui::molecule_edit::Kind::Delete);
                         ui.close();
                     }
                     if ui.button("Change chain ID...").clicked() {
-                        self.chain_object = self.selected_object;
-                        self.show_chain_dialog = true;
+                        self.open_molecule_edit(cuemol_ui::molecule_edit::Kind::Chain);
                         ui.close();
                     }
                     if ui.button("Change residue number...").clicked() {
-                        self.residue_object = self.selected_object;
-                        self.show_residue_dialog = true;
+                        self.open_molecule_edit(cuemol_ui::molecule_edit::Kind::Residue);
                         ui.close();
                     }
                     ui.separator();
@@ -16213,24 +16176,9 @@ impl GuiApplication {
         });
     }
 
-    fn open_merge_molecule_dialog(&mut self) {
-        let objects = self.state.active_object_summaries();
-        if objects.len() < 2 {
-            self.set_status("At least two molecular objects are required");
-            return;
-        }
-        self.merge_source_object = self
-            .merge_source_object
-            .filter(|uid| objects.iter().any(|object| object.uid == *uid));
-        self.merge_target_object = self
-            .merge_target_object
-            .filter(|uid| objects.iter().any(|object| object.uid == *uid));
-        self.merge_molecule_draft = Some(NativeMergeMoleculeDraft {
-            source_object: self.merge_source_object,
-            target_object: self.merge_target_object,
-            selection: String::new(),
-            copy: true,
-        });
+    fn open_molecule_edit(&mut self, kind: cuemol_ui::molecule_edit::Kind) {
+        self.molecule_edits
+            .open(kind, &self.state, self.selected_object);
     }
 
     fn choose_execute_script(&mut self) {
@@ -18628,13 +18576,10 @@ impl GuiApplication {
         self.style_props_dialog(ctx);
         self.renderer_style_create_dialog(ctx);
         self.renderer_style_edit_dialog(ctx);
-        self.delete_atoms_dialog(ctx);
-        self.chain_dialog(ctx);
-        self.residue_dialog(ctx);
+        self.molecule_edit_dialog(ctx);
         self.renderer_dialog(ctx, camera);
         self.get_pdb_dialog(ctx);
         self.pdb_download_progress_dialog(ctx);
-        self.merge_molecule_dialog(ctx);
         self.md_trajectory_dialog(ctx, camera);
         self.png_export_dialog(ctx);
         self.scene_save_options_dialog(ctx, camera);
@@ -24224,195 +24169,6 @@ impl GuiApplication {
         Ok(())
     }
 
-    fn delete_atoms_dialog(&mut self, ctx: &egui::Context) {
-        if !self.show_delete_dialog {
-            return;
-        }
-        let objects = self.state.active_object_summaries();
-        if self
-            .delete_object
-            .is_none_or(|uid| !objects.iter().any(|object| object.uid == uid))
-        {
-            self.delete_object = objects.first().map(|object| object.uid);
-        }
-        let mut open = self.show_delete_dialog;
-        let mut apply = false;
-        egui::Window::new("Delete mol atoms")
-            .open(&mut open)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                egui::Grid::new("delete-molecule-atoms-fields")
-                    .num_columns(2)
-                    .spacing([8.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.label("Molecule:");
-                        egui::ComboBox::from_id_salt("delete-molecule-atoms-object")
-                            .selected_text(object_combo_label(&objects, self.delete_object))
-                            .show_ui(ui, |ui| {
-                                for object in &objects {
-                                    ui.selectable_value(
-                                        &mut self.delete_object,
-                                        Some(object.uid),
-                                        object.name.as_str(),
-                                    );
-                                }
-                            });
-                        ui.end_row();
-                        ui.label("Selection:");
-                        ui.add_sized(
-                            [240.0, 22.0],
-                            egui::TextEdit::singleline(&mut self.selection_text),
-                        );
-                        ui.end_row();
-                    });
-                ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() {
-                        apply = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.show_delete_dialog = false;
-                    }
-                });
-            });
-        self.show_delete_dialog = open && self.show_delete_dialog;
-        if apply {
-            self.delete_selected_atoms();
-        }
-    }
-
-    fn chain_dialog(&mut self, ctx: &egui::Context) {
-        if !self.show_chain_dialog {
-            return;
-        }
-        let objects = self.state.active_object_summaries();
-        if self
-            .chain_object
-            .is_none_or(|uid| !objects.iter().any(|object| object.uid == uid))
-        {
-            self.chain_object = objects.first().map(|object| object.uid);
-        }
-        let mut open = self.show_chain_dialog;
-        let mut apply = false;
-        egui::Window::new("Change chain ID")
-            .open(&mut open)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                egui::Grid::new("change-chain-id-fields")
-                    .num_columns(2)
-                    .spacing([8.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.label("Molecule:");
-                        egui::ComboBox::from_id_salt("change-chain-id-object")
-                            .selected_text(object_combo_label(&objects, self.chain_object))
-                            .show_ui(ui, |ui| {
-                                for object in &objects {
-                                    ui.selectable_value(
-                                        &mut self.chain_object,
-                                        Some(object.uid),
-                                        object.name.as_str(),
-                                    );
-                                }
-                            });
-                        ui.end_row();
-                        ui.label("Selection:");
-                        ui.add_sized(
-                            [240.0, 22.0],
-                            egui::TextEdit::singleline(&mut self.selection_text),
-                        );
-                        ui.end_row();
-                        ui.label("New chain ID:");
-                        ui.add_sized(
-                            [120.0, 22.0],
-                            egui::TextEdit::singleline(&mut self.chain_edit_value),
-                        );
-                        ui.end_row();
-                    });
-                ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() {
-                        apply = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.show_chain_dialog = false;
-                    }
-                });
-            });
-        self.show_chain_dialog = open && self.show_chain_dialog;
-        if apply {
-            self.change_chain_from_dialog();
-        }
-    }
-
-    fn residue_dialog(&mut self, ctx: &egui::Context) {
-        if !self.show_residue_dialog {
-            return;
-        }
-        let objects = self.state.active_object_summaries();
-        if self
-            .residue_object
-            .is_none_or(|uid| !objects.iter().any(|object| object.uid == uid))
-        {
-            self.residue_object = objects.first().map(|object| object.uid);
-        }
-        let mut open = self.show_residue_dialog;
-        let mut apply = false;
-        egui::Window::new("Change residue index")
-            .open(&mut open)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                egui::Grid::new("change-residue-index-fields")
-                    .num_columns(2)
-                    .spacing([8.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.label("Molecule:");
-                        egui::ComboBox::from_id_salt("change-residue-index-molecule")
-                            .selected_text(object_combo_label(&objects, self.residue_object))
-                            .show_ui(ui, |ui| {
-                                for object in &objects {
-                                    ui.selectable_value(
-                                        &mut self.residue_object,
-                                        Some(object.uid),
-                                        object.name.as_str(),
-                                    );
-                                }
-                            });
-                        ui.end_row();
-                        ui.label("Selection:");
-                        ui.add_sized(
-                            [240.0, 22.0],
-                            egui::TextEdit::singleline(&mut self.selection_text),
-                        );
-                        ui.end_row();
-                        ui.radio_value(&mut self.residue_shift_mode, true, "Shift by:");
-                        ui.add_enabled(
-                            self.residue_shift_mode,
-                            egui::TextEdit::singleline(&mut self.residue_shift_value)
-                                .desired_width(100.0),
-                        );
-                        ui.end_row();
-                        ui.radio_value(&mut self.residue_shift_mode, false, "Start from:");
-                        ui.add_enabled(
-                            !self.residue_shift_mode,
-                            egui::TextEdit::singleline(&mut self.residue_start_value)
-                                .desired_width(100.0),
-                        );
-                        ui.end_row();
-                    });
-                ui.checkbox(&mut self.residue_renumber, "Renumber");
-                ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() {
-                        apply = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.show_residue_dialog = false;
-                    }
-                });
-            });
-        self.show_residue_dialog = open && self.show_residue_dialog;
-        if apply {
-            self.renumber_residues_from_dialog();
-        }
-    }
-
     fn renderer_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         if !self.show_renderer_dialog {
             return;
@@ -25745,142 +25501,98 @@ impl GuiApplication {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 
-    fn merge_molecule_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut draft) = self.merge_molecule_draft.take() else {
+    fn molecule_edit_dialog(&mut self, ctx: &egui::Context) {
+        let Some(kind) = self.molecule_edits.active else {
             return;
         };
-        let objects = self.state.active_object_summaries();
+        if self.molecule_edits.draft().scene != self.state.active_scene() {
+            self.molecule_edits.active = None;
+            self.set_status("The active scene changed. Reopen the molecule edit dialog.");
+            return;
+        }
         let mut open = true;
-        let mut accept = false;
-        let mut cancel = false;
-        egui::Window::new("Merge molecule")
+        let mut action = None;
+        egui::Window::new(kind.title())
             .open(&mut open)
             .collapsible(false)
-            .resizable(false)
-            .default_width(520.0)
+            .default_width(550.)
             .show(ctx, |ui| {
-                ui.group(|ui| {
-                    ui.strong("From");
-                    egui::Grid::new("merge_molecule_from")
-                        .num_columns(2)
-                        .spacing([12.0, 6.0])
-                        .show(ui, |ui| {
-                            ui.label("From molecule:");
-                            egui::ComboBox::from_id_salt("merge_molecule_source")
-                                .selected_text(object_combo_label(&objects, draft.source_object))
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut draft.source_object,
-                                        None,
-                                        "Select object",
-                                    );
-                                    for object in &objects {
-                                        ui.selectable_value(
-                                            &mut draft.source_object,
-                                            Some(object.uid),
-                                            &object.name,
-                                        );
-                                    }
-                                });
-                            ui.end_row();
-
-                            ui.label("Selection:");
-                            ui.add_sized(
-                                [320.0, 22.0],
-                                egui::TextEdit::singleline(&mut draft.selection),
-                            );
-                            ui.end_row();
-                        });
-                });
-                ui.add_space(6.0);
-                ui.group(|ui| {
-                    ui.strong("To");
-                    ui.horizontal(|ui| {
-                        ui.label("To molecule:");
-                        egui::ComboBox::from_id_salt("merge_molecule_target")
-                            .selected_text(object_combo_label(&objects, draft.target_object))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut draft.target_object,
-                                    None,
-                                    "Select object",
-                                );
-                                for object in &objects {
-                                    ui.selectable_value(
-                                        &mut draft.target_object,
-                                        Some(object.uid),
-                                        &object.name,
-                                    );
-                                }
-                            });
-                    });
-                    if draft.source_object.is_some() && draft.source_object == draft.target_object {
-                        ui.colored_label(
-                            egui::Color32::DARK_RED,
-                            "Source and destination must be different molecules.",
-                        );
-                    }
-                });
-                ui.add_space(6.0);
-                ui.group(|ui| {
-                    ui.strong("Options");
-                    ui.checkbox(&mut draft.copy, "Copy (keep source atoms)");
-                });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    let valid = draft.source_object.is_some()
-                        && draft.target_object.is_some()
-                        && draft.source_object != draft.target_object;
-                    if ui.add_enabled(valid, egui::Button::new("OK")).clicked() {
-                        accept = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                    }
-                });
+                action =
+                    self.molecule_edits
+                        .draft_mut()
+                        .show(ui, &self.state, self.snapshot_revision);
             });
-
-        self.merge_source_object = draft.source_object;
-        self.merge_target_object = draft.target_object;
-        if accept {
-            if !self.apply_merge_molecule_draft(&draft) {
-                self.merge_molecule_draft = Some(draft);
+        match action {
+            Some(cuemol_ui::molecule_edit::Action::Accept) => {
+                self.apply_molecule_edit();
             }
-        } else if open && !cancel {
-            self.merge_molecule_draft = Some(draft);
+            Some(cuemol_ui::molecule_edit::Action::Cancel) => open = false,
+            None => {}
+        }
+        if !open {
+            self.molecule_edits.active = None;
         }
     }
 
-    fn apply_merge_molecule_draft(&mut self, draft: &NativeMergeMoleculeDraft) -> bool {
-        let (Some(source_object), Some(target_object)) = (draft.source_object, draft.target_object)
-        else {
-            self.set_status("Select source and destination molecules");
+    fn apply_molecule_edit(&mut self) -> bool {
+        let Some(kind) = self.molecule_edits.active else {
             return false;
         };
-        if source_object == target_object {
-            self.set_status("Source and destination must be different molecules");
-            return false;
-        }
-        let undo = self.capture_undo();
-        match self
-            .state
-            .merge_molecules(source_object, &draft.selection, target_object, draft.copy)
-        {
-            Ok(count) => {
-                self.push_undo_snapshot(undo);
-                self.selected_object = Some(target_object);
+        let draft = self.molecule_edits.draft();
+        let result = draft
+            .validation_error(&self.state)
+            .map_or_else(|| draft.arguments(), Err);
+        let args = match result {
+            Ok(args) => args,
+            Err(error) => {
+                self.molecule_edits.draft_mut().error = error.into();
+                self.set_status(error);
+                return false;
+            }
+        };
+        let selected = if kind == cuemol_ui::molecule_edit::Kind::Merge {
+            draft.target
+        } else {
+            draft.object
+        };
+        let selection = draft.selection.clone();
+        let mut undo = self.capture_undo();
+        undo.record =
+            cuemol_command::console::actions::Record::operation(&self.state, kind.command(), &args);
+        let result = cuemol_command::call_tool(
+            &mut self.state,
+            &mut cuemol_qsys::Camera::new(),
+            kind.command(),
+            &args,
+        );
+        match result {
+            Ok(value)
+                if kind == cuemol_ui::molecule_edit::Kind::Chain
+                    || value[kind.result_key()].as_u64().unwrap_or(0) > 0 =>
+            {
+                let count = value[kind.result_key()].as_u64().unwrap();
+                if !undo.state.same_scene_undo_state(&self.state) {
+                    self.push_undo_snapshot(undo);
+                }
+                self.remember_selection_history(&selection);
+                self.selected_object = selected;
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
                 self.invalidate_molecule_panel_caches();
                 self.rebuild_snapshot();
-                self.set_status(format!(
-                    "{} {count} atom(s) into the target molecule",
-                    if draft.copy { "Copied" } else { "Moved" }
-                ));
+                self.set_status(format!("{}: {count} atom(s)", kind.title()));
+                self.molecule_edits.active = None;
                 true
             }
-            Err(error) => {
-                self.set_error(error);
+            result => {
+                if !undo.state.same_undo_state(&self.state) {
+                    self.restore_gui_undo_state(undo);
+                }
+                let error = result
+                    .err()
+                    .map_or_else(|| kind.no_result().into(), |e| e.to_string());
+                self.molecule_edits.draft_mut().error = error.clone();
+                self.set_status(error);
                 false
             }
         }
@@ -29188,132 +28900,6 @@ impl GuiApplication {
                 .first()
                 .map(|object| object.uid)
         })
-    }
-
-    fn require_selection_for_edit(&mut self) -> bool {
-        if self.selection_text.trim().is_empty() {
-            self.set_status("Selection is required");
-            return false;
-        }
-        true
-    }
-
-    fn delete_selected_atoms(&mut self) {
-        if !self.require_selection_for_edit() {
-            return;
-        }
-        let Some(object_uid) = self
-            .delete_object
-            .filter(|uid| self.state.scene_manager().object(*uid).is_some())
-            .or_else(|| self.target_object_uid())
-        else {
-            self.set_status("No object selected");
-            return;
-        };
-        let undo = self.capture_undo();
-        match self
-            .state
-            .delete_atoms_in_object(object_uid, &self.selection_text)
-        {
-            Ok(count) if count > 0 => {
-                self.push_undo_snapshot(undo);
-                self.show_delete_dialog = false;
-                self.invalidate_molecule_panel_caches();
-                self.rebuild_snapshot();
-                self.set_status(format!("Deleted {count} atoms"));
-            }
-            Ok(_) => self.set_status("No atoms matched the selection"),
-            Err(error) => self.set_error(error),
-        }
-    }
-
-    fn change_chain_from_dialog(&mut self) {
-        if !self.require_selection_for_edit() {
-            return;
-        }
-        let Some(object_uid) = self
-            .chain_object
-            .filter(|uid| self.state.scene_manager().object(*uid).is_some())
-            .or_else(|| self.target_object_uid())
-        else {
-            self.set_status("No object selected");
-            return;
-        };
-        if self.chain_edit_value.trim().is_empty() {
-            self.set_status("New chain ID is required");
-            return;
-        }
-        let undo = self.capture_undo();
-        match self.state.change_chain_in_object(
-            object_uid,
-            &self.selection_text,
-            &self.chain_edit_value,
-        ) {
-            Ok(count) if count > 0 => {
-                self.push_undo_snapshot(undo);
-                self.show_chain_dialog = false;
-                self.invalidate_molecule_panel_caches();
-                self.rebuild_snapshot();
-                self.set_status(format!("Changed chain ID on {count} atoms"));
-            }
-            Ok(_) => self.set_status("No atoms matched the selection"),
-            Err(error) => self.set_error(error),
-        }
-    }
-
-    fn renumber_residues_from_dialog(&mut self) {
-        if !self.require_selection_for_edit() {
-            return;
-        }
-        let Some(object_uid) = self
-            .residue_object
-            .filter(|uid| self.state.scene_manager().object(*uid).is_some())
-            .or_else(|| self.target_object_uid())
-        else {
-            self.set_status("No object selected");
-            return;
-        };
-        let value_text = if self.residue_shift_mode {
-            &self.residue_shift_value
-        } else {
-            &self.residue_start_value
-        };
-        let value = match value_text.trim().parse::<i32>() {
-            Ok(value) => value,
-            Err(_) => {
-                self.set_status("Invalid residue number");
-                return;
-            }
-        };
-        if self.residue_shift_mode && value == 0 {
-            self.set_status("Residue shift must not be zero");
-            return;
-        }
-        let undo = self.capture_undo();
-        match self.state.change_residue_indices_in_object(
-            object_uid,
-            &self.selection_text,
-            self.residue_shift_mode,
-            value,
-            self.residue_renumber,
-        ) {
-            Ok(count) if count > 0 => {
-                self.push_undo_snapshot(undo);
-                self.show_residue_dialog = false;
-                self.invalidate_molecule_panel_caches();
-                self.rebuild_snapshot();
-                self.set_status(format!(
-                    "{} residues for {count} atoms",
-                    if self.residue_renumber {
-                        "Renumbered"
-                    } else {
-                        "Shifted"
-                    }
-                ));
-            }
-            Ok(_) => self.set_status("No residues matched the selection"),
-            Err(error) => self.set_error(error),
-        }
     }
 
     fn process_pending_file_opens(&mut self, camera: &mut CameraController) {
@@ -33121,6 +32707,217 @@ mod tests {
     }
 
     #[test]
+    fn native_molecule_edit_dialogs_validate_reset_and_group_history() {
+        use cuemol_ui::molecule_edit::{Action, Kind};
+        let mut app = GuiApplication::new();
+        app.config_path.clear();
+        app.state.open_bytes("probe.pdb", b"ATOM      1  N   GLY A   1       0.000   0.000   0.000  1.00 10.00           N  \nATOM      2  CA  GLY A   2       3.000   0.000   0.000  1.00 10.00           C  \nEND\n").unwrap();
+        let id = app.state.active_object_summaries()[0].uid;
+        app.selection_text = "*".into();
+        let mut camera = CameraController::default();
+        let atoms = |app: &GuiApplication| {
+            app.state
+                .scene_manager()
+                .object(id)
+                .unwrap()
+                .mol()
+                .atoms()
+                .iter()
+                .map(|a| (a.serial, a.chain_id.clone(), a.res_id))
+                .collect::<Vec<_>>()
+        };
+        let before = atoms(&app);
+        app.open_molecule_edit(Kind::Delete);
+        assert!(app.molecule_edits.draft().selection.is_empty());
+        assert!(!app.apply_molecule_edit());
+        app.molecule_edits.draft_mut().selection = "none".into();
+        assert!(!app.apply_molecule_edit());
+        assert_eq!(
+            app.molecule_edits.draft().error,
+            "No atoms matched the selection"
+        );
+        app.molecule_edits.draft_mut().selection = "invalid (((".into();
+        assert!(!app.apply_molecule_edit());
+        assert_eq!(atoms(&app), before);
+        assert!(app.undo_stack.is_empty());
+        app.molecule_edits.draft_mut().selection = "aid 1".into();
+        assert!(app.apply_molecule_edit());
+        assert!(app.molecule_edits.active.is_none());
+        assert_eq!(atoms(&app).len(), 1);
+        assert_eq!(app.undo_stack.len(), 1);
+        app.undo(&mut camera);
+        assert_eq!(atoms(&app), before);
+        app.redo(&mut camera);
+        assert_eq!(atoms(&app).len(), 1);
+        app.undo(&mut camera);
+
+        app.open_molecule_edit(Kind::Chain);
+        app.molecule_edits.draft_mut().chain = "A".into();
+        assert!(!app.apply_molecule_edit());
+        assert!(app
+            .molecule_edits
+            .draft()
+            .error
+            .contains("destination residue"));
+        assert_eq!(atoms(&app), before);
+        app.molecule_edits.draft_mut().selection = "none".into();
+        assert!(app.apply_molecule_edit());
+        assert!(app.molecule_edits.active.is_none());
+        assert!(app.undo_stack.is_empty());
+        app.open_molecule_edit(Kind::Chain);
+        assert_eq!(app.molecule_edits.draft().object, Some(id));
+        assert!(app.molecule_edits.draft().selection.is_empty());
+        assert!(app.molecule_edits.draft().chain.is_empty());
+        app.molecule_edits.draft_mut().chain = " ".into();
+        assert!(app
+            .molecule_edits
+            .draft_mut()
+            .request_accept(&app.state)
+            .is_none());
+        assert!(app.molecule_edits.draft().pending_confirmation.is_some());
+        assert_eq!(atoms(&app), before);
+        app.molecule_edits.draft_mut().pending_confirmation = None;
+        assert!(app.apply_molecule_edit());
+        assert!(atoms(&app).iter().all(|a| a.1 == "_"));
+        assert_eq!(app.undo_stack.len(), 1);
+        app.undo(&mut camera);
+        assert_eq!(atoms(&app), before);
+        app.open_molecule_edit(Kind::Chain);
+        assert!(app.molecule_edits.draft().chain.is_empty());
+        app.molecule_edits.draft_mut().chain = " AB ".into();
+        assert!(app
+            .molecule_edits
+            .draft_mut()
+            .request_accept(&app.state)
+            .is_none());
+        assert!(app.molecule_edits.draft().pending_confirmation.is_some());
+        app.molecule_edits.draft_mut().pending_confirmation = None;
+        assert!(app.apply_molecule_edit());
+        assert!(atoms(&app).iter().all(|a| a.1 == "AB"));
+        app.undo(&mut camera);
+
+        app.open_molecule_edit(Kind::Residue);
+        assert!(app.molecule_edits.draft().shift);
+        assert!(!app.molecule_edits.draft().renumber);
+        assert_eq!(app.molecule_edits.draft().value, "1");
+        app.molecule_edits.draft_mut().shift = false;
+        assert!(!app.apply_molecule_edit());
+        assert_eq!(
+            app.molecule_edits.draft().error,
+            "Residue index change was rejected"
+        );
+        assert!(app.undo_stack.is_empty());
+        app.molecule_edits.draft_mut().shift = true;
+        app.molecule_edits.draft_mut().value = "0".into();
+        assert!(app
+            .molecule_edits
+            .draft_mut()
+            .request_accept(&app.state)
+            .is_none());
+        assert!(app.molecule_edits.draft().error.contains("zero"));
+        app.molecule_edits.draft_mut().value = "1.5".into();
+        assert!(matches!(
+            app.molecule_edits.draft_mut().request_accept(&app.state),
+            Some(Action::Accept)
+        ));
+        assert!(app.apply_molecule_edit());
+        assert_eq!(
+            atoms(&app).iter().map(|a| a.2).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+        app.undo(&mut camera);
+        app.open_molecule_edit(Kind::Residue);
+        app.molecule_edits.draft_mut().value = i32::MAX.to_string();
+        assert!(!app.apply_molecule_edit());
+        assert!(app.molecule_edits.draft().error.contains("integer range"));
+        assert_eq!(atoms(&app), before);
+        assert!(app.undo_stack.is_empty());
+        app.molecule_edits.draft_mut().shift = false;
+        app.molecule_edits.draft_mut().value = "10000".into();
+        assert!(app
+            .molecule_edits
+            .draft_mut()
+            .request_accept(&app.state)
+            .is_none());
+        assert!(app.molecule_edits.draft().pending_confirmation.is_some());
+        app.molecule_edits.draft_mut().pending_confirmation = None;
+        assert!(app.apply_molecule_edit());
+        assert_eq!(
+            atoms(&app).iter().map(|a| a.2).collect::<Vec<_>>(),
+            vec![10000, 10001]
+        );
+        app.undo(&mut camera);
+        app.open_molecule_edit(Kind::Residue);
+        app.molecule_edits.draft_mut().scene = None;
+        assert!(!app.apply_molecule_edit());
+        assert!(app
+            .molecule_edits
+            .draft()
+            .error
+            .contains("active scene changed"));
+        assert_eq!(atoms(&app), before);
+        assert!(app.undo_stack.is_empty());
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.molecule_edit_dialog(ctx)
+        });
+        assert!(app.molecule_edits.active.is_none());
+    }
+
+    #[test]
+    fn native_molecule_merge_move_rejects_invalid_targets_and_restores_both_objects() {
+        use cuemol_ui::molecule_edit::Kind;
+        let mut app = GuiApplication::new();
+        app.config_path.clear();
+        let data = b"ATOM      1  N   GLY A   1       0.000   0.000   0.000  1.00 10.00           N  \nATOM      2  CA  GLY A   2       3.000   0.000   0.000  1.00 10.00           C  \nEND\n";
+        app.state.open_bytes("source.pdb", data).unwrap();
+        app.state.open_bytes("target.pdb", data).unwrap();
+        let objects = app.state.active_object_summaries();
+        let source = objects[0].uid;
+        let target = objects[1].uid;
+        app.state.change_chain_in_object(source, "", "B").unwrap();
+        let counts = |app: &GuiApplication| {
+            [source, target].map(|id| {
+                app.state
+                    .scene_manager()
+                    .object(id)
+                    .unwrap()
+                    .mol()
+                    .atom_count()
+            })
+        };
+        app.open_molecule_edit(Kind::Merge);
+        let draft = app.molecule_edits.draft_mut();
+        draft.object = Some(source);
+        draft.target = Some(source);
+        assert!(!app.apply_molecule_edit());
+        app.molecule_edits.draft_mut().target = Some(target);
+        app.molecule_edits.draft_mut().selection = "none".into();
+        assert!(!app.apply_molecule_edit());
+        assert!(app.undo_stack.is_empty());
+        assert_eq!(counts(&app), [2, 2]);
+        let draft = app.molecule_edits.draft_mut();
+        draft.selection.clear();
+        draft.copy = false;
+        assert!(app.apply_molecule_edit());
+        assert_eq!(counts(&app), [0, 4]);
+        assert_eq!(app.selected_object, Some(target));
+        assert_eq!(app.undo_stack.len(), 1);
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert_eq!(counts(&app), [2, 2]);
+        app.redo(&mut camera);
+        assert_eq!(counts(&app), [0, 4]);
+        app.open_molecule_edit(Kind::Merge);
+        let draft = app.molecule_edits.draft();
+        assert_eq!(draft.object, Some(source));
+        assert_eq!(draft.target, Some(target));
+        assert!(draft.selection.is_empty());
+        assert!(draft.copy);
+    }
+
+    #[test]
     fn native_merge_dialog_matches_reference_and_is_undoable() {
         let Some(pdb) = reference_pdb_path() else {
             return;
@@ -33134,13 +32931,10 @@ mod tests {
         let source = objects[0].uid;
         let target = objects[1].uid;
 
-        app.open_merge_molecule_dialog();
-        let initial = app
-            .merge_molecule_draft
-            .take()
-            .expect("merge molecule draft");
-        assert_eq!(initial.source_object, None);
-        assert_eq!(initial.target_object, None);
+        app.open_molecule_edit(cuemol_ui::molecule_edit::Kind::Merge);
+        let initial = app.molecule_edits.draft();
+        assert_eq!(initial.object, None);
+        assert_eq!(initial.target, None);
         assert!(initial.selection.is_empty());
         assert!(initial.copy);
 
@@ -33161,13 +32955,11 @@ mod tests {
             .unwrap()
             .mol()
             .atom_count();
-        let draft = NativeMergeMoleculeDraft {
-            source_object: Some(source),
-            target_object: Some(target),
-            selection: "chain B".to_string(),
-            copy: true,
-        };
-        assert!(app.apply_merge_molecule_draft(&draft));
+        let draft = app.molecule_edits.draft_mut();
+        draft.object = Some(source);
+        draft.target = Some(target);
+        draft.selection = "chain B".into();
+        assert!(app.apply_molecule_edit());
         assert_eq!(
             app.state
                 .scene_manager()

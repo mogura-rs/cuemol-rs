@@ -1,5 +1,52 @@
 # Validation evidence
 
+## Molecule edit dialogs and residue-index bounds
+
+Native egui and the browser now share dedicated Merge molecule, Delete mol atoms,
+Change chain ID and Change residue index forms. Tauri uses matching fields and
+validation. All reset selections and options while retaining valid molecule
+choices, provide selection builders, reject stale scene/object targets and keep
+failed edits visible. Merge supports copy or move under one undo entry. Delete
+requires an explicit selection. Chain and residue changes accept an empty
+selection as the entire molecule.
+
+Chain input matches `chainNameInput.ts`: empty is invalid, whitespace converts
+to `_` after confirmation, and a trimmed value longer than one UTF-16 code unit
+requires a PDB-format confirmation. Residue input matches `resIndexInput.ts`:
+decimal-prefix parsing, nonzero shifts, Shift by / Start from, Renumber, and
+confirmation outside the PDB start-number range. Unlike unchecked C++ integer
+arithmetic, Rust checks both the parsed value and every destination residue
+number. Overflow or an unselected destination collision is reported before any
+atom changes. The legacy boolean manager methods retain their signatures and
+return false on rejection; the shared application layer propagates the error.
+
+Reference worker services were also checked. Chain changes with no matching
+residues complete successfully, while an occupied destination is an error.
+Delete and residue changes reject no-result operations. The frontends now match
+those outcomes. A chain no-op does not create an empty history entry. Failed
+copy/move, deletion, chain or residue edits preserve the molecule and history.
+
+Validation passes: 184 shared-core tests, 31 molecular-analysis tests, two
+shared input-resolution tests, all 216 native GUI tests, and 187 Tauri model
+tests with five existing ignored cases. Six browser cases use real WebGL and WebGPU applications to
+exercise every form, invalid and empty selections, collision/overflow errors,
+confirmation cancellation/acceptance, decimal-prefix parsing, copy/move,
+Undo/Redo, remembered molecules and scene cancellation. The Tauri DOM case
+checks matching controls and command arguments, selection building, inline error
+retention and stale scenes. Linux OS mouse/keyboard input confirms blank-chain
+confirmation/No/Yes, chain Undo/Redo, residue-prefix parsing, residue undo,
+empty-result deletion preservation and deletion Undo/Redo. Native, browser and
+Tauri screenshots were inspected.
+
+The earlier browser Edit entries opened generic command forms. Native/Tauri
+chain and residue dialogs required a nonempty selection, used different field
+resets and lacked the reference confirmations. Tauri closed these forms even
+when a command failed. Existing residue arithmetic could overflow before
+validation, and chain collisions were reported as zero changes. These gaps are
+corrected. The guide and current checklist now distinguish these completed
+forms from secondary-structure, transformation, surface and rendering dialogs
+that remain under audit. Historical parity rows retain their original scope.
+
 ## Interaction analysis dialogs
 
 Native egui and the browser now share a dedicated Interaction analysis dialog.

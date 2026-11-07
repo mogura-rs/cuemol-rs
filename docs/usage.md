@@ -303,6 +303,37 @@ set or remove non-standard bonds. Each completed edit has one undo entry.
 The palette cap and **View > Tool palette** share a persisted collapse setting.
 Hover information and highlighting are configurable in Settings.
 
+### Molecule editing
+
+The **Edit** menu provides dedicated Merge molecule, Delete mol atoms,
+Change chain ID and Change residue number dialogs in each frontend. Their
+selection builders edit the draft without replacing the molecule's current
+selection. Reopening clears the selection and restores the options while
+retaining valid molecule choices.
+
+- **Merge molecule** copies selected atoms into a different molecule. Copy is
+  initially on; turn it off to move the atoms. An empty selection includes all
+  source atoms. Copy and source deletion share one undo entry.
+- **Delete mol atoms** requires an explicit, nonempty selection. Use `*` to delete
+  every atom. Invalid expressions or selections with no atoms stay in the form.
+- **Change chain ID** changes all selected residues; an empty selection includes
+  the entire molecule. The name is trimmed. A whitespace-only name becomes `_`
+  after confirmation. Names longer than one UTF-16 code unit are accepted after
+  a PDB-format warning. An existing destination residue rejects the edit.
+- **Change residue number** starts in Shift by mode with value `1` and Renumber
+  off. Start from sets the first selected residue's number. Renumber assigns
+  consecutive numbers and removes insertion codes; otherwise gaps and insertion
+  codes are retained. Empty selection includes all residues. Numeric text follows
+  the reference decimal-prefix rule (`1.5` and `1e2` both mean `1`). A zero shift
+  is rejected. Start numbers below `-999` or above `9999` require confirmation.
+  Values and final residue numbers must fit a signed 32-bit integer.
+
+Each successful change has one undo entry. Errors and rejected residue edits
+retain the draft and preserve the molecule. Changing a chain with no matching
+residues closes the form without adding history. Cancel discards the draft;
+switching scenes cancels or rejects it. Successful selection expressions are
+available in selection history.
+
 ### Interaction analysis
 
 **Tools > Interaction** opens the interaction form in each frontend. Choose a

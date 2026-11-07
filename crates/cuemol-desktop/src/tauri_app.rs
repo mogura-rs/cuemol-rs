@@ -11470,6 +11470,9 @@ fn handle_model_request(
                 model.push_undo(undo);
                 model.touch_structure_details();
             }
+            if count == 0 {
+                model.status = "No atoms matched the selection".into();
+            }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::ChangeChain {
@@ -11478,9 +11481,6 @@ fn handle_model_request(
             chain_name,
         } => {
             let selection = selection.trim();
-            if selection.is_empty() {
-                return Err("an atom selection is required".to_string());
-            }
             let chain_name = chain_name.trim();
             if chain_name.is_empty() {
                 return Err("new chain ID is required".to_string());
@@ -11506,9 +11506,6 @@ fn handle_model_request(
             renumber,
         } => {
             let selection = selection.trim();
-            if selection.is_empty() {
-                return Err("an atom selection is required".to_string());
-            }
             if shift_mode && value == 0 {
                 return Err("residue shift must not be zero".to_string());
             }
@@ -11531,6 +11528,9 @@ fn handle_model_request(
                 model.invalidate_snapshot(false);
                 model.push_undo(undo);
                 model.touch_structure_details();
+            }
+            if count == 0 {
+                model.status = "Residue index change was rejected".into();
             }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -24492,6 +24492,136 @@ mod tests {
         assert_eq!(snapshot.undo_descriptions[0], "Deleted 1 atom(s)");
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().objects[0].atom_count, 327);
+    }
+
+    #[test]
+    fn molecule_edits_allow_whole_molecule_selection_and_preserve_failed_history() {
+        let mut model = model_without_gpu();
+        model.desktop.open_bytes("probe.pdb", b"ATOM      1  N   GLY A   1       0.000   0.000   0.000  1.00 10.00           N  \nATOM      2  CA  GLY A   2       3.000   0.000   0.000  1.00 10.00           C  \nEND\n").unwrap();
+        let id = model.desktop.active_object_summaries()[0].uid;
+        let atoms = |model: &AppModel| {
+            model
+                .desktop
+                .scene_manager()
+                .object(id)
+                .unwrap()
+                .mol()
+                .atoms()
+                .iter()
+                .map(|a| (a.chain_id.clone(), a.res_id))
+                .collect::<Vec<_>>()
+        };
+        let before = atoms(&model);
+        handle_model_request(
+            &mut model,
+            ModelRequest::RenumberResidues {
+                object_uid: id.get(),
+                selection: String::new(),
+                shift_mode: false,
+                value: 1,
+                renumber: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(model.status, "Residue index change was rejected");
+        assert!(model.undo_stack.is_empty());
+        assert_eq!(atoms(&model), before);
+        let conflict = handle_model_request(
+            &mut model,
+            ModelRequest::ChangeChain {
+                object_uid: id.get(),
+                selection: String::new(),
+                chain_name: "A".into(),
+            },
+        );
+        assert!(conflict.err().unwrap().contains("destination residue"));
+        handle_model_request(
+            &mut model,
+            ModelRequest::ChangeChain {
+                object_uid: id.get(),
+                selection: "none".into(),
+                chain_name: "B".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(model.status, "Changed chain ID for 0 atom(s)");
+        assert!(model.undo_stack.is_empty());
+        assert_eq!(atoms(&model), before);
+        handle_model_request(
+            &mut model,
+            ModelRequest::ChangeChain {
+                object_uid: id.get(),
+                selection: String::new(),
+                chain_name: "AB".into(),
+            },
+        )
+        .unwrap();
+        assert!(atoms(&model).iter().all(|a| a.0 == "AB"));
+        assert_eq!(model.undo_stack.len(), 1);
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(atoms(&model), before);
+        handle_model_request(
+            &mut model,
+            ModelRequest::RenumberResidues {
+                object_uid: id.get(),
+                selection: String::new(),
+                shift_mode: true,
+                value: 1,
+                renumber: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            atoms(&model).iter().map(|a| a.1).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_eq!(model.undo_stack.len(), 1);
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        let result = handle_model_request(
+            &mut model,
+            ModelRequest::RenumberResidues {
+                object_uid: id.get(),
+                selection: String::new(),
+                shift_mode: true,
+                value: i32::MAX,
+                renumber: false,
+            },
+        );
+        assert!(result.err().unwrap().contains("integer range"));
+        assert_eq!(atoms(&model), before);
+        assert!(model.undo_stack.is_empty());
+        handle_model_request(
+            &mut model,
+            ModelRequest::DeleteAtoms {
+                object_uid: id.get(),
+                selection: "none".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(model.status, "No atoms matched the selection");
+        assert!(model.undo_stack.is_empty());
+        assert_eq!(atoms(&model), before);
+        assert!(handle_model_request(
+            &mut model,
+            ModelRequest::DeleteAtoms {
+                object_uid: id.get(),
+                selection: String::new()
+            }
+        )
+        .is_err());
+        assert_eq!(atoms(&model), before);
+        handle_model_request(
+            &mut model,
+            ModelRequest::ChangeChain {
+                object_uid: id.get(),
+                selection: "invalid (((".into(),
+                chain_name: "B".into(),
+            },
+        )
+        .err()
+        .expect("invalid selection is rejected");
+        assert!(model.undo_stack.is_empty());
+        assert_eq!(atoms(&model), before);
     }
 
     #[test]

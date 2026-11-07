@@ -475,6 +475,18 @@ impl MolAnlManager {
         true
     }
 
+    pub fn change_residue_indices(
+        &self,
+        molecule: &mut MolCoord,
+        selector: &Selector,
+        shift_mode: bool,
+        value: i32,
+        renumber: bool,
+    ) -> Result<bool> {
+        let changes = residue_index_changes(molecule, selector, shift_mode, value, renumber)?;
+        Ok(apply_residue_index_changes(molecule, &changes))
+    }
+
     pub fn shift_res_index(
         &self,
         molecule: &mut MolCoord,
@@ -482,51 +494,8 @@ impl MolAnlManager {
         shift_mode: bool,
         value: i32,
     ) -> bool {
-        let mut selected = BTreeSet::new();
-        let mut ordered = Vec::new();
-        for atom in molecule
-            .atoms()
-            .iter()
-            .filter(|atom| selector.matches_in_molecule(atom, molecule))
-        {
-            let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
-            if selected.insert(key.clone()) {
-                ordered.push(key);
-            }
-        }
-        let Some(first) = ordered.first() else {
-            return false;
-        };
-        let shift = if shift_mode {
-            value
-        } else {
-            value - first.res_id
-        };
-        if shift == 0 {
-            return false;
-        }
-        let existing = molecule
-            .residue_summaries()
-            .into_iter()
-            .map(|summary| summary.key)
-            .collect::<BTreeSet<_>>();
-        if selected.iter().any(|key| {
-            let destination =
-                ResidueKey::new(key.chain_id.clone(), key.res_id + shift, key.ins_code);
-            existing.contains(&destination) && !selected.contains(&destination)
-        }) {
-            return false;
-        }
-        let changed = molecule.relabel_residue_keys(|atom| {
-            let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
-            selected
-                .contains(&key)
-                .then(|| ResidueKey::new(atom.chain_id.clone(), atom.res_id + shift, atom.ins_code))
-        });
-        if changed {
-            molecule.apply_topology();
-        }
-        changed
+        self.change_residue_indices(molecule, selector, shift_mode, value, false)
+            .unwrap_or(false)
     }
 
     pub fn shift_res_index_with_undo(
@@ -537,23 +506,11 @@ impl MolAnlManager {
         value: i32,
         undo: &mut MolUndoManager,
     ) -> bool {
-        let ordered = selected_residue_keys_in_atom_order(molecule, selector);
-        let Some(first) = ordered.first() else {
+        let Ok(changes) = residue_index_changes(molecule, selector, shift_mode, value, false)
+        else {
             return false;
         };
-        let shift = if shift_mode {
-            value
-        } else {
-            value - first.res_id
-        };
-        let changes = ordered
-            .into_iter()
-            .map(|old| {
-                let new = ResidueKey::new(old.chain_id.clone(), old.res_id + shift, old.ins_code);
-                (old, new)
-            })
-            .collect::<Vec<_>>();
-        if !self.shift_res_index(molecule, selector, shift_mode, value) {
+        if !apply_residue_index_changes(molecule, &changes) {
             return false;
         }
         undo.record(Box::new(ResidueRelabelEdit::new(
@@ -570,51 +527,8 @@ impl MolAnlManager {
         shift_mode: bool,
         value: i32,
     ) -> bool {
-        let mut selected = BTreeSet::new();
-        let mut ordered = Vec::new();
-        for atom in molecule
-            .atoms()
-            .iter()
-            .filter(|atom| selector.matches_in_molecule(atom, molecule))
-        {
-            let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
-            if selected.insert(key.clone()) {
-                ordered.push(key);
-            }
-        }
-        let Some(first) = ordered.first() else {
-            return false;
-        };
-        let start = if shift_mode {
-            first.res_id + value
-        } else {
-            value
-        };
-        let mut mapping: BTreeMap<ResidueKey, i32> = BTreeMap::new();
-        for (offset, key) in ordered.into_iter().enumerate() {
-            mapping.insert(key, start + offset as i32);
-        }
-        let existing = molecule
-            .residue_summaries()
-            .into_iter()
-            .map(|summary| summary.key)
-            .collect::<BTreeSet<_>>();
-        if mapping.iter().any(|(key, &resid)| {
-            let destination = ResidueKey::new(key.chain_id.clone(), resid, None);
-            existing.contains(&destination) && !selected.contains(&destination)
-        }) {
-            return false;
-        }
-        let changed = molecule.relabel_residue_keys(|atom| {
-            let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
-            mapping
-                .get(&key)
-                .map(|&resid| ResidueKey::new(atom.chain_id.clone(), resid, None))
-        });
-        if changed {
-            molecule.apply_topology();
-        }
-        changed
+        self.change_residue_indices(molecule, selector, shift_mode, value, true)
+            .unwrap_or(false)
     }
 
     pub fn renum_res_index_with_undo(
@@ -625,24 +539,10 @@ impl MolAnlManager {
         value: i32,
         undo: &mut MolUndoManager,
     ) -> bool {
-        let ordered = selected_residue_keys_in_atom_order(molecule, selector);
-        let Some(first) = ordered.first() else {
+        let Ok(changes) = residue_index_changes(molecule, selector, shift_mode, value, true) else {
             return false;
         };
-        let start = if shift_mode {
-            first.res_id + value
-        } else {
-            value
-        };
-        let changes = ordered
-            .into_iter()
-            .enumerate()
-            .map(|(offset, old)| {
-                let new = ResidueKey::new(old.chain_id.clone(), start + offset as i32, None);
-                (old, new)
-            })
-            .collect::<Vec<_>>();
-        if !self.renum_res_index(molecule, selector, shift_mode, value) {
+        if !apply_residue_index_changes(molecule, &changes) {
             return false;
         }
         undo.record(Box::new(ResidueRelabelEdit::new(
@@ -1000,6 +900,86 @@ fn selected_indices_in_mol_array_order(molecule: &MolCoord, selector: &Selector)
             .or_insert(index);
     }
     atoms.into_values().collect()
+}
+
+fn residue_index_changes(
+    molecule: &MolCoord,
+    selector: &Selector,
+    shift_mode: bool,
+    value: i32,
+    renumber: bool,
+) -> Result<Vec<(ResidueKey, ResidueKey)>> {
+    let ordered = selected_residue_keys_in_atom_order(molecule, selector);
+    let Some(first) = ordered.first() else {
+        return Ok(Vec::new());
+    };
+    let shift = if shift_mode {
+        i64::from(value)
+    } else {
+        i64::from(value) - i64::from(first.res_id)
+    };
+    let start = i64::from(first.res_id) + shift;
+    let selected = ordered.iter().cloned().collect::<BTreeSet<_>>();
+    let existing = molecule
+        .residue_summaries()
+        .into_iter()
+        .map(|r| r.key)
+        .collect::<BTreeSet<_>>();
+    ordered
+        .into_iter()
+        .enumerate()
+        .map(|(offset, old)| {
+            let index =
+                if renumber {
+                    start
+                        .checked_add(i64::try_from(offset).map_err(|_| {
+                            CueMolError::invalid_argument("Residue number overflow")
+                        })?)
+                        .ok_or_else(|| CueMolError::invalid_argument("Residue number overflow"))?
+                } else {
+                    i64::from(old.res_id) + shift
+                };
+            let index = i32::try_from(index).map_err(|_| {
+                CueMolError::invalid_argument(
+                    "Residue number is outside the supported integer range",
+                )
+            })?;
+            let new = ResidueKey::new(
+                old.chain_id.clone(),
+                index,
+                if renumber { None } else { old.ins_code },
+            );
+            if existing.contains(&new) && !selected.contains(&new) {
+                return Err(CueMolError::invalid_argument(
+                    "Residue edit would collide with an unselected residue",
+                ));
+            }
+            Ok((old, new))
+        })
+        .collect()
+}
+
+fn apply_residue_index_changes(
+    molecule: &mut MolCoord,
+    changes: &[(ResidueKey, ResidueKey)],
+) -> bool {
+    if changes.iter().all(|(old, new)| old == new) {
+        return false;
+    }
+    let mapping = changes.iter().cloned().collect::<BTreeMap<_, _>>();
+    let changed = molecule.relabel_residue_keys(|atom| {
+        mapping
+            .get(&ResidueKey::new(
+                atom.chain_id.clone(),
+                atom.res_id,
+                atom.ins_code,
+            ))
+            .cloned()
+    });
+    if changed {
+        molecule.apply_topology();
+    }
+    changed
 }
 
 fn selected_residue_keys_in_atom_order(
@@ -1667,6 +1647,86 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![11, 11, 12]
         );
+    }
+
+    #[test]
+    fn residue_index_edits_check_final_numbers_before_mutation() {
+        let manager = MolAnlManager::new();
+        for renumber in [false, true] {
+            for (first, second, shift_mode, value) in [
+                (1, 2, true, i32::MAX),
+                (1, 2, false, i32::MAX),
+                (i32::MIN, i32::MIN + 1, true, -1),
+            ] {
+                let mut molecule = MolCoord::new();
+                molecule.push_atom(atom(1, "CA", "A", first, "C", 0.));
+                molecule.push_atom(atom(2, "CA", "A", second, "C", 1.));
+                let result = manager.change_residue_indices(
+                    &mut molecule,
+                    &Selector::All,
+                    shift_mode,
+                    value,
+                    renumber,
+                );
+                assert!(result.unwrap_err().to_string().contains("integer range"));
+                assert_eq!(
+                    molecule
+                        .atoms()
+                        .iter()
+                        .map(|a| a.res_id)
+                        .collect::<Vec<_>>(),
+                    vec![first, second]
+                );
+                let mut undo = MolUndoManager::new();
+                let changed = if renumber {
+                    manager.renum_res_index_with_undo(
+                        &mut molecule,
+                        &Selector::All,
+                        shift_mode,
+                        value,
+                        &mut undo,
+                    )
+                } else {
+                    manager.shift_res_index_with_undo(
+                        &mut molecule,
+                        &Selector::All,
+                        shift_mode,
+                        value,
+                        &mut undo,
+                    )
+                };
+                assert!(!changed);
+                assert!(!undo.undo(&mut molecule));
+                assert_eq!(
+                    molecule
+                        .atoms()
+                        .iter()
+                        .map(|a| a.res_id)
+                        .collect::<Vec<_>>(),
+                    vec![first, second]
+                );
+            }
+            let mut molecule = MolCoord::new();
+            molecule.push_atom(atom(1, "CA", "A", i32::MIN, "C", 0.));
+            molecule.push_atom(atom(2, "CA", "A", i32::MIN + 1, "C", 1.));
+            assert!(manager
+                .change_residue_indices(
+                    &mut molecule,
+                    &Selector::All,
+                    false,
+                    i32::MAX - 1,
+                    renumber
+                )
+                .unwrap());
+            assert_eq!(
+                molecule
+                    .atoms()
+                    .iter()
+                    .map(|a| a.res_id)
+                    .collect::<Vec<_>>(),
+                vec![i32::MAX - 1, i32::MAX]
+            );
+        }
     }
 
     #[test]

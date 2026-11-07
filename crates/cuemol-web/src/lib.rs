@@ -340,6 +340,7 @@ struct App {
     fps: f32,
     next_frame: f64,
     show_console: bool,
+    molecule_edits: cuemol_ui::molecule_edit::Dialogs,
     show_interaction: bool,
     interaction: cuemol_ui::interaction::InteractionDialog,
     show_help: bool,
@@ -554,6 +555,7 @@ impl App {
             fps: 24.0,
             next_frame: 0.0,
             show_console: false,
+            molecule_edits: Default::default(),
             show_interaction: false,
             interaction: Default::default(),
             pending_close: None,
@@ -1589,6 +1591,7 @@ impl eframe::App for App {
         self.render_ui(ctx);
         self.tools_ui(ctx);
         self.interaction_ui(ctx);
+        self.molecule_edit_ui(ctx);
         self.timeline_ui(ctx);
         self.rebuild();
         egui::CentralPanel::default()
