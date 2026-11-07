@@ -342,6 +342,8 @@ struct App {
     show_console: bool,
     molecule_edits: cuemol_ui::molecule_edit::Dialogs,
     show_interaction: bool,
+    show_secondary: bool,
+    secondary: cuemol_ui::secondary::SecondaryDialog,
     interaction: cuemol_ui::interaction::InteractionDialog,
     show_help: bool,
     about: cuemol_ui::about::AboutDialog,
@@ -557,6 +559,8 @@ impl App {
             show_console: false,
             molecule_edits: Default::default(),
             show_interaction: false,
+            show_secondary: false,
+            secondary: cuemol_ui::secondary::SecondaryDialog::default(),
             interaction: Default::default(),
             pending_close: None,
             show_help: false,
@@ -1591,6 +1595,7 @@ impl eframe::App for App {
         self.render_ui(ctx);
         self.tools_ui(ctx);
         self.interaction_ui(ctx);
+        self.secondary_ui(ctx);
         self.molecule_edit_ui(ctx);
         self.timeline_ui(ctx);
         self.rebuild();

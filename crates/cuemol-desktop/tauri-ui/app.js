@@ -218,6 +218,7 @@ const molstructOpenKeys = new Set();
 let molstructSelectionAnchor = null;
 let selectionObjectUid = null;
 const moleculeEditHistory = new Map();
+let secondaryObjectUid = null;
 let coloringTargetKey = null;
 let symmetryTargetKey = null;
 let densityPanelTargetKey = null;
@@ -6711,85 +6712,66 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       dialogActions(apply, button("Cancel", "", () => referenceDialog.close()));
     }
   } else if (title === "Reassign secondary str") {
-    dialogTitle.textContent = "Protein secondary str tool";
+    dialogTitle.textContent = "Reassign secondary structure";
+    const sceneUid = snapshot.activeSceneUid;
     const objects = activeObjects();
-    if (objects.length === 0) {
-      dialogContent.append(dialogParagraph("No molecular object is loaded."));
-    } else {
-      const objectOptions = objects.map((object) => [object.uid, object.name]);
-      const object = dialogSelect(
-        "Molecule",
-        objectOptions,
-        selectedObjectUid ?? objects[0].uid,
-      );
-      const modeGroup = (label, value, checked) => {
-        const group = document.createElement("fieldset");
-        group.className = "property-common-group";
-        const legend = document.createElement("legend");
-        const choice = document.createElement("label");
-        choice.className = "dialog-check";
-        const input = document.createElement("input");
-        input.type = "radio";
-        input.name = "secondary-structure-mode";
-        input.value = value;
-        input.checked = checked;
-        choice.append(input, document.createTextNode(label));
-        legend.append(choice);
-        group.append(legend);
-        return { group, input };
-      };
-      const recalc = modeGroup("Recalc secondry str", "recalc", true);
-      const ignoreBulge = dialogCheckbox("Ignore β bulge", false, recalc.group);
-      const gapFill = dialogCheckbox("Helix gap-fill angle (°):", false, recalc.group);
-      const angle = dialogField("Gap-fill angle", "120", "number", recalc.group);
-      angle.min = "0";
-      angle.max = "180";
-      angle.step = "5";
-      angle.disabled = true;
-      const manual = modeGroup("Assign by selection", "assign", false);
-      const selection = dialogField(
-        "Selection",
-        snapshot.selection || "",
-        "text",
-        manual.group,
-      );
-      const secondaryType = dialogSelect(
-        "Type",
-        [
-          [0, "Coil"],
-          [1, "β strand"],
-          [2, "α helix"],
-          [3, "3-10 helix"],
-          [4, "π helix"],
-        ],
-        0,
-        manual.group,
-      );
-      dialogContent.append(recalc.group, manual.group);
-      const syncMode = () => {
-        ignoreBulge.disabled = !recalc.input.checked;
-        gapFill.disabled = !recalc.input.checked;
-        angle.disabled = !recalc.input.checked || !gapFill.checked;
-        selection.disabled = !manual.input.checked;
-        secondaryType.disabled = !manual.input.checked;
-      };
-      recalc.input.addEventListener("change", syncMode);
-      manual.input.addEventListener("change", syncMode);
-      gapFill.addEventListener("change", syncMode);
-      syncMode();
-      const assign = button("OK", "dialog-primary", async () => {
-        await mutate("assign_secondary_structure", {
-          objectUid: Number(object.value),
-          mode: manual.input.checked ? "assign" : "recalc",
-          selection: selection.value,
-          secondaryType: Number(secondaryType.value),
-          ignoreBulge: ignoreBulge.checked,
-          angle: gapFill.checked ? Number(angle.value) : 0,
-        });
-        referenceDialog.close();
-      });
-      dialogActions(assign);
+    const fields = dialogGroup("Molecule");
+    const options = objects.map(object => [object.uid, object.name]);
+    if (!options.length) options.push(["", "Select molecule"]);
+    const valid = id => objects.some(object => object.uid === id);
+    const object = dialogSelect("Molecule", options, valid(secondaryObjectUid) ? secondaryObjectUid : valid(selectedObjectUid) ? selectedObjectUid : objects[0]?.uid ?? "", fields);
+    const mode = dialogSelect("Mode", [["recalc", "Recalculate"], ["assign", "Assign"]], "recalc", fields);
+    const recalc = dialogGroup("Recalculate");
+    const ignoreBulge = dialogCheckbox("Ignore β bulge", false, recalc);
+    const gapFill = dialogCheckbox("Helix gap-fill angle (°)", false, recalc);
+    const angle = dialogField("Angle", "120", "number", recalc);
+    angle.min = "0"; angle.max = "180"; angle.step = "1";
+    const manual = dialogGroup("Assign");
+    const picker = dialogSelectionField("Selection", "", () => Number(object.value), manual);
+    const secondaryType = dialogSelect("Type", [[0, "Coil"], [1, "β strand"], [2, "α helix"], [3, "3-10 helix"], [4, "π helix"]], 0, manual);
+    const errorMessage = dialogParagraph("");
+    errorMessage.setAttribute("role", "alert");
+    dialogContent.append(errorMessage);
+    let submitting = false;
+    const validate = () => {
+      if (snapshot.activeSceneUid !== sceneUid) return "The active scene changed. Reopen Reassign secondary structure.";
+      if (!activeObjects().some(item => item.uid === Number(object.value))) return "Select a molecule.";
+      if (mode.value === "recalc" && gapFill.checked && (!angle.value.trim() || !Number.isFinite(Number(angle.value)) || Number(angle.value) < 0 || Number(angle.value) > 180)) return "Helix angle must be between 0 and 180 degrees.";
+      return "";
+    };
+    const syncMode = (clearError = true) => {
+      secondaryObjectUid = Number(object.value) || null;
+      fields.disabled = submitting;
+      recalc.disabled = submitting || mode.value !== "recalc";
+      angle.disabled = recalc.disabled || !gapFill.checked;
+      manual.disabled = submitting || mode.value !== "assign";
+      picker.setEnabled(!manual.disabled && Boolean(object.value));
+      apply.disabled = submitting || Boolean(validate());
+      if (clearError) errorMessage.textContent = validate();
+    };
+    const apply = button("OK", "dialog-primary", async () => {
+      const error = validate();
+      if (error || submitting) { if (error) errorMessage.textContent = error; return; }
+      const request = {objectUid: Number(object.value), mode: mode.value, selection: picker.input.value,
+        secondaryType: Number(secondaryType.value), ignoreBulge: ignoreBulge.checked,
+        angle: mode.value === "recalc" && gapFill.checked ? Number(angle.value) : 0};
+      submitting = true; syncMode();
+      const success = await mutate("assign_secondary_structure", request, renderShell, true,
+        error => { errorMessage.textContent = String(error); });
+      submitting = false;
+      if (!fields.isConnected) return;
+      if (success) {
+        if (request.mode === "assign") rememberSelection(request.selection);
+        picker.close(); referenceDialog.close();
+      } else syncMode(false);
+    });
+    for (const group of [fields, recalc, manual]) {
+      group.addEventListener("input", () => syncMode());
+      group.addEventListener("change", () => syncMode());
     }
+    object.addEventListener("change", () => picker.close());
+    dialogActions(apply, button("Cancel", "", () => { picker.close(); referenceDialog.close(); }));
+    syncMode();
   } else if (title === "Mol surface generation") {
     dialogTitle.textContent = "Mol surface tool";
     const objects = activeObjects();

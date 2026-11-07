@@ -1589,13 +1589,7 @@ struct GuiApplication {
     bond_aid1: String,
     bond_aid2: String,
     interaction: cuemol_ui::interaction::InteractionDialog,
-    secondary_target: Option<cuemol_core::Uid>,
-    secondary_assign_by_selection: bool,
-    secondary_selection: String,
-    secondary_type: i32,
-    secondary_ignore_breaks: bool,
-    secondary_gap_fill: bool,
-    secondary_angle: f64,
+    secondary: cuemol_ui::secondary::SecondaryDialog,
     mol_client_url: String,
     mol_client_smiles: String,
     mol_client_name: String,
@@ -4894,13 +4888,7 @@ impl GuiApplication {
             bond_aid1: String::new(),
             bond_aid2: String::new(),
             interaction: Default::default(),
-            secondary_target: None,
-            secondary_assign_by_selection: false,
-            secondary_selection: String::new(),
-            secondary_type: 0,
-            secondary_ignore_breaks: false,
-            secondary_gap_fill: false,
-            secondary_angle: 120.0,
+            secondary: cuemol_ui::secondary::SecondaryDialog::default(),
             mol_client_url: "http://127.0.0.1:8000/RPC2".to_string(),
             mol_client_smiles: String::new(),
             mol_client_name: String::new(),
@@ -5835,6 +5823,7 @@ impl GuiApplication {
                             match label {
                                 "Execute script..." => self.choose_execute_script(),
                                 "Interaction..." => self.open_interaction_dialog(),
+                                "Reassign secondary str..." => self.open_secondary_dialog(),
                                 "Mol surface generation..." => self.open_surface_generation_tool(),
                                 "APBS elepot calculation..." => self.open_apbs_tool(),
                                 "Mol morphing animation..." => {
@@ -17671,50 +17660,64 @@ impl GuiApplication {
             }
             Err(error) => {
                 self.interaction.error = error.to_string();
-                self.set_error(error);
+                self.set_status(format!("Error: {error}"));
             }
         }
     }
 
+    fn open_secondary_dialog(&mut self) {
+        self.secondary.opened(&self.state, self.target_object_uid());
+        self.tool_dialog = Some("Reassign secondary str".into());
+    }
+
     fn assign_secondary_structure(&mut self) {
-        let Some(object_uid) = self
-            .secondary_target
-            .filter(|uid| self.state.scene_manager().object(*uid).is_some())
-            .or_else(|| self.target_object_uid())
-        else {
-            self.set_status("No object selected");
+        if let Some(error) = self.secondary.validation_error(&self.state) {
+            self.secondary.error = error.into();
+            self.set_status(error);
             return;
-        };
-        let undo = self.capture_undo();
-        let result = if self.secondary_assign_by_selection {
-            self.state.set_secondary_structure_in_object(
-                object_uid,
-                &self.secondary_selection,
-                self.secondary_type,
-            )
-        } else {
-            self.state.assign_secondary_structure_in_object(
-                object_uid,
-                self.secondary_ignore_breaks,
-                if self.secondary_gap_fill {
-                    self.secondary_angle
-                } else {
-                    0.0
-                },
-            )
-        };
-        match result {
-            Ok(count) => {
-                self.push_undo_snapshot(undo);
+        }
+        let args = self.secondary.arguments();
+        let mut undo = self.capture_undo();
+        undo.record = cuemol_command::console::actions::Record::operation(
+            &self.state,
+            "set_secondary_structure",
+            &args,
+        );
+        match cuemol_command::call_tool(
+            &mut self.state,
+            &mut cuemol_qsys::Camera::new(),
+            "set_secondary_structure",
+            &args,
+        ) {
+            Ok(value) => {
+                if !undo.state.same_scene_undo_state(&self.state) {
+                    self.push_undo_snapshot(undo);
+                }
+                if self.secondary.assign {
+                    self.remember_selection_history(&self.secondary.selection.clone());
+                }
+                self.selected_object = self.secondary.object;
+                self.invalidate_molecule_panel_caches();
                 self.rebuild_snapshot();
-                let unit = if self.secondary_assign_by_selection {
-                    "residues"
+                self.tool_dialog = None;
+                self.secondary.error.clear();
+                let unit = if self.secondary.assign {
+                    "residue(s)"
                 } else {
-                    "atoms"
+                    "atom(s)"
                 };
-                self.set_status(format!("Secondary structure assigned for {count} {unit}"));
+                self.set_status(format!(
+                    "Secondary structure assigned for {} {unit}",
+                    value["changed"]
+                ));
             }
-            Err(error) => self.set_error(error),
+            Err(error) => {
+                if !undo.state.same_undo_state(&self.state) {
+                    self.restore_gui_undo_state(undo);
+                }
+                self.secondary.error = error.to_string();
+                self.set_status(format!("Error: {error}"));
+            }
         }
     }
 
@@ -24342,6 +24345,10 @@ impl GuiApplication {
             self.interaction_dialog(ctx);
             return;
         }
+        if title == "Reassign secondary str" {
+            self.secondary_structure_dialog(ctx);
+            return;
+        }
         let mut open = true;
         let mut close = false;
         egui::Window::new(title.as_str())
@@ -24351,7 +24358,6 @@ impl GuiApplication {
                 match title.as_str() {
                     "Molecular superposition" => self.superpose_tool_ui(ui, camera),
                     "Mol bond editor" => self.bond_editor_tool_ui(ui),
-                    "Reassign secondary str" => self.secondary_structure_tool_ui(ui),
                     "Mol morphing animation" => self.morph_tool_ui(ui),
                     "MolClient tools" => self.mol_client_tool_ui(ui),
                     "Mol surface generation" => self.surface_tool_ui(ui),
@@ -24692,88 +24698,28 @@ impl GuiApplication {
         }
     }
 
-    fn secondary_structure_tool_ui(&mut self, ui: &mut egui::Ui) {
-        let objects = self.state.active_object_summaries();
-        if objects.is_empty() {
-            ui.weak("No molecular object is loaded.");
+    fn secondary_structure_dialog(&mut self, ctx: &egui::Context) {
+        if self.secondary.scene != self.state.active_scene() {
+            self.tool_dialog = None;
+            self.set_status("The active scene changed. Reopen Reassign secondary structure.");
             return;
         }
-        if self
-            .secondary_target
-            .is_none_or(|uid| !objects.iter().any(|object| object.uid == uid))
-        {
-            self.secondary_target = self
-                .target_object_uid()
-                .filter(|uid| objects.iter().any(|object| object.uid == *uid))
-                .or_else(|| objects.first().map(|object| object.uid));
+        let mut open = true;
+        let mut action = None;
+        egui::Window::new("Reassign secondary structure")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(550.)
+            .show(ctx, |ui| {
+                action = self.secondary.show(ui, &self.state, self.snapshot_revision);
+            });
+        match action {
+            Some(cuemol_ui::secondary::Action::Accept) => self.assign_secondary_structure(),
+            Some(cuemol_ui::secondary::Action::Cancel) => open = false,
+            None => {}
         }
-        egui::ComboBox::from_label("Molecule")
-            .selected_text(object_combo_label(&objects, self.secondary_target))
-            .show_ui(ui, |ui| {
-                for object in &objects {
-                    ui.selectable_value(
-                        &mut self.secondary_target,
-                        Some(object.uid),
-                        object.name.as_str(),
-                    );
-                }
-            });
-        ui.group(|ui| {
-            ui.radio_value(
-                &mut self.secondary_assign_by_selection,
-                false,
-                "Recalc secondry str",
-            );
-            ui.add_enabled_ui(!self.secondary_assign_by_selection, |ui| {
-                ui.checkbox(&mut self.secondary_ignore_breaks, "Ignore β bulge");
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.secondary_gap_fill, "Helix gap-fill angle (°):");
-                    ui.add_enabled(
-                        self.secondary_gap_fill,
-                        egui::DragValue::new(&mut self.secondary_angle)
-                            .speed(5.0)
-                            .range(0.0..=180.0),
-                    );
-                });
-            });
-        });
-        ui.group(|ui| {
-            ui.radio_value(
-                &mut self.secondary_assign_by_selection,
-                true,
-                "Assign by selection",
-            );
-            ui.add_enabled_ui(self.secondary_assign_by_selection, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Selection");
-                    ui.add_sized(
-                        [ui.available_width(), 22.0],
-                        egui::TextEdit::singleline(&mut self.secondary_selection),
-                    );
-                });
-                egui::ComboBox::from_label("Type")
-                    .selected_text(match self.secondary_type {
-                        1 => "β strand",
-                        2 => "α helix",
-                        3 => "3-10 helix",
-                        4 => "π helix",
-                        _ => "Coil",
-                    })
-                    .show_ui(ui, |ui| {
-                        for (value, label) in [
-                            (0, "Coil"),
-                            (1, "β strand"),
-                            (2, "α helix"),
-                            (3, "3-10 helix"),
-                            (4, "π helix"),
-                        ] {
-                            ui.selectable_value(&mut self.secondary_type, value, label);
-                        }
-                    });
-            });
-        });
-        if ui.button("Assign").clicked() {
-            self.assign_secondary_structure();
+        if !open {
+            self.tool_dialog = None;
         }
     }
 
@@ -38932,6 +38878,95 @@ mod tests {
     }
 
     #[test]
+    fn native_secondary_dialog_resets_inputs_and_commits_only_changes() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.state.open_bytes("probe.pdb", b"ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C  \nATOM      2  CA  GLY A   2       3.000   0.000   0.000  1.00 10.00           C  \nEND\n").unwrap();
+        app.rebuild_snapshot();
+        app.open_secondary_dialog();
+        let id = app.secondary.object.unwrap();
+        let before = app.state.clone();
+        let undo_count = app.undo_stack.len();
+        assert_eq!(app.secondary.angle, 120.);
+        assert!(!app.secondary.assign && !app.secondary.gap_fill && !app.secondary.ignore_bulge);
+        app.secondary.assign = true;
+        app.secondary.selection = "invalid (((".into();
+        app.assign_secondary_structure();
+        assert!(!app.secondary.error.is_empty());
+        assert!(app.error_alert.is_none());
+        assert!(app.tool_dialog.is_some());
+        assert!(before.same_scene_undo_state(&app.state));
+        assert_eq!(app.undo_stack.len(), undo_count);
+        app.secondary.selection = "none".into();
+        app.assign_secondary_structure();
+        assert!(app.tool_dialog.is_none());
+        assert!(before.same_scene_undo_state(&app.state));
+        assert_eq!(app.undo_stack.len(), undo_count);
+        app.open_secondary_dialog();
+        assert_eq!(app.secondary.object, Some(id));
+        assert!(!app.secondary.assign);
+        assert!(app.secondary.selection.is_empty());
+        app.secondary.gap_fill = true;
+        app.secondary.angle = 181.;
+        app.assign_secondary_structure();
+        assert!(app.secondary.error.contains("180"));
+        assert_eq!(app.undo_stack.len(), undo_count);
+        app.secondary.assign = true;
+        app.secondary.selection = "resi 1".into();
+        app.secondary.kind = 2;
+        app.assign_secondary_structure();
+        assert!(app.tool_dialog.is_none());
+        assert_eq!(app.undo_stack.len(), undo_count + 1);
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(id)
+                .unwrap()
+                .mol()
+                .get_residue_prop_str("A", "1", "secondary2")
+                .unwrap(),
+            Some("Hs")
+        );
+        assert!(app.state.selection_history().iter().any(|s| s == "resi 1"));
+        let assigned = app.state.clone();
+        app.undo(&mut camera);
+        assert_eq!(
+            before
+                .scene_manager()
+                .object(id)
+                .unwrap()
+                .mol()
+                .residue_props(),
+            app.state
+                .scene_manager()
+                .object(id)
+                .unwrap()
+                .mol()
+                .residue_props()
+        );
+        app.redo(&mut camera);
+        assert_eq!(
+            assigned
+                .scene_manager()
+                .object(id)
+                .unwrap()
+                .mol()
+                .residue_props(),
+            app.state
+                .scene_manager()
+                .object(id)
+                .unwrap()
+                .mol()
+                .residue_props()
+        );
+        app.open_secondary_dialog();
+        app.secondary.scene = None;
+        app.assign_secondary_structure();
+        assert!(app.secondary.error.contains("active scene changed"));
+        assert_eq!(app.undo_stack.len(), undo_count + 1);
+    }
+
+    #[test]
     fn native_interaction_dialog_keeps_empty_and_invalid_analyses_out_of_history() {
         let Some(pdb) = reference_pdb_path() else {
             return;
@@ -38962,6 +38997,7 @@ mod tests {
         app.interaction.selection1 = "invalid (((".into();
         app.calculate_contacts();
         assert!(!app.interaction.error.is_empty());
+        assert!(app.error_alert.is_none());
         assert!(app.state.same_undo_state(&before));
         assert_eq!(app.undo_stack.len(), undo_count);
         app.interaction.r_min = app.interaction.r_max;

@@ -334,6 +334,21 @@ residues closes the form without adding history. Cancel discards the draft;
 switching scenes cancels or rejects it. Successful selection expressions are
 available in selection history.
 
+### Secondary structure
+
+**Tools > Reassign secondary str** opens a shared form in native egui and the
+browser, with matching controls in Tauri. Recalculate uses molecular geometry,
+with optional Ignore beta bulge and a helix gap-fill angle from 0 to 180 degrees.
+Assign uses an atom selection and one of Coil, beta strand, alpha helix,
+3-10 helix or pi helix. An empty selection means the entire molecule; use
+Choose to build or reuse a selection. Options from the inactive mode are ignored.
+
+Reopening resets the mode, selection and parameters while retaining a valid
+molecule choice. Errors stay in the form for correction. Successful changes
+close the form and create one undo entry; a successful operation with no changes
+closes without adding history. Cancel discards the draft, and a changed active
+scene invalidates its target.
+
 ### Interaction analysis
 
 **Tools > Interaction** opens the interaction form in each frontend. Choose a

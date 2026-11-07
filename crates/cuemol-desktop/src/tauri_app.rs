@@ -11856,7 +11856,9 @@ fn handle_model_request(
             };
             model.status = format!("Secondary structure assigned for {count} {unit}");
             model.invalidate_snapshot(false);
-            model.push_undo(undo);
+            if !undo.desktop.same_scene_undo_state(&model.desktop) {
+                model.push_undo(undo);
+            }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::CreateMolecularSurface {
@@ -24492,6 +24494,84 @@ mod tests {
         assert_eq!(snapshot.undo_descriptions[0], "Deleted 1 atom(s)");
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().objects[0].atom_count, 327);
+    }
+
+    #[test]
+    fn secondary_requests_preserve_failed_and_empty_edits_and_undo_assignments() {
+        let mut model = model_without_gpu();
+        model.desktop.open_bytes("probe.pdb", b"ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C  \nATOM      2  CA  GLY A   2       3.000   0.000   0.000  1.00 10.00           C  \nEND\n").unwrap();
+        let id = model.desktop.active_object_summaries()[0].uid;
+        let before = model.desktop.clone();
+        let request =
+            |mode: &str, selection: &str, kind, angle| ModelRequest::AssignSecondaryStructure {
+                object_uid: id.get(),
+                mode: mode.into(),
+                selection: selection.into(),
+                secondary_type: kind,
+                ignore_bulge: false,
+                angle,
+            };
+        for invalid in [
+            request("assign", "invalid (((", 0, 0.),
+            request("assign", "", 5, 0.),
+            request("recalc", "", 0, 181.),
+            request("recalc", "", 0, f64::NAN),
+        ] {
+            assert!(handle_model_request(&mut model, invalid).is_err());
+            assert!(before.same_scene_undo_state(&model.desktop));
+            assert!(model.undo_stack.is_empty());
+        }
+        handle_model_request(&mut model, request("assign", "none", 2, 0.)).unwrap();
+        assert!(before.same_scene_undo_state(&model.desktop));
+        assert!(model.undo_stack.is_empty());
+        handle_model_request(&mut model, request("assign", "", 2, 0.)).unwrap();
+        assert_eq!(model.undo_stack.len(), 1);
+        assert_eq!(
+            model
+                .desktop
+                .scene_manager()
+                .object(id)
+                .unwrap()
+                .mol()
+                .get_residue_prop_str("A", "2", "secondary2")
+                .unwrap(),
+            Some("He")
+        );
+        let assigned = model.desktop.clone();
+        handle_model_request(&mut model, request("assign", "", 2, 0.)).unwrap();
+        assert_eq!(model.undo_stack.len(), 1);
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(
+            before
+                .scene_manager()
+                .object(id)
+                .unwrap()
+                .mol()
+                .residue_props(),
+            model
+                .desktop
+                .scene_manager()
+                .object(id)
+                .unwrap()
+                .mol()
+                .residue_props()
+        );
+        handle_model_request(&mut model, ModelRequest::Redo(0)).unwrap();
+        assert_eq!(
+            assigned
+                .scene_manager()
+                .object(id)
+                .unwrap()
+                .mol()
+                .residue_props(),
+            model
+                .desktop
+                .scene_manager()
+                .object(id)
+                .unwrap()
+                .mol()
+                .residue_props()
+        );
     }
 
     #[test]

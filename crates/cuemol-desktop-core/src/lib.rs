@@ -16586,6 +16586,11 @@ impl DesktopAppState {
             .scene_manager_mut()
             .object_mut(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        if !angle.is_finite() || !(0.0..=180.0).contains(&angle) {
+            return Err(CueMolError::invalid_argument(
+                "helix angle must be between 0 and 180 degrees",
+            ));
+        }
         MolAnlManager::new().calc_prot_2ndry2(object.mol_mut(), ignore_bulge, angle);
         Ok(object.mol().atom_count())
     }
@@ -74820,6 +74825,28 @@ attribute \"dep\" string \"positions\"
                 .renderers()
                 .iter()
                 .any(|renderer| renderer.name() == "simple-smiles"));
+        }
+    }
+
+    #[test]
+    fn secondary_recalculation_rejects_invalid_angles_before_mutation() {
+        let mut state = DesktopAppState::new();
+        state.open_bytes("probe.pdb", b"ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n").unwrap();
+        let id = state.active_object_summaries()[0].uid;
+        let before = state.clone();
+        for angle in [-1., 180.1, f64::NAN, f64::INFINITY] {
+            assert!(state
+                .assign_secondary_structure_in_object(id, false, angle)
+                .is_err());
+            assert!(before.same_scene_undo_state(&state));
+        }
+        for angle in [0., 120., 180.] {
+            assert_eq!(
+                state
+                    .assign_secondary_structure_in_object(id, false, angle)
+                    .unwrap(),
+                1
+            );
         }
     }
 

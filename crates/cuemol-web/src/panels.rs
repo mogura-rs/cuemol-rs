@@ -260,6 +260,11 @@ impl App {
             self.show_interaction = true;
             return;
         }
+        if name == "set_secondary_structure" {
+            self.secondary.opened(&self.state, self.selected);
+            self.show_secondary = true;
+            return;
+        }
         self.console_tool = name.into();
         self.form_tool.clear();
         self.show_console = true;
@@ -448,6 +453,50 @@ impl App {
         if !open {
             self.molecule_edits.active = None;
         }
+    }
+
+    pub(super) fn secondary_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_secondary {
+            return;
+        }
+        if self.secondary.scene != self.state.active_scene() {
+            self.show_secondary = false;
+            self.message = "The active scene changed. Reopen Reassign secondary structure.".into();
+            return;
+        }
+        let mut open = true;
+        let mut action = None;
+        let window = egui::Window::new("Reassign secondary structure")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(550.)
+            .show(ctx, |ui| {
+                action = self.secondary.show(ui, &self.state, self.revision);
+            });
+        self.ui_rects.extend(self.secondary.rects.clone());
+        if let Some(window) = window {
+            self.record_ui_rect("Secondary window", &window.response);
+        }
+        match action {
+            Some(cuemol_ui::secondary::Action::Accept) => {
+                if let Some(error) = self.secondary.validation_error(&self.state) {
+                    self.secondary.error = error.into();
+                } else if self.call_shared("set_secondary_structure", self.secondary.arguments()) {
+                    if self.secondary.assign {
+                        self.state.remember_selection(&self.secondary.selection);
+                        self.persist_selection_history();
+                    }
+                    self.selected = self.secondary.object;
+                    self.message = "Secondary structure assigned".into();
+                    open = false;
+                } else {
+                    self.secondary.error.clone_from(&self.message);
+                }
+            }
+            Some(cuemol_ui::secondary::Action::Cancel) => open = false,
+            None => {}
+        }
+        self.show_secondary = open;
     }
 
     pub(super) fn interaction_ui(&mut self, ctx: &egui::Context) {

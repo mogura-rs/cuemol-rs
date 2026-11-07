@@ -165,6 +165,11 @@ async function openShell(page, storage = {}, options = {}) {
         if (command === 'renumber_residues' && !args.shiftMode && args.value === 1) snapshot.status = 'Residue index change was rejected';
         return structuredClone(snapshot);
       }
+      if (options.secondary && command === 'assign_secondary_structure') {
+        if (args.selection === 'invalid (((') throw new Error('Invalid selection');
+        snapshot.status = 'Secondary structure assigned';
+        return structuredClone(snapshot);
+      }
       if (options.interactions && command === 'calculate_contacts') {
         if(args.selection1 === 'invalid (((') throw new Error('Invalid selection');
         snapshot.status=args.selection1 === 'none' ? 'No interaction was found' : 'Defined 1 interaction(s) in measure';
@@ -2498,5 +2503,63 @@ test('Tauri molecule edit dialogs validate, confirm and retain failed requests',
   await dialog.getByRole('button', {name:'OK', exact:true}).click();
   await expect(dialog.getByRole('alert')).toContainText('active scene changed');
   expect((await last('merge_molecules')).copy).toBe(false);
+  expect(errors).toEqual([]);
+});
+
+
+test('secondary dialog gates modes, preserves errors, remembers molecule and resets options', async ({page}, testInfo) => {
+  const errors = await openShell(page, {}, {secondary:true, interactions:true});
+  const dialog = page.locator('#reference-dialog');
+  const open = async () => {
+    await page.locator('summary').filter({hasText:/^Tools$/}).click();
+    await page.locator('[data-dialog="Reassign secondary str"]').click();
+    await expect(dialog).toBeVisible();
+  };
+  const last = () => page.evaluate(() => window.__shellCalls.filter(c => c.command === 'assign_secondary_structure').at(-1)?.args);
+  await open();
+  await expect(dialog.locator('#dialog-title')).toHaveText('Reassign secondary structure');
+  await expect(dialog.getByLabel('Mode', {exact:true})).toHaveValue('recalc');
+  await expect(dialog.getByLabel('Angle', {exact:true})).toHaveValue('120');
+  await expect(dialog.getByLabel('Angle', {exact:true})).toBeDisabled();
+  await expect(dialog.getByLabel('Selection', {exact:true})).toBeDisabled();
+  await dialog.getByLabel('Helix gap-fill angle (°)', {exact:true}).check();
+  await dialog.getByLabel('Angle', {exact:true}).fill('181');
+  await expect(dialog.getByRole('button', {name:'OK', exact:true})).toBeDisabled();
+  await expect(dialog.getByRole('alert')).toContainText('180');
+  await dialog.getByLabel('Mode', {exact:true}).selectOption('assign');
+  await expect(dialog.getByLabel('Angle', {exact:true})).toBeDisabled();
+  await expect(dialog.getByRole('button', {name:'OK', exact:true})).toBeEnabled();
+  await dialog.getByRole('button', {name:'Choose Selection', exact:true}).click();
+  await dialog.getByRole('button', {name:'Selection choice *', exact:true}).click();
+  await expect(dialog.getByLabel('Selection', {exact:true})).toHaveValue('*');
+  await dialog.getByLabel('Selection', {exact:true}).fill('invalid (((');
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('Invalid selection');
+  await expect(dialog.getByLabel('Selection', {exact:true})).toHaveValue('invalid (((');
+  await dialog.getByLabel('Molecule', {exact:true}).selectOption('5');
+  await dialog.getByLabel('Selection', {exact:true}).fill('resi 1');
+  await dialog.getByLabel('Type', {exact:true}).selectOption('4');
+  await page.screenshot({path:testInfo.outputPath('tauri-secondary.png')});
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  expect(await last()).toEqual({objectUid:5,mode:'assign',selection:'resi 1',secondaryType:4,ignoreBulge:false,angle:0});
+  await open();
+  await expect(dialog.getByLabel('Molecule', {exact:true})).toHaveValue('5');
+  await expect(dialog.getByLabel('Mode', {exact:true})).toHaveValue('recalc');
+  await expect(dialog.getByLabel('Selection', {exact:true})).toHaveValue('');
+  await expect(dialog.getByLabel('Type', {exact:true})).toHaveValue('0');
+  await expect(dialog.getByLabel('Angle', {exact:true})).toHaveValue('120');
+  await expect(dialog.getByLabel('Helix gap-fill angle (°)', {exact:true})).not.toBeChecked();
+  await dialog.getByLabel('Ignore β bulge', {exact:true}).check();
+  await dialog.getByLabel('Helix gap-fill angle (°)', {exact:true}).check();
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  expect(await last()).toEqual({objectUid:5,mode:'recalc',selection:'',secondaryType:0,ignoreBulge:true,angle:120});
+  await open();
+  await page.evaluate(async () => { window.__interactionSceneChanged(); await mutate('get_snapshot'); });
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('active scene changed');
+  expect((await last()).ignoreBulge).toBe(true);
+  await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
   expect(errors).toEqual([]);
 });

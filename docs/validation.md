@@ -1,5 +1,49 @@
 # Validation evidence
 
+## Secondary-structure dialog
+
+Native egui and the browser share the Reassign secondary structure form. Its
+fields match the current reference dialog: Recalculate / Assign, retained valid
+molecule, reset selection and parameters, Ignore beta bulge, optional gap-fill
+angle (default 120 degrees), and five secondary-structure types. Each frontend
+provides the selection builder, ignores inactive-mode fields, keeps failed edits
+visible and rejects stale scene targets. Empty selection means the entire
+molecule. Reference worker services return success for a valid zero-result
+assignment; this closes the form without creating empty history.
+
+The shared core now rejects non-finite or out-of-range recalculation angles
+before changing molecular properties. This matches the existing Tauri boundary
+and applies to native, browser and command callers. Manual assignments also
+clamp the neighboring-residue range at integer boundaries, preventing overflow
+for supported minimum/maximum residue indices; a focused molecular-structure
+regression covers all five types at both boundaries. Tauri and native avoid undo
+entries when residue properties remain unchanged. Actual assignments and
+recalculations retain one-step Undo/Redo. Successful manual selections enter the
+shared history. Native parser errors no longer open a second modal above these
+inline forms; the same correction applies to the interaction-analysis form.
+
+Validation passes: 185 shared-core tests, 217 native GUI tests, 188 Tauri model
+tests with five existing ignored cases, two browser cases spanning real WebGL
+and WebGPU, and one Tauri DOM case. These cover malformed and empty selections,
+all five types, mode gating and reset, angle bounds, remembered molecules,
+selection building, scene guards and Undo/Redo. Browser and Tauri screenshots
+were inspected. Linux OS mouse/keyboard input confirms invalid selection
+retention without a second modal, manual assignment and its Undo/Redo, geometric
+recalculation and its undo, reset-on-reopen and cancellation. Native screenshots
+were inspected. The OS fixture uses separated residue indices because the
+reference intentionally clears conflicting assignments on neighboring indices.
+
+The earlier browser entry opened a generic command form. Native fields were
+retained across reopening, used a different title, omitted selection building
+and kept successful forms open; native/Tauri also recorded empty undo steps.
+Tauri defaulted to the active selection and closed after failures. These gaps
+are corrected, and the guide/checklist now distinguish secondary structure from
+the remaining transformation and surface dialogs. The previously documented
+immediate molecule-open default is being replaced following the explicit user
+choice to show reader options for every file open; its verification belongs to
+the following reader-options change.
+
+
 ## Molecule edit dialogs and residue-index bounds
 
 Native egui and the browser now share dedicated Merge molecule, Delete mol atoms,

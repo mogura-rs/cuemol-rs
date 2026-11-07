@@ -815,36 +815,38 @@ impl Prot2ndrySet {
     /// the conflicting classes over [st-1, en+1] (C++ `setProt2ndry` switch). Type
     /// codes: 1=sheet, 2=alpha, 3=3-10, 4=pi, other=coil.
     pub fn set_type(&mut self, sec_type: i32, chain: &str, st: i32, en: i32) {
+        let before = st.saturating_sub(1);
+        let after = en.saturating_add(1);
         match sec_type {
             1 => {
                 chainset_append(&mut self.sheet, chain, st, en);
-                chainset_remove(&mut self.helix, chain, st - 1, en + 1);
-                chainset_remove(&mut self.helix310, chain, st - 1, en + 1);
-                chainset_remove(&mut self.helixpi, chain, st - 1, en + 1);
+                chainset_remove(&mut self.helix, chain, before, after);
+                chainset_remove(&mut self.helix310, chain, before, after);
+                chainset_remove(&mut self.helixpi, chain, before, after);
             }
             2 => {
                 chainset_append(&mut self.helix, chain, st, en);
-                chainset_remove(&mut self.sheet, chain, st - 1, en + 1);
-                chainset_remove(&mut self.helix310, chain, st - 1, en + 1);
-                chainset_remove(&mut self.helixpi, chain, st - 1, en + 1);
+                chainset_remove(&mut self.sheet, chain, before, after);
+                chainset_remove(&mut self.helix310, chain, before, after);
+                chainset_remove(&mut self.helixpi, chain, before, after);
             }
             3 => {
                 chainset_append(&mut self.helix310, chain, st, en);
-                chainset_remove(&mut self.sheet, chain, st - 1, en + 1);
-                chainset_remove(&mut self.helix, chain, st - 1, en + 1);
-                chainset_remove(&mut self.helixpi, chain, st - 1, en + 1);
+                chainset_remove(&mut self.sheet, chain, before, after);
+                chainset_remove(&mut self.helix, chain, before, after);
+                chainset_remove(&mut self.helixpi, chain, before, after);
             }
             4 => {
                 chainset_append(&mut self.helixpi, chain, st, en);
-                chainset_remove(&mut self.sheet, chain, st - 1, en + 1);
-                chainset_remove(&mut self.helix310, chain, st - 1, en + 1);
-                chainset_remove(&mut self.helix, chain, st - 1, en + 1);
+                chainset_remove(&mut self.sheet, chain, before, after);
+                chainset_remove(&mut self.helix310, chain, before, after);
+                chainset_remove(&mut self.helix, chain, before, after);
             }
             _ => {
-                chainset_remove(&mut self.helix, chain, st - 1, en + 1);
-                chainset_remove(&mut self.sheet, chain, st - 1, en + 1);
-                chainset_remove(&mut self.helix310, chain, st - 1, en + 1);
-                chainset_remove(&mut self.helixpi, chain, st - 1, en + 1);
+                chainset_remove(&mut self.helix, chain, before, after);
+                chainset_remove(&mut self.sheet, chain, before, after);
+                chainset_remove(&mut self.helix310, chain, before, after);
+                chainset_remove(&mut self.helixpi, chain, before, after);
             }
         }
     }
@@ -987,5 +989,27 @@ mod tests {
             sparse.iter().map(|r| &r.ss).collect::<Vec<_>>(),
             exhaustive.iter().map(|r| &r.ss).collect::<Vec<_>>()
         );
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn manual_assignment_handles_residue_index_boundaries() {
+        let mut assignment = Prot2ndrySet::default();
+        for index in [i32::MIN, i32::MAX] {
+            assignment.set_type(2, "A", index, index);
+            assert_eq!(assignment.class_of("A", index), Some(('H', "helix")));
+            assignment.set_type(1, "A", index, index);
+            assert_eq!(assignment.class_of("A", index), Some(('E', "sheet")));
+            assignment.set_type(3, "A", index, index);
+            assert_eq!(assignment.class_of("A", index), Some(('G', "helix")));
+            assignment.set_type(4, "A", index, index);
+            assert_eq!(assignment.class_of("A", index), Some(('I', "helix")));
+            assignment.set_type(0, "A", index, index);
+            assert_eq!(assignment.class_of("A", index), None);
+        }
     }
 }
