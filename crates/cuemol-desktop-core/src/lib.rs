@@ -2155,9 +2155,11 @@ impl DesktopAppState {
         for scene in self.scene_manager().scenes() {
             for current in scene.objects() {
                 if let Some(restored) = snapshot.scene_manager_mut().object_mut(current.uid()) {
+                    let modified = restored.modified();
                     restored
                         .mol_mut()
                         .preserve_allocated_atom_ids_from(current.mol());
+                    restored.set_modified(modified);
                 }
             }
         }
@@ -16899,8 +16901,7 @@ impl DesktopAppState {
         )
     }
 
-    /// Superpose one molecule onto another with the algorithm exposed by CueMol2's
-    /// Molecular superposition dialog (`LSQ` or `SSM`).
+    /// Superpose molecules with LSQ, SSM or US-align, using the automatic pivot.
     pub fn superpose_objects_with_algorithm(
         &mut self,
         reference_object: Uid,
@@ -16952,11 +16953,6 @@ impl DesktopAppState {
         algorithm: &str,
         pivot: &str,
     ) -> Result<GuiSuperpositionResult> {
-        if reference_object == moving_object {
-            return Err(CueMolError::invalid_argument(
-                "reference and moving objects must differ",
-            ));
-        }
         let reference_selection = nonempty_selection(reference_selection);
         let moving_selection = nonempty_selection(moving_selection);
         let manager = MolAnlManager::new();
@@ -57428,6 +57424,106 @@ mod tests {
     }
 
     #[test]
+    fn restoring_a_snapshot_preserves_saved_and_unsaved_molecule_flags() {
+        let mut state = DesktopAppState::new();
+        let scene = state.ensure_active_scene();
+        let clean = state
+            .scene_manager_mut()
+            .scene_mut(scene)
+            .unwrap()
+            .add_molecule("saved", MolCoord::new());
+        let dirty = state
+            .scene_manager_mut()
+            .scene_mut(scene)
+            .unwrap()
+            .add_molecule("unsaved", MolCoord::new());
+        state
+            .scene_manager_mut()
+            .object_mut(dirty)
+            .unwrap()
+            .set_modified(true);
+        let snapshot = state.clone();
+        state
+            .scene_manager_mut()
+            .object_mut(clean)
+            .unwrap()
+            .set_modified(true);
+        state
+            .scene_manager_mut()
+            .object_mut(dirty)
+            .unwrap()
+            .set_modified(false);
+        state.restore_snapshot(snapshot.clone());
+        assert!(!state.scene_manager().object(clean).unwrap().modified());
+        assert!(state.scene_manager().object(dirty).unwrap().modified());
+        assert!(state.same_scene_undo_state(&snapshot));
+    }
+
+    #[test]
+    fn same_molecule_subselections_align_without_aliasing_inputs() {
+        for algorithm in ["LSQ", "USalign"] {
+            for use_property in [false, true] {
+                let mut app = DesktopAppState::new();
+                let sid = app.ensure_active_scene();
+                let atom = read_pdb_str("ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap().atoms()[0].clone();
+                let mut molecule = MolCoord::new();
+                for chain in ["A", "B"] {
+                    for i in 0..8 {
+                        let mut atom = atom.clone();
+                        atom.serial = i + 1 + if chain == "B" { 8 } else { 0 };
+                        atom.res_id = i + 1;
+                        atom.chain_id = chain.into();
+                        let t = f64::from(i);
+                        atom.position = Vector4::new3(
+                            t + if chain == "B" { 10. } else { 0. },
+                            t.sin(),
+                            t.cos(),
+                        );
+                        molecule.push_atom(atom);
+                    }
+                }
+                let id = app
+                    .scene_manager_mut()
+                    .scene_mut(sid)
+                    .unwrap()
+                    .add_molecule("pair", molecule);
+                let before = app.clone();
+                let result = app
+                    .prepare_superposition(id, "chain A", id, "chain B", algorithm, "CA")
+                    .unwrap();
+                assert!(before.same_scene_undo_state(&app));
+                assert_eq!(result.aligned_count, Some(8));
+                assert!(result.rmsd.unwrap() < 1e-6);
+                app.apply_superposition(id, result.matrix, use_property)
+                    .unwrap();
+                let object = app.scene_manager().object(id).unwrap();
+                for (i, atom) in object.mol().atoms()[8..].iter().enumerate() {
+                    let point = object.xform_matrix().mulvec(Vector4::new4(
+                        atom.position.x,
+                        atom.position.y,
+                        atom.position.z,
+                        1.,
+                    ));
+                    assert!(
+                        (point.x - i as f64).abs() < 1e-6,
+                        "{algorithm} {use_property} {point:?}"
+                    );
+                }
+                let point = object.mol().atoms()[0].position;
+                assert!(
+                    (object
+                        .xform_matrix()
+                        .mulvec(Vector4::new4(point.x, point.y, point.z, 1.))
+                        .x
+                        + 10.)
+                        .abs()
+                        < 1e-6
+                );
+            }
+        }
+    }
+
+    #[test]
     fn command_alignment_preserves_world_positions_with_existing_transforms() {
         for algorithm in ["lsq", "usalign"] {
             for use_property in [false, true] {
@@ -74680,6 +74776,13 @@ attribute \"dep\" string \"positions\"
             GuiLoadedPath::Object { object_uid, .. } => object_uid,
             _ => panic!("expected object load"),
         };
+
+        for algorithm in ["LSQ", "SSM", "USalign"] {
+            let same = app
+                .prepare_superposition(first, "", first, "", algorithm, "auto")
+                .unwrap();
+            assert!(same.matrix.get_trans_part().length() < 1e-6);
+        }
 
         let matrix = app
             .superpose_objects(first, "name CA", second, "name CA")

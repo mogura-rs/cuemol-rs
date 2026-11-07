@@ -165,6 +165,11 @@ async function openShell(page, storage = {}, options = {}) {
         if (command === 'renumber_residues' && !args.shiftMode && args.value === 1) snapshot.status = 'Residue index change was rejected';
         return structuredClone(snapshot);
       }
+      if (options.superposition && command === 'superpose_objects') {
+        if (args.referenceSelection === 'invalid (((') throw new Error('Invalid selection');
+        snapshot.status = 'Molecular superposition applied';
+        return structuredClone(snapshot);
+      }
       if (options.secondary && command === 'assign_secondary_structure') {
         if (args.selection === 'invalid (((') throw new Error('Invalid selection');
         snapshot.status = 'Secondary structure assigned';
@@ -2591,5 +2596,65 @@ test('Tauri file opens show options for each file and preserve automatic represe
   await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
   await expect(dialog).not.toBeVisible();
   expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='open_path_with_renderer_setup').length)).toBe(1);
+  expect(errors).toEqual([]);
+});
+
+test('superposition dialog retains failed input and saves only successful settings', async ({page}, testInfo) => {
+  const key = 'cuemol2.ui.histories.mol_superpose';
+  const errors = await openShell(page, {[key]: JSON.stringify({algo:'invalid',pivot:'invalid',refObjId:-1,movObjId:999})}, {superposition:true, interactions:true});
+  const dialog = page.locator('#reference-dialog');
+  const open = async () => {
+    await page.locator('summary').filter({hasText:/^Tools$/}).click();
+    await page.locator('[data-dialog="Molecular superposition"]').click();
+    await expect(dialog).toBeVisible();
+  };
+  const last = () => page.evaluate(() => window.__shellCalls.filter(c => c.command === 'superpose_objects').at(-1)?.args);
+  const stored = () => page.evaluate(key => JSON.parse(localStorage.getItem(key)), key);
+  await open();
+  await expect(dialog.getByLabel('Method', {exact:true})).toHaveValue('USalign');
+  await expect(dialog.getByLabel('Pivot atom', {exact:true})).toHaveValue('auto');
+  await expect(dialog.getByLabel('Reference molecule', {exact:true})).toHaveValue('3');
+  await expect(dialog.getByLabel('Moving molecule', {exact:true})).toHaveValue('5');
+  await expect(dialog.getByLabel('Reference selection', {exact:true})).toHaveValue('');
+  await expect(dialog.getByLabel('Moving selection', {exact:true})).toHaveValue('');
+  await expect(dialog.getByLabel('Write RMSD info file', {exact:true})).toBeDisabled();
+  await dialog.getByRole('button', {name:'Choose Reference selection', exact:true}).click();
+  await dialog.getByRole('button', {name:'Selection choice *', exact:true}).click();
+  await dialog.getByLabel('Reference selection', {exact:true}).fill('invalid (((');
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('Invalid selection');
+  await expect(dialog.getByLabel('Reference selection', {exact:true})).toHaveValue('invalid (((');
+  expect((await stored()).algo).toBe('invalid');
+  await dialog.getByLabel('Reference molecule', {exact:true}).selectOption('5');
+  await dialog.getByLabel('Reference selection', {exact:true}).fill('chain A');
+  await dialog.getByLabel('Moving selection', {exact:true}).fill('chain B');
+  await dialog.getByLabel('Pivot atom', {exact:true}).selectOption('P');
+  await dialog.getByLabel('Use xformMat property', {exact:true}).check();
+  await dialog.getByLabel('Auto recenter', {exact:true}).uncheck();
+  await page.screenshot({path:testInfo.outputPath('tauri-superposition.png')});
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  expect(await last()).toEqual({algorithm:'USalign',pivot:'P',referenceObjectUid:5,referenceSelection:'chain A',movingObjectUid:5,movingSelection:'chain B',autoRecenter:false,useProperty:true,rmsdPath:null});
+  const success = {algo:'USalign',pivot:'P',refObjId:5,movObjId:5,autoRecenter:false,useprop:true};
+  expect(await stored()).toEqual(success);
+  await open();
+  await expect(dialog.getByLabel('Reference molecule', {exact:true})).toHaveValue('5');
+  await expect(dialog.getByLabel('Moving molecule', {exact:true})).toHaveValue('5');
+  await expect(dialog.getByLabel('Reference selection', {exact:true})).toHaveValue('');
+  await expect(dialog.getByLabel('Moving selection', {exact:true})).toHaveValue('');
+  await expect(dialog.getByLabel('Pivot atom', {exact:true})).toHaveValue('P');
+  await expect(dialog.getByLabel('Use xformMat property', {exact:true})).toBeChecked();
+  await dialog.getByLabel('Method', {exact:true}).selectOption('LSQ');
+  await expect(dialog.getByLabel('Pivot atom', {exact:true})).toBeDisabled();
+  await expect(dialog.getByLabel('Write RMSD info file', {exact:true})).toBeEnabled();
+  await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
+  expect(await stored()).toEqual(success);
+  await open();
+  await expect(dialog.getByLabel('Method', {exact:true})).toHaveValue('USalign');
+  await page.evaluate(async () => { window.__interactionSceneChanged(); await mutate('get_snapshot'); });
+  await dialog.getByRole('button', {name:'OK', exact:true}).click();
+  await expect(dialog.getByRole('alert')).toContainText('active scene changed');
+  expect(await stored()).toEqual(success);
+  await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
   expect(errors).toEqual([]);
 });

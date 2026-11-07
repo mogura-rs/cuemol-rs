@@ -8220,6 +8220,7 @@ enum ModelRequest {
     },
     SuperposeObjects {
         algorithm: String,
+        pivot: String,
         reference_object_uid: u64,
         reference_selection: String,
         moving_object_uid: u64,
@@ -11567,45 +11568,38 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SuperposeObjects {
-            algorithm,
-            reference_object_uid,
-            reference_selection,
-            moving_object_uid,
-            moving_selection,
-            auto_recenter,
-            use_property,
-            rmsd_path,
+            algorithm, pivot, reference_object_uid, reference_selection,
+            moving_object_uid, moving_selection, auto_recenter, use_property, rmsd_path,
         } => {
-            if reference_object_uid == moving_object_uid {
-                return Err("reference and moving objects must differ".to_string());
-            }
+            let args = serde_json::json!({"algo":algorithm,"pivot":pivot,
+                "refId":reference_object_uid,"refSel":reference_selection,
+                "movId":moving_object_uid,"movSel":moving_selection,
+                "recenter":auto_recenter,"keepAsProperty":use_property});
             let undo = model.capture_undo();
-            model
-                .desktop
-                .superpose_objects_with_algorithm(
-                    Uid::new(reference_object_uid),
-                    &reference_selection,
-                    Uid::new(moving_object_uid),
-                    &moving_selection,
-                    &algorithm,
-                    use_property,
-                )
-                .map_err(|error| error.to_string())?;
-            if let Some(path) = rmsd_path.filter(|path| !path.trim().is_empty()) {
-                if let Err(error) = model.desktop.write_superposition_rmsd_report(
-                    Uid::new(reference_object_uid),
-                    &reference_selection,
-                    Uid::new(moving_object_uid),
-                    &moving_selection,
-                    path,
-                ) {
+            let record = cuemol_command::console::actions::Record::operation(&model.desktop, "superpose", &args);
+            let result = cuemol_command::call_tool(&mut model.desktop, &mut model.camera, "superpose", &args)
+                .and_then(|value| {
+                    if let Some(path) = rmsd_path.filter(|path| !path.trim().is_empty()) {
+                        model.desktop.write_superposition_rmsd_report(
+                            Uid::new(reference_object_uid), &reference_selection,
+                            Uid::new(moving_object_uid), &moving_selection, path)?;
+                    }
+                    Ok(value)
+                });
+            if let Err(error) = result {
+                if !undo.desktop.same_undo_state(&model.desktop) {
                     model.restore_undo(undo)?;
-                    return Err(error.to_string());
+                } else {
+                    model.camera = undo.camera;
                 }
+                return Err(error.to_string());
             }
             model.status = "Molecular superposition applied".to_string();
-            model.invalidate_snapshot(auto_recenter);
-            model.push_undo(undo);
+            model.invalidate_snapshot(false);
+            if !undo.desktop.same_scene_undo_state(&model.desktop) {
+                model.push_undo(undo);
+                if let Some(entry) = model.undo_stack.last_mut() { entry.record = record; }
+            }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::EditBond {
@@ -15638,6 +15632,7 @@ fn merge_molecules(
 #[allow(clippy::too_many_arguments)]
 fn superpose_objects(
     algorithm: String,
+    pivot: Option<String>,
     reference_object_uid: u64,
     reference_selection: String,
     moving_object_uid: u64,
@@ -15651,6 +15646,7 @@ fn superpose_objects(
         &state,
         ModelRequest::SuperposeObjects {
             algorithm,
+            pivot: pivot.unwrap_or_else(|| "auto".into()),
             reference_object_uid,
             reference_selection,
             moving_object_uid,
@@ -25733,6 +25729,118 @@ mod tests {
     }
 
     #[test]
+    fn superposition_requests_keep_pivots_selected_framing_and_failed_report_atomic() {
+        for pivot in ["CA", "P"] {
+            let mut model = model_without_gpu();
+            let scene = model.desktop.ensure_active_scene();
+            let template = cuemol_molstr::read_pdb_str("ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap().atoms()[0].clone();
+            for offset in [0., 20.] {
+                let mut mol = cuemol_molstr::MolCoord::new();
+                for i in 0..9 {
+                    let mut atom = template.clone();
+                    atom.serial = i + 1;
+                    atom.res_id = i + 1;
+                    atom.name = pivot.into();
+                    if pivot == "P" {
+                        atom.res_name = "A".into();
+                    }
+                    let t = if i == 8 { 1000. } else { f64::from(i) };
+                    atom.position = Vector4::new3(t + offset, t.sin(), t.cos());
+                    mol.push_atom(atom);
+                }
+                model
+                    .desktop
+                    .scene_manager_mut()
+                    .scene_mut(scene)
+                    .unwrap()
+                    .add_molecule(&format!("mol{offset}"), mol);
+            }
+            model.rebuild_snapshot(false).unwrap();
+            let objects = model.desktop.active_object_summaries();
+            let reference = objects[0].uid;
+            let moving = objects[1].uid;
+            let request = |reference_selection: &str, rmsd_path: Option<String>| {
+                ModelRequest::SuperposeObjects {
+                    algorithm: "USalign".into(),
+                    pivot: pivot.into(),
+                    reference_object_uid: reference.get(),
+                    reference_selection: reference_selection.into(),
+                    moving_object_uid: moving.get(),
+                    moving_selection: "resi 1:8".into(),
+                    auto_recenter: true,
+                    use_property: true,
+                    rmsd_path,
+                }
+            };
+            let before = model.desktop.clone();
+            let camera = model.camera.clone();
+            assert!(handle_model_request(&mut model, request("invalid (((", None)).is_err());
+            assert!(model.desktop.same_scene_undo_state(&before));
+            assert_eq!(model.camera, camera);
+            assert!(model.undo_stack.is_empty());
+            let directory = tempfile::tempdir().unwrap();
+            assert!(handle_model_request(
+                &mut model,
+                request(
+                    "resi 1:8",
+                    Some(directory.path().to_string_lossy().into_owned())
+                )
+            )
+            .is_err());
+            assert!(model.desktop.same_scene_undo_state(&before));
+            assert_eq!(model.camera, camera);
+            assert!(model.undo_stack.is_empty());
+            handle_model_request(&mut model, request("resi 1:8", None)).unwrap();
+            assert_eq!(model.undo_stack.len(), 1);
+            assert!((model.camera.center().x - 3.5).abs() < 1e-5);
+            assert!(model.camera.zoom() < 100.);
+            let transformed = model
+                .desktop
+                .scene_manager()
+                .object(moving)
+                .unwrap()
+                .xform_matrix();
+            assert!((transformed.get_at(1, 4).unwrap() + 20.).abs() < 1e-5);
+            handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+            assert_eq!(
+                model
+                    .desktop
+                    .scene_manager()
+                    .object(moving)
+                    .unwrap()
+                    .xform_matrix(),
+                cuemol_core::Matrix4::IDENTITY
+            );
+            handle_model_request(&mut model, ModelRequest::Redo(0)).unwrap();
+            assert_eq!(
+                model
+                    .desktop
+                    .scene_manager()
+                    .object(moving)
+                    .unwrap()
+                    .xform_matrix(),
+                transformed
+            );
+            handle_model_request(
+                &mut model,
+                ModelRequest::SuperposeObjects {
+                    algorithm: "LSQ".into(),
+                    pivot: "auto".into(),
+                    reference_object_uid: moving.get(),
+                    reference_selection: "resi 1:3".into(),
+                    moving_object_uid: moving.get(),
+                    moving_selection: "resi 4:6".into(),
+                    auto_recenter: false,
+                    use_property: false,
+                    rmsd_path: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(model.undo_stack.len(), 2);
+        }
+    }
+
+    #[test]
     fn analysis_dialog_requests_call_the_shared_tools() {
         let root = option_env!("CUEMOL2_REF_DIR")
             .map(PathBuf::from)
@@ -25762,6 +25870,7 @@ mod tests {
             &mut model,
             ModelRequest::SuperposeObjects {
                 algorithm: "lsq".to_string(),
+                pivot: "auto".into(),
                 reference_object_uid: first,
                 reference_selection: "name CA".to_string(),
                 moving_object_uid: second,

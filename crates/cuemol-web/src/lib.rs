@@ -342,6 +342,8 @@ struct App {
     show_console: bool,
     molecule_edits: cuemol_ui::molecule_edit::Dialogs,
     show_interaction: bool,
+    show_superposition: bool,
+    superposition: cuemol_ui::superposition::SuperpositionDialog,
     show_secondary: bool,
     secondary: cuemol_ui::secondary::SecondaryDialog,
     interaction: cuemol_ui::interaction::InteractionDialog,
@@ -559,6 +561,8 @@ impl App {
             show_console: false,
             molecule_edits: Default::default(),
             show_interaction: false,
+            show_superposition: false,
+            superposition: cuemol_ui::superposition::SuperpositionDialog::default(),
             show_secondary: false,
             secondary: cuemol_ui::secondary::SecondaryDialog::default(),
             interaction: Default::default(),
@@ -1595,6 +1599,7 @@ impl eframe::App for App {
         self.render_ui(ctx);
         self.tools_ui(ctx);
         self.interaction_ui(ctx);
+        self.superposition_ui(ctx);
         self.secondary_ui(ctx);
         self.molecule_edit_ui(ctx);
         self.timeline_ui(ctx);

@@ -340,6 +340,23 @@ residues closes the form without adding history. Cancel discards the draft;
 switching scenes cancels or rejects it. Successful selection expressions are
 available in selection history.
 
+### Molecular superposition
+
+**Tools > Molecular superposition** opens the dedicated form in every frontend.
+Choose reference and moving molecules, their selections, and US-align, SSM or
+LSQ. Both roles may use the same molecule, for example to align different
+chains. Empty selections include all atoms. Choose opens the selection builder.
+US-align also accepts Auto (CA / C3'), CA, C3', C4' or P as the pivot atom.
+The pivot control is inactive for SSM and LSQ.
+
+Auto recenter frames the moving selection after alignment. Use xformMat property
+stores the transformation on the object; otherwise its atomic coordinates are
+transformed. Native egui and Tauri retain the optional LSQ RMSD-report export.
+A failed operation keeps the form and leaves the scene/history unchanged.
+Successful changes create one undo entry. Reopening clears both selections and
+restores only the last successful molecule, method, pivot and switch choices.
+Cancel does not save a draft, and a changed scene invalidates it.
+
 ### Secondary structure
 
 **Tools > Reassign secondary str** opens a shared form in native egui and the

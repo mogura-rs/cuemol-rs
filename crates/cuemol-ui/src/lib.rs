@@ -93,3 +93,6 @@ pub mod secondary;
 
 #[cfg(feature = "egui")]
 pub mod molecule_edit;
+
+#[cfg(feature = "egui")]
+pub mod superposition;

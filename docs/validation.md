@@ -1,5 +1,53 @@
 # Validation evidence
 
+## Molecular superposition dialog and failure preservation
+
+Native egui and the browser now share the current Molecular superposition form;
+Tauri exposes matching controls. US-align is the default, with Auto (CA / C3')
+pivots, empty selections, Auto recenter on and xformMat storage off. Method and
+pivot choices are validated, selection builders use shared history, and inactive
+pivot/report controls cannot affect an unrelated algorithm. Only successful
+choices persist under `cuemol2.ui.histories.mol_superpose`. Reopening clears both
+selections; cancellation and failures retain the previous saved settings.
+Scene changes close or reject stale drafts. Native/Tauri retain optional LSQ
+RMSD-report export without adding it to the browser.
+
+All three C++ algorithms allow the reference and moving roles to use the same
+molecule. The shared Rust preparation now does likewise, using independent
+world-coordinate copies before committing the moving transformation. Synthetic
+chain tests exercise LSQ and US-align with coordinate and property storage;
+the real 1CRN fixture also exercises same-object LSQ, SSM and US-align.
+Auto recenter frames the selected moving atoms, not unrelated distant atoms.
+A browser reproducer found that empty selections were normalized for fitting
+but rejected by framing; framing now uses all atoms consistently. Recenter is
+best effort after a successful transformation, matching the reference worker.
+
+A failed RMSD-output regression exposed snapshot restoration marking all
+molecules modified while preserving their allocated atom IDs. Restoration now
+retains each molecule's original modified flag. Clean and dirty snapshot tests
+cover this independently; failed superposition/report output preserves state,
+camera and history. Accepted changes record one undoable action; no-change
+operations do not add scene history.
+
+Validation passes: 187 shared-core tests with the reference checkout present,
+218 Linux native GUI tests, 218 macOS native model tests, 189 macOS Tauri model
+tests with five existing ignored cases, and 67 shared command tests with two
+existing ignored cases. The focused empty-selection command regression and
+shared history-default test also pass. Two browser cases on real WebGL/WebGPU
+cover invalid selections, CA and RNA P pivots, selected-region framing,
+xformMat, Undo/Redo, same-object LSQ, reset-on-reopen, cancellation and stale
+scenes. The Tauri DOM case passes. Linux OS input verifies inline-error retention,
+a successful property transform, one-step Undo/Redo and saved settings.
+Native, browser and Tauri screenshots were inspected.
+
+The old native form defaulted to LSQ/name-CA, retained draft selections and
+framed the whole scene. The browser opened a generic form, and native/Tauri
+omitted pivot selection. The shared core rejected same-object fits even though
+the C++ reference permits them. These differences are corrected. The old core
+method comment listed only LSQ/SSM despite existing US-align support; its wording
+now matches the implementation. The guide and checklist record the dedicated
+form while retaining the remaining morphing, surface and rendering audit.
+
 ## Options before every object-file open
 
 Following the explicit user choice, native egui, browser and Tauri file opens

@@ -6181,60 +6181,97 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     syncReady();
     dialogActions(open);
   } else if (title === "Molecular superposition") {
+    const sceneUid = snapshot.activeSceneUid;
     const objects = activeObjects();
-    if (objects.length < 2) {
-      dialogContent.append(dialogParagraph("At least two molecular objects are required."));
-    } else {
-      const objectOptions = objects.map((object) => [object.uid, object.name]);
-      const algorithm = dialogSelect(
-        "Algorithm",
-        [
-          ["lsq", "Least Square Fitting"],
-          ["ssm", "Secondary Structure Matching"],
-        ],
-        "lsq",
-      );
-      const referenceObject = dialogSelect("Reference molecule", objectOptions, objects[0].uid);
-      const referenceSelection = dialogField("Reference selection", "name CA");
-      const movingObject = dialogSelect("Moving molecule", objectOptions, objects[1].uid);
-      const movingSelection = dialogField("Moving selection", "name CA");
-      const autoRecenter = dialogCheckbox("Auto recenter", true);
-      const writeRmsd = dialogCheckbox("Write RMSD info file", false);
-      const useProperty = dialogCheckbox("Use xformMat property", false);
-      const syncRmsdEnabled = () => {
-        writeRmsd.disabled = algorithm.value !== "lsq";
-      };
-      algorithm.addEventListener("change", syncRmsdEnabled);
-      syncRmsdEnabled();
-      const apply = button("OK", "dialog-primary", async () => {
-        let rmsdPath = null;
-        if (algorithm.value === "lsq" && writeRmsd.checked) {
-          if (!dialog?.save) {
-            showError("The Tauri dialog plugin is unavailable.");
-            return;
-          }
-          const selected = await dialog.save({
-            title: "Save RMSD info file",
-            defaultPath: "rmsd.txt",
-            filters: [{ name: "Text file (*.txt)", extensions: ["txt"] }],
-          });
-          if (!selected) return;
+    const historyKey = "cuemol2.ui.histories.mol_superpose";
+    let history = {};
+    try {
+      const stored = JSON.parse(localStorage.getItem(historyKey));
+      if (stored && typeof stored === "object") history = stored;
+    } catch {}
+    const valid = id => objects.some(object => object.uid === id);
+    const objectOptions = objects.map(object => [object.uid, object.name]);
+    if (!objectOptions.length) objectOptions.push(["", "Select molecule"]);
+    const methods = dialogGroup("Algorithm");
+    const algorithm = dialogSelect("Method", [["USalign", "US-align"], ["SSM", "SSM"], ["LSQ", "LSQ"]],
+      ["USalign", "SSM", "LSQ"].includes(history.algo) ? history.algo : "USalign", methods);
+    const pivots = [["auto", "Auto (CA / C3')"], ["CA", "CA"], ["C3'", "C3'"], ["C4'", "C4'"], ["P", "P"]];
+    const pivot = dialogSelect("Pivot atom", pivots, pivots.some(item => item[0] === history.pivot) ? history.pivot : "auto", methods);
+    const referenceFields = dialogGroup("Reference");
+    const referenceObject = dialogSelect("Reference molecule", objectOptions,
+      valid(history.refObjId) ? history.refObjId : objects[0]?.uid ?? "", referenceFields);
+    const referencePicker = dialogSelectionField("Reference selection", "", () => Number(referenceObject.value), referenceFields);
+    const movingFields = dialogGroup("Moving");
+    const movingObject = dialogSelect("Moving molecule", objectOptions,
+      valid(history.movObjId) ? history.movObjId : (objects[1] ?? objects[0])?.uid ?? "", movingFields);
+    const movingPicker = dialogSelectionField("Moving selection", "", () => Number(movingObject.value), movingFields);
+    const settings = dialogGroup("Options");
+    const autoRecenter = dialogCheckbox("Auto recenter", typeof history.autoRecenter === "boolean" ? history.autoRecenter : true, settings);
+    const useProperty = dialogCheckbox("Use xformMat property", typeof history.useprop === "boolean" ? history.useprop : false, settings);
+    const writeRmsd = dialogCheckbox("Write RMSD info file", false, settings);
+    const errorMessage = dialogParagraph("");
+    errorMessage.setAttribute("role", "alert");
+    dialogContent.append(errorMessage);
+    let submitting = false;
+    const validate = () => {
+      if (snapshot.activeSceneUid !== sceneUid) return "The active scene changed. Reopen Molecular superposition.";
+      if (![referenceObject, movingObject].every(input => activeObjects().some(object => object.uid === Number(input.value)))) return "Select reference and moving molecules.";
+      return "";
+    };
+    const close = () => { referencePicker.close(); movingPicker.close(); referenceDialog.close(); };
+    const syncReady = (clearError = true) => {
+      for (const group of [methods, referenceFields, movingFields, settings]) group.disabled = submitting;
+      pivot.disabled = submitting || algorithm.value !== "USalign";
+      writeRmsd.disabled = submitting || algorithm.value !== "LSQ";
+      referencePicker.setEnabled(!submitting && Boolean(referenceObject.value));
+      movingPicker.setEnabled(!submitting && Boolean(movingObject.value));
+      apply.disabled = submitting || Boolean(validate());
+      cancel.disabled = submitting;
+      if (clearError) errorMessage.textContent = validate();
+    };
+    const apply = button("OK", "dialog-primary", async () => {
+      const invalid = validate();
+      if (invalid || submitting) { if (invalid) errorMessage.textContent = invalid; return; }
+      submitting = true; syncReady();
+      let rmsdPath = null;
+      if (algorithm.value === "LSQ" && writeRmsd.checked) {
+        try {
+          if (!dialog?.save) throw new Error("The Tauri dialog plugin is unavailable.");
+          const selected = await dialog.save({title: "Save RMSD info file", defaultPath: "rmsd.txt", filters: [{name: "Text file (*.txt)", extensions: ["txt"]}]});
+          if (!selected) { submitting = false; syncReady(); return; }
           rmsdPath = String(selected);
+        } catch (error) {
+          submitting = false; errorMessage.textContent = String(error); syncReady(false); return;
         }
-        await mutate("superpose_objects", {
-          algorithm: algorithm.value,
-          referenceObjectUid: Number(referenceObject.value),
-          referenceSelection: referenceSelection.value,
-          movingObjectUid: Number(movingObject.value),
-          movingSelection: movingSelection.value,
-          autoRecenter: autoRecenter.checked,
-          useProperty: useProperty.checked,
-          rmsdPath,
-        });
-        referenceDialog.close();
-      });
-      dialogActions(apply);
+      }
+      if (!methods.isConnected || validate()) {
+        submitting = false; syncReady(); return;
+      }
+      const request = {algorithm: algorithm.value, pivot: pivot.value,
+        referenceObjectUid: Number(referenceObject.value), referenceSelection: referencePicker.input.value,
+        movingObjectUid: Number(movingObject.value), movingSelection: movingPicker.input.value,
+        autoRecenter: autoRecenter.checked, useProperty: useProperty.checked, rmsdPath};
+      const success = await mutate("superpose_objects", request, renderShell, true,
+        error => { errorMessage.textContent = String(error); });
+      submitting = false;
+      if (!methods.isConnected) return;
+      if (success) {
+        rememberSelection(request.referenceSelection); rememberSelection(request.movingSelection);
+        try { localStorage.setItem(historyKey, JSON.stringify({refObjId: request.referenceObjectUid,
+          movObjId: request.movingObjectUid, algo: request.algorithm, pivot: request.pivot,
+          autoRecenter: request.autoRecenter, useprop: request.useProperty})); } catch {}
+        close();
+      } else syncReady(false);
+    });
+    const cancel = button("Cancel", "", close);
+    for (const group of [methods, referenceFields, movingFields, settings]) {
+      group.addEventListener("input", () => syncReady());
+      group.addEventListener("change", () => syncReady());
     }
+    referenceObject.addEventListener("change", () => referencePicker.close());
+    movingObject.addEventListener("change", () => movingPicker.close());
+    dialogActions(apply, cancel);
+    syncReady();
   } else if (title === "Mol bond editor") {
     dialogTitle.textContent = "Edit non-standard bonds";
     const objects = activeObjects();

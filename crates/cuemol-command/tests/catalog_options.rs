@@ -147,4 +147,9 @@ fn superpose_recenters_only_when_requested() {
     args["recenter"] = json!(true);
     call_tool(&mut state, &mut camera, "superpose", &args).unwrap();
     assert!((camera.center() - Vector4::new3(2., 4., 0.)).length() < 1e-6);
+    camera.set_center(Vector4::new3(-100., -200., -300.));
+    args["refSel"] = json!("");
+    args["movSel"] = json!("  ");
+    call_tool(&mut state, &mut camera, "superpose", &args).unwrap();
+    assert!((camera.center() - Vector4::new3(2., 4., 0.)).length() < 1e-6);
 }

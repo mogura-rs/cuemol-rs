@@ -260,6 +260,11 @@ impl App {
             self.show_interaction = true;
             return;
         }
+        if name == "superpose" {
+            self.superposition.opened(&self.state);
+            self.show_superposition = true;
+            return;
+        }
         if name == "set_secondary_structure" {
             self.secondary.opened(&self.state, self.selected);
             self.show_secondary = true;
@@ -453,6 +458,56 @@ impl App {
         if !open {
             self.molecule_edits.active = None;
         }
+    }
+
+    pub(super) fn superposition_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_superposition {
+            return;
+        }
+        if self.superposition.scene != self.state.active_scene() {
+            self.show_superposition = false;
+            self.message = "The active scene changed. Reopen Molecular superposition.".into();
+            return;
+        }
+        let mut open = true;
+        let mut action = None;
+        let window = egui::Window::new("Molecular superposition")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(550.)
+            .show(ctx, |ui| {
+                action = self
+                    .superposition
+                    .show(ui, &self.state, self.revision, false);
+            });
+        self.ui_rects.extend(self.superposition.rects.clone());
+        if let Some(window) = window {
+            self.record_ui_rect("Superpose window", &window.response);
+        }
+        match action {
+            Some(cuemol_ui::superposition::Action::Accept) => {
+                if let Some(error) = self.superposition.validation_error(&self.state) {
+                    self.superposition.error = error.into();
+                } else if self.call_shared("superpose", self.superposition.arguments()) {
+                    self.superposition.remember(&mut self.state);
+                    self.persist_selection_history();
+                    self.settings_text = self.state.config_text();
+                    if let Some(storage) =
+                        web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+                    {
+                        let _ = storage.set_item("cuemol.config", &self.settings_text);
+                    }
+                    self.selected = self.superposition.moving;
+                    self.message = "Molecular superposition applied".into();
+                    open = false;
+                } else {
+                    self.superposition.error.clone_from(&self.message);
+                }
+            }
+            Some(cuemol_ui::superposition::Action::Cancel) => open = false,
+            None => {}
+        }
+        self.show_superposition = open;
     }
 
     pub(super) fn secondary_ui(&mut self, ctx: &egui::Context) {

@@ -1571,14 +1571,7 @@ struct GuiApplication {
     animation_cleanup_confirmation: bool,
     animation_preview_frame: u32,
     animation_preview_texture: Option<AnimationPreviewTexture>,
-    superpose_reference: Option<cuemol_core::Uid>,
-    superpose_moving: Option<cuemol_core::Uid>,
-    superpose_algorithm: String,
-    superpose_reference_selection: String,
-    superpose_moving_selection: String,
-    superpose_auto_recenter: bool,
-    superpose_write_rmsd: bool,
-    superpose_use_property: bool,
+    superposition: cuemol_ui::superposition::SuperpositionDialog,
     bond_object: Option<cuemol_core::Uid>,
     bond_picker_target: Option<usize>,
     selected_nonstandard_bonds: std::collections::BTreeSet<(i32, i32)>,
@@ -4870,14 +4863,7 @@ impl GuiApplication {
             animation_cleanup_confirmation: false,
             animation_preview_frame: 0,
             animation_preview_texture: None,
-            superpose_reference: None,
-            superpose_moving: None,
-            superpose_algorithm: "lsq".to_string(),
-            superpose_reference_selection: "name CA".to_string(),
-            superpose_moving_selection: "name CA".to_string(),
-            superpose_auto_recenter: true,
-            superpose_write_rmsd: false,
-            superpose_use_property: false,
+            superposition: cuemol_ui::superposition::SuperpositionDialog::default(),
             bond_object: None,
             bond_picker_target: None,
             selected_nonstandard_bonds: std::collections::BTreeSet::new(),
@@ -5822,6 +5808,7 @@ impl GuiApplication {
                         if ui.button(label).clicked() {
                             match label {
                                 "Execute script..." => self.choose_execute_script(),
+                                "Molecular superposition..." => self.open_superposition_dialog(),
                                 "Interaction..." => self.open_interaction_dialog(),
                                 "Reassign secondary str..." => self.open_secondary_dialog(),
                                 "Mol surface generation..." => self.open_surface_generation_tool(),
@@ -17445,20 +17432,18 @@ impl GuiApplication {
         }
     }
 
+    fn open_superposition_dialog(&mut self) {
+        self.superposition.opened(&self.state);
+        self.tool_dialog = Some("Molecular superposition".into());
+    }
+
     fn apply_superpose(&mut self, camera: &mut CameraController) {
-        let Some(reference) = self.superpose_reference else {
-            self.set_status("No reference object selected");
-            return;
-        };
-        let Some(moving) = self.superpose_moving else {
-            self.set_status("No moving object selected");
-            return;
-        };
-        if reference == moving {
-            self.set_status("Reference and moving objects must differ");
+        if let Some(error) = self.superposition.validation_error(&self.state) {
+            self.superposition.error = error.into();
+            self.set_status(error);
             return;
         }
-        let rmsd_path = if self.superpose_algorithm == "lsq" && self.superpose_write_rmsd {
+        let rmsd_path = if self.superposition.algorithm == "LSQ" && self.superposition.write_rmsd {
             let Some(path) = native_file_dialog(NativeFileDialog::SaveRmsdReport, "rmsd.txt")
             else {
                 return;
@@ -17467,40 +17452,52 @@ impl GuiApplication {
         } else {
             None
         };
-        let undo = self.capture_undo();
-        match self.state.superpose_objects_with_algorithm(
-            reference,
-            &self.superpose_reference_selection,
-            moving,
-            &self.superpose_moving_selection,
-            &self.superpose_algorithm,
-            self.superpose_use_property,
-        ) {
-            Ok(matrix) => {
+        let args = self.superposition.arguments();
+        let mut undo = self.capture_undo();
+        undo.record =
+            cuemol_command::console::actions::Record::operation(&self.state, "superpose", &args);
+        let mut view = camera.to_qsys_camera("__current");
+        let result = cuemol_command::call_tool(&mut self.state, &mut view, "superpose", &args)
+            .and_then(|value| {
                 if let Some(path) = rmsd_path.as_ref() {
-                    if let Err(error) = self.state.write_superposition_rmsd_report(
-                        reference,
-                        &self.superpose_reference_selection,
-                        moving,
-                        &self.superpose_moving_selection,
+                    self.state.write_superposition_rmsd_report(
+                        self.superposition.reference.unwrap(),
+                        &self.superposition.reference_selection,
+                        self.superposition.moving.unwrap(),
+                        &self.superposition.moving_selection,
                         path,
-                    ) {
-                        self.state.restore_snapshot(undo.state);
-                        self.set_error(error);
-                        return;
-                    }
+                    )?;
                 }
-                self.push_undo_snapshot(undo);
-                self.selected_object = Some(moving);
+                Ok(value)
+            });
+        match result {
+            Ok(value) => {
+                if !undo.state.same_scene_undo_state(&self.state) {
+                    self.push_undo_snapshot(undo);
+                }
+                self.superposition.remember(&mut self.state);
+                self.selection_history = self.state.selection_history();
+                if let Err(error) = self.persist_config_state() {
+                    self.log_lines.push(error);
+                }
+                self.selected_object = self.superposition.moving;
                 self.workspace_aux_selection = None;
                 self.rebuild_snapshot();
-                if self.superpose_auto_recenter {
-                    camera.fit_snapshot(&self.snapshot);
-                }
-                self.log_lines.push(format!("Superpose matrix: {matrix}"));
+                camera.apply_qsys_camera(&view);
+                let _ = self.state.set_active_view_camera(&view);
+                self.log_lines
+                    .push(format!("Superpose matrix: {}", value["matrix"]));
+                self.tool_dialog = None;
+                self.superposition.error.clear();
                 self.set_status("Molecular superposition applied");
             }
-            Err(error) => self.set_error(error),
+            Err(error) => {
+                if !undo.state.same_undo_state(&self.state) {
+                    self.restore_gui_undo_state(undo);
+                }
+                self.superposition.error = error.to_string();
+                self.set_status(format!("Error: {error}"));
+            }
         }
     }
 
@@ -24325,6 +24322,10 @@ impl GuiApplication {
         if title == "Native rendering" {
             return;
         }
+        if title == "Molecular superposition" {
+            self.superposition_dialog(ctx, camera);
+            return;
+        }
         if title == "Interaction" {
             self.interaction_dialog(ctx);
             return;
@@ -24340,7 +24341,6 @@ impl GuiApplication {
             .collapsible(false)
             .show(ctx, |ui| {
                 match title.as_str() {
-                    "Molecular superposition" => self.superpose_tool_ui(ui, camera),
                     "Mol bond editor" => self.bond_editor_tool_ui(ui),
                     "Mol morphing animation" => self.morph_tool_ui(ui),
                     "MolClient tools" => self.mol_client_tool_ui(ui),
@@ -24383,86 +24383,30 @@ impl GuiApplication {
         }
     }
 
-    fn superpose_tool_ui(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
-        let objects = self.state.active_object_summaries();
-        if objects.len() < 2 {
-            ui.label("At least two objects are required.");
+    fn superposition_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        if self.superposition.scene != self.state.active_scene() {
+            self.tool_dialog = None;
+            self.set_status("The active scene changed. Reopen Molecular superposition.");
             return;
         }
-        if self
-            .superpose_reference
-            .is_none_or(|uid| !objects.iter().any(|object| object.uid == uid))
-        {
-            self.superpose_reference = Some(objects[0].uid);
+        let mut open = true;
+        let mut action = None;
+        egui::Window::new("Molecular superposition")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(550.)
+            .show(ctx, |ui| {
+                action = self
+                    .superposition
+                    .show(ui, &self.state, self.snapshot_revision, true);
+            });
+        match action {
+            Some(cuemol_ui::superposition::Action::Accept) => self.apply_superpose(camera),
+            Some(cuemol_ui::superposition::Action::Cancel) => open = false,
+            None => {}
         }
-        if self
-            .superpose_moving
-            .is_none_or(|uid| !objects.iter().any(|object| object.uid == uid))
-        {
-            self.superpose_moving = Some(objects[1].uid);
-        }
-        egui::ComboBox::from_label("Algorithm")
-            .selected_text(match self.superpose_algorithm.as_str() {
-                "ssm" => "Secondary Structure Matching",
-                "usalign" => "USalign",
-                _ => "Least Square Fitting",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut self.superpose_algorithm,
-                    "lsq".to_string(),
-                    "Least Square Fitting",
-                );
-                ui.selectable_value(
-                    &mut self.superpose_algorithm,
-                    "ssm".to_string(),
-                    "Secondary Structure Matching",
-                );
-                ui.selectable_value(
-                    &mut self.superpose_algorithm,
-                    "usalign".to_string(),
-                    "USalign",
-                );
-            });
-        egui::ComboBox::from_label("Reference molecule")
-            .selected_text(object_combo_label(&objects, self.superpose_reference))
-            .show_ui(ui, |ui| {
-                for object in &objects {
-                    ui.selectable_value(
-                        &mut self.superpose_reference,
-                        Some(object.uid),
-                        object.name.as_str(),
-                    );
-                }
-            });
-        egui::ComboBox::from_label("Moving molecule")
-            .selected_text(object_combo_label(&objects, self.superpose_moving))
-            .show_ui(ui, |ui| {
-                for object in &objects {
-                    ui.selectable_value(
-                        &mut self.superpose_moving,
-                        Some(object.uid),
-                        object.name.as_str(),
-                    );
-                }
-            });
-        ui.add_sized(
-            [ui.available_width(), 22.0],
-            egui::TextEdit::singleline(&mut self.superpose_reference_selection)
-                .hint_text("reference selection"),
-        );
-        ui.add_sized(
-            [ui.available_width(), 22.0],
-            egui::TextEdit::singleline(&mut self.superpose_moving_selection)
-                .hint_text("moving selection"),
-        );
-        ui.checkbox(&mut self.superpose_auto_recenter, "Auto recenter");
-        ui.add_enabled_ui(self.superpose_algorithm == "lsq", |ui| {
-            ui.checkbox(&mut self.superpose_write_rmsd, "Write RMSD info file");
-        });
-        ui.checkbox(&mut self.superpose_use_property, "Use xformMat property");
-        if ui.button("Superpose").clicked() {
-            self.apply_superpose(camera);
+        if !open {
+            self.tool_dialog = None;
         }
     }
 
@@ -38921,6 +38865,108 @@ mod tests {
             app.state.nonstandard_bond_summaries(object_uid).unwrap(),
             before
         );
+    }
+
+    #[test]
+    fn native_superposition_preserves_failures_history_and_selected_framing() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = GuiApplication::new();
+        app.config_path = directory
+            .path()
+            .join("config.tsv")
+            .to_string_lossy()
+            .into_owned();
+        let mut camera = CameraController::default();
+        let atom = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n",
+        )
+        .unwrap()
+        .atoms()[0]
+            .clone();
+        let scene = app.state.active_scene().unwrap();
+        for offset in [0., 20.] {
+            let mut mol = cuemol_molstr::MolCoord::new();
+            for i in 0..9 {
+                let mut atom = atom.clone();
+                atom.serial = i + 1;
+                atom.res_id = i + 1;
+                let t = if i == 8 { 1000. } else { f64::from(i) };
+                atom.position = Vector4::new3(t + offset, t.sin(), t.cos());
+                mol.push_atom(atom);
+            }
+            app.state
+                .scene_manager_mut()
+                .scene_mut(scene)
+                .unwrap()
+                .add_molecule(&format!("mol{offset}"), mol);
+        }
+        app.rebuild_snapshot();
+        app.open_superposition_dialog();
+        assert_eq!(app.superposition.algorithm, "USalign");
+        let reference = app.superposition.reference.unwrap();
+        let moving = app.superposition.moving.unwrap();
+        let before = app.state.clone();
+        app.superposition.reference_selection = "invalid (((".into();
+        app.apply_superpose(&mut camera);
+        assert!(before.same_scene_undo_state(&app.state));
+        assert!(app.undo_stack.is_empty());
+        assert!(app.error_alert.is_none());
+        assert!(!app.superposition.error.is_empty());
+        assert!(app.tool_dialog.is_some());
+        app.superposition.reference_selection = "resi 1:8".into();
+        app.superposition.moving_selection = "resi 1:8".into();
+        app.superposition.pivot = "CA".into();
+        app.superposition.use_property = true;
+        app.apply_superpose(&mut camera);
+        assert!(app.tool_dialog.is_none(), "{}", app.superposition.error);
+        assert_eq!(app.undo_stack.len(), 1);
+        assert!((camera.target.x - 3.5).abs() < 1e-4, "{:?}", camera.target);
+        assert!(camera.to_qsys_camera("check").zoom() < 100.);
+        let stored = app
+            .state
+            .config_value(cuemol_ui::superposition::HISTORY_KEY);
+        assert!(stored.contains("CA"));
+        let transformed = app
+            .state
+            .scene_manager()
+            .object(moving)
+            .unwrap()
+            .xform_matrix();
+        assert!((transformed.get_at(1, 4).unwrap() + 20.).abs() < 1e-5);
+        assert!(app.selection_history.iter().any(|s| s == "resi 1:8"));
+        app.undo(&mut camera);
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(moving)
+                .unwrap()
+                .xform_matrix(),
+            cuemol_core::Matrix4::IDENTITY
+        );
+        assert_eq!(
+            app.state
+                .config_value(cuemol_ui::superposition::HISTORY_KEY),
+            stored
+        );
+        app.redo(&mut camera);
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(moving)
+                .unwrap()
+                .xform_matrix(),
+            transformed
+        );
+        app.open_superposition_dialog();
+        assert_eq!(app.superposition.reference, Some(reference));
+        assert_eq!(app.superposition.moving, Some(moving));
+        assert_eq!(app.superposition.pivot, "CA");
+        assert!(app.superposition.reference_selection.is_empty());
+        assert!(app.superposition.moving_selection.is_empty());
+        app.superposition.scene = None;
+        app.apply_superpose(&mut camera);
+        assert!(app.superposition.error.contains("active scene changed"));
+        assert_eq!(app.undo_stack.len(), 1);
     }
 
     #[test]

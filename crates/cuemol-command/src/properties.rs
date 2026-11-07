@@ -301,15 +301,20 @@ pub fn call_tool(
                 )?;
             }
             if args["recenter"] == true {
-                crate::view_commands::focus_selection(
+                let selection = args["movSel"].as_str().unwrap_or(if algorithm == "LSQ" {
+                    "name CA"
+                } else {
+                    "*"
+                });
+                let _ = crate::view_commands::focus_selection(
                     state,
                     camera,
                     &json!({
                         "objId":args["movId"],
-                        "selection":args["movSel"].as_str().unwrap_or(if algorithm == "LSQ" { "name CA" } else { "*" }),
+                        "selection": if selection.trim().is_empty() { "*" } else { selection },
                     }),
                     false,
-                )?;
+                );
             }
             Ok(
                 json!({"matrix":result.matrix.to_script_string(),"algorithm":algorithm,"rmsd":result.rmsd,"alignedCount":result.aligned_count,"tmReference":result.tm_reference,"transformed":transform}),
