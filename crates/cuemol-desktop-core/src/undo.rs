@@ -492,6 +492,54 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "scripting")]
+    fn scene_style_undo_removes_later_materialized_script_cache_and_preserves_other_edits() {
+        fn style_id(state: &mut DesktopAppState, name: &str, scope: u64) -> u64 {
+            state
+                .run_script_js(&format!(
+                    "print(cuemol.getService('StyleManager').hasStyleSet('{name}',{scope}));"
+                ))
+                .unwrap()
+                .0
+                .trim()
+                .parse()
+                .unwrap()
+        }
+        let mut state = DesktopAppState::new();
+        let scene = state.new_scene("Scene", true).result_scene;
+        let before = state.clone();
+        state.create_scene_style(scene, "local-palette").unwrap();
+        state.mark_scene_modified(scene);
+        let changes = ChangeSet::between(&before, &state);
+        state.create_scene_style(scene, "later-local").unwrap();
+        state
+            .run_script_js("cuemol.getService('StyleManager').createStyleSet('later-global',0);")
+            .unwrap();
+        let local = style_id(&mut state, "later-local", scene.get());
+        let global = style_id(&mut state, "later-global", 0);
+        assert!(local > 0 && global > 0);
+        changes.apply(&mut state, Direction::Undo);
+        assert_eq!(style_id(&mut state, "local-palette", scene.get()), 0);
+        assert_eq!(style_id(&mut state, "later-local", scene.get()), local);
+        assert_eq!(style_id(&mut state, "later-global", 0), global);
+        changes.apply(&mut state, Direction::Redo);
+        assert!(style_id(&mut state, "local-palette", scene.get()) > 0);
+        assert_eq!(style_id(&mut state, "later-local", scene.get()), local);
+        assert_eq!(style_id(&mut state, "later-global", 0), global);
+        let before = state.clone();
+        state.destroy_scene(scene);
+        let deletion = ChangeSet::between(&before, &state);
+        deletion.apply(&mut state, Direction::Undo);
+        assert!(style_id(&mut state, "local-palette", scene.get()) > 0);
+        assert_eq!(style_id(&mut state, "later-local", scene.get()), local);
+        assert_eq!(style_id(&mut state, "later-global", 0), global);
+        deletion.apply(&mut state, Direction::Redo);
+        assert_eq!(style_id(&mut state, "local-palette", scene.get()), 0);
+        assert_eq!(style_id(&mut state, "later-local", scene.get()), 0);
+        assert_eq!(style_id(&mut state, "later-global", 0), global);
+    }
+
+    #[test]
     fn multi_scene_edits_remain_atomic_and_skip_later_unrecorded_scene_deletions() {
         let mut state = DesktopAppState::new();
         let first = state.new_scene("First", true).result_scene;

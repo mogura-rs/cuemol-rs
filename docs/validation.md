@@ -36,9 +36,19 @@ which excludes internal unit-cell renderers. The command now accepts the map's
 supported internal types while the dialog keeps its reference choices. The
 failure was reproduced in a command test; all 18 map-loading and renderer-option
 checks pass after the fix. All 21 browser Rendering and Density interaction
-checks pass against a fresh optimized WASM bundle. The complete 355-test browser
-run is still in progress; its terminal result will be recorded before this change
-is closed. The current macOS Tauri binary also builds.
+checks pass against a fresh optimized WASM bundle. The complete browser run finished with 351 passes and four failures in
+40.7 minutes. Two were the Density Cell cases above. The other two exposed a
+scene-style Undo regression: a later script call materialized a loaded style in
+the runtime cache, and Undo removed its scene definition without removing that
+cache entry. Rebuilding changed scene styles before updating their bindings now
+removes the stale entry while preserving later local and global styles. A sixth
+shared regression reproduces this sequence and checks scene deletion/restoration.
+The reference-backed core suite passes all 327 checks; all 232 native and 203
+Tauri model checks pass again. A freshly rebuilt WASM bundle passes all ten
+style-editor tests, including both failed cases. Together with the 21 Rendering
+and Density reruns, these resolve all four failures from the complete run; the
+entire 355-case suite was not repeated after the two fixes. The current macOS
+Tauri binary built before the cache fix.
 
 ## Restore still-image history after movie mode
 

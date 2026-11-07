@@ -50354,6 +50354,9 @@ impl DesktopAppState {
         apply_map_changes(&mut self.trajectories, &from.trajectories, &to.trajectories);
         self.script_styles
             .apply_scope_undo_changes(scene_uid.get(), &from.styles, &to.styles);
+        if from.scene.loaded_styles() != to.scene.loaded_styles() {
+            self.script_styles = self.build_script_styles();
+        }
         self.remember_script_style_bindings();
     }
 
