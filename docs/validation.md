@@ -1,9 +1,42 @@
 # Validation evidence
 
+## Intel macOS distribution through Rosetta
+
+The clean application revision `f7f5829` now also builds for
+`x86_64-apple-darwin`. The optimized cross-build on Apple silicon completed in
+5 min 38 s with the same embedded browser manifest as the Linux and ARM macOS
+artifacts. The executable is a single-architecture x86-64 Mach-O file; its build
+metadata reports `gui`, `bundled-web` and `scripting` with clean native/browser
+sources. No application-source change was needed.
+
+The CLI archive and macOS app bundle use the earlier verified Intel tool bundle;
+its tool-build inputs are unchanged. The packaged app passed Python/helper,
+Umbreon, APBS, POV-Ray, OIDN, PDB2PQR and FFmpeg checks under Rosetta without
+source-tree or tool-directory overrides. Installer/self-upgrade fixtures ran
+from an x86-64 shell and passed checksum rejection, failed replacement rollback,
+and CLI/app replacement. All 45 embedded browser assets also passed both
+identity and gzip transfer checks from an empty working directory.
+
+On the authorized Apple-silicon host, the actual Intel app opened and hid
+Rendering, ran an external renderer and exited through its AppKit Quit menu.
+The application exited with status zero, stopped its child, removed staging
+output and retained the previous image. Its result explicitly records Rosetta
+execution. This is not an Intel-hardware or physical mouse/keyboard check;
+screen-capture and accessibility permission probes still return false.
+
+Both Intel archives are included in the six-file validation manifest and
+checksums under `.cache/distribution-f7f5829`. Native binary hashes match between
+the Intel CLI and app, and all three native targets embed the same browser
+manifest. Windows and ARM Linux remain absent from this current artifact set.
+The complete-matrix release gate and publication state remain unchanged.
+Evidence is in `.cache/current-audit/*f7f5829*intel*`,
+`.cache/current-audit/intel-embedded-f7f5829.json` and the distribution manifest.
+
 ## Current application and distribution verification
 
-The current application revision is `f7f5829`. Native Linux x86-64, native
-Apple-silicon macOS and embedded browser builds all report that clean commit.
+The current application revision is `f7f5829`. Native Linux x86-64,
+Apple-silicon macOS, Intel macOS and embedded browser builds all report that
+clean commit. Intel execution uses Rosetta as described above.
 The following test/documentation update does not change application sources.
 The read-only reference remains `794fe4ac` (3.0.0.554).
 
@@ -22,7 +55,7 @@ rebuild. Repeating the unchanged Linux build took 1.35 s. These are observations
 from separate hosts and cache states, not a cross-platform performance comparison.
 The optimized browser build completed in 45.32 s using its existing cache.
 
-Both packaged native applications passed Python/helper, Umbreon, APBS, POV-Ray,
+All three packaged native applications passed Python/helper, Umbreon, APBS, POV-Ray,
 OIDN, PDB2PQR and FFmpeg checks using their bundled tools. Installer and
 self-upgrade fixtures passed checksum rejection and failed-replacement rollback.
 Each packaged executable also served all 45 embedded assets from an empty working
@@ -53,14 +86,15 @@ the previous image. The optimized packaged macOS app also exited normally with
 its Rendering window hidden. These in-process AppKit menu probes do not establish
 physical keyboard/mouse or foreground focus behavior.
 
-Four local validation archives are staged under `.cache/distribution-f7f5829`:
-Linux x86-64 CLI, Apple-silicon CLI, Apple-silicon app and browser. Their
+Six local validation archives are staged under `.cache/distribution-f7f5829`:
+Linux x86-64 CLI, Apple-silicon CLI/app, Intel macOS CLI/app and browser. Their
 `SHA256SUMS` and `validation-manifest.json` record archive checksums, native and
-browser revisions, binary hashes and the incomplete platform matrix. The macOS
-app and CLI contain the same native binary. All native archives retain tool
+browser revisions, binary hashes and the incomplete platform matrix. Each macOS
+app matches its corresponding CLI binary. All native archives retain tool
 provenance. They are untagged version 0.1.0 validation artifacts, not a published
-release. Current Windows, ARM Linux and Intel macOS artifacts have not been built;
-the earlier five-platform evidence belongs to its recorded baseline.
+release. Current Windows and ARM Linux artifacts have not been built; Intel hardware
+execution remains unverified. The earlier five-platform evidence belongs to its
+recorded baseline.
 The production complete-matrix release check remains strict and was not bypassed.
 
 Evidence is in `.cache/current-audit/*f7f5829*` and
