@@ -14,7 +14,11 @@ pub use lighting::lighting_controls;
 #[cfg(feature = "egui")]
 mod agent;
 #[cfg(feature = "egui")]
-pub use agent::{AgentCall, AgentPanel};
+pub use agent::AgentPanel;
+#[cfg(feature = "console-runtime")]
+pub mod agent_runtime;
+#[cfg(feature = "console-runtime")]
+pub use agent_runtime::AgentCall;
 
 #[cfg(feature = "egui")]
 pub mod clipboard;

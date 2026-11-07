@@ -1,46 +1,25 @@
-use cuemol_agent::{DownloadJob, Downloaded, Event, History, Job, ModelJob, Settings, ToolReply};
+use crate::agent_runtime::{AgentCall, AgentSession, Wake};
 use cuemol_desktop_core::DesktopAppState;
 use cuemol_qsys::Camera;
 use egui::{Context, TextureHandle};
 use zeroize::Zeroize;
 
-struct Message {
-    role: String,
-    text: String,
-    image: Option<TextureHandle>,
-}
-
-pub struct AgentCall {
-    pub name: String,
-    pub arguments: serde_json::Value,
-    pub reply: ToolReply,
-    pub download: Option<Result<Downloaded, String>>,
-}
-struct PendingDownload {
-    name: String,
-    arguments: serde_json::Value,
-    reply: ToolReply,
-    job: DownloadJob,
-}
-
+#[derive(Default)]
 pub struct AgentPanel {
+    session: AgentSession,
     pub visible: bool,
     pub docked: bool,
-    pub settings: Settings,
-    pub revision: u64,
-    pub changed_scene: bool,
-    initial_camera: Camera,
-    operation_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    job: Option<Job>,
-    download: Option<PendingDownload>,
-    model_job: Option<ModelJob>,
-    models: Vec<String>,
-    history: History,
-    messages: Vec<Message>,
     draft: String,
-    key: zeroize::Zeroizing<String>,
-    status: String,
-    settings_dirty: bool,
+    prompts: Vec<String>,
+    prompt_history_dirty: bool,
+    recall_index: Option<usize>,
+    recall_draft: String,
+    composing: bool,
+    input_id: Option<egui::Id>,
+    input_rect: Option<egui::Rect>,
+    pub rects: std::collections::BTreeMap<String, [f32; 4]>,
+    pending_events: Vec<egui::Event>,
+    textures: std::collections::BTreeMap<usize, TextureHandle>,
 }
 impl std::fmt::Debug for AgentPanel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -50,65 +29,83 @@ impl std::fmt::Debug for AgentPanel {
             .finish_non_exhaustive()
     }
 }
-impl Default for AgentPanel {
-    fn default() -> Self {
-        Self {
-            visible: false,
-            docked: false,
-            settings: Settings::default(),
-            revision: 0,
-            changed_scene: false,
-            initial_camera: Camera::new(),
-            operation_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            job: None,
-            download: None,
-            model_job: None,
-            models: Vec::new(),
-            history: History::default(),
-            messages: Vec::new(),
-            draft: String::new(),
-            key: cuemol_agent::secret(String::new()),
-            status: String::new(),
-            settings_dirty: false,
-        }
+impl std::ops::Deref for AgentPanel {
+    type Target = AgentSession;
+    fn deref(&self) -> &Self::Target {
+        &self.session
     }
 }
+impl std::ops::DerefMut for AgentPanel {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.session
+    }
+}
+fn wake(ctx: &Context) -> Wake {
+    let ctx = ctx.clone();
+    std::sync::Arc::new(move || ctx.request_repaint())
+}
 impl AgentPanel {
-    pub fn set_session_key(&mut self, key: String) {
-        self.key = cuemol_agent::secret(key);
-    }
-    pub fn status(&self) -> serde_json::Value {
-        serde_json::json!({"running":self.running(),"message":self.status,"messages":self.messages.iter().map(|m|serde_json::json!({"role":m.role,"text":m.text,"image":m.image.is_some()})).collect::<Vec<_>>()})
-    }
-    pub fn initial_camera(&self) -> &Camera {
-        &self.initial_camera
-    }
-    pub fn operation_cancel(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-        self.operation_cancel.clone()
-    }
-    pub fn running(&self) -> bool {
-        self.job.is_some()
-    }
-    pub fn cancel(&mut self, reason: &str) {
-        self.operation_cancel
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.download = None;
-        if let Some(job) = self.job.take() {
-            job.cancel();
-            self.status = reason.into();
+    pub fn load_prompt_history(&mut self, source: &str) {
+        if let Ok(values) = serde_json::from_str::<Vec<String>>(source) {
+            self.prompts.clear();
+            for value in values {
+                let value = value.trim();
+                if !value.is_empty() && !self.prompts.iter().any(|stored| stored == value) {
+                    self.prompts.push(value.into());
+                    if self.prompts.len() == 50 {
+                        break;
+                    }
+                }
+            }
         }
     }
-    pub fn settings_json(&self) -> String {
-        serde_json::to_string_pretty(&self.settings).unwrap()
+    pub fn take_prompt_history_changed(&mut self) -> Option<String> {
+        std::mem::take(&mut self.prompt_history_dirty)
+            .then(|| serde_json::to_string(&self.prompts).unwrap())
     }
-    pub fn load_settings(&mut self, text: &str) {
-        if let Ok(settings) = serde_json::from_str(text) {
-            self.settings = settings;
+    fn remember_prompt(&mut self, prompt: &str) {
+        self.prompts.retain(|value| value != prompt);
+        self.prompts.insert(0, prompt.into());
+        self.prompts.truncate(50);
+        self.recall_index = None;
+        self.prompt_history_dirty = true;
+    }
+    pub fn prepare_input(&mut self, context: &Context, input: &mut egui::RawInput) {
+        self.pending_events.append(&mut input.events);
+        input.events = std::mem::take(&mut self.pending_events);
+        let focused = self
+            .input_id
+            .is_some_and(|id| context.memory(|memory| memory.has_focus(id)));
+        let clicked = self.input_rect.is_some_and(|rect|input.events.iter().any(|event|matches!(event,egui::Event::PointerButton{pos,pressed:true,..}if rect.contains(*pos))));
+        if !focused && !clicked {
+            return;
+        }
+        let mut composing = self.composing;
+        let mut committed = false;
+        let boundary = input.events.iter().position(|event| {
+            if let egui::Event::Ime(event) = event {
+                committed |= matches!(event, egui::ImeEvent::Commit(_));
+                composing = matches!(event, egui::ImeEvent::Enabled | egui::ImeEvent::Preedit(_));
+            }
+            !composing
+                && !committed
+                && matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::Enter | egui::Key::ArrowUp | egui::Key::ArrowDown,
+                        pressed: true,
+                        ..
+                    }
+                )
+        });
+        if let Some(index) = boundary {
+            self.pending_events = input.events.split_off(if index == 0 { 1 } else { index });
+        }
+        if !self.pending_events.is_empty() {
+            context.request_repaint();
         }
     }
-    pub fn take_settings_changed(&mut self) -> bool {
-        std::mem::take(&mut self.settings_dirty)
-    }
+
     pub fn start(
         &mut self,
         state: &mut DesktopAppState,
@@ -117,200 +114,11 @@ impl AgentPanel {
         ctx: &Context,
         revision: u64,
     ) {
-        if !state.plugin_enabled("agent") {
-            self.status = "Enable AI Agent in Settings > Plugins first.".into();
-            return;
-        }
-        if self.running() {
-            return;
-        }
-        let key = if !self.key.is_empty() {
-            self.key.clone()
-        } else {
-            #[cfg(not(target_arch = "wasm32"))]
-            match self
-                .settings
-                .model_spec()
-                .and_then(|(provider, _)| cuemol_agent::credentials::load(provider))
-            {
-                Ok(key) => key,
-                Err(error) => {
-                    self.status = error;
-                    return;
-                }
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                self.status = "Enter the provider API key in Agent settings.".into();
-                return;
-            }
-        };
-        if let Err(error) = self.settings.model_spec() {
-            self.status = error;
-            return;
-        }
-        if !self.settings.enabled {
-            self.status = "Enable AI Agent first.".into();
-            return;
-        }
-        let _ = state.set_active_view_camera(camera);
-        let snapshot = match cuemol_command::call_tool(
-            state,
-            camera,
-            "get_scene_state",
-            &serde_json::json!({}),
-        ) {
-            Ok(value) => value,
-            Err(e) => {
-                self.status = e.to_string();
-                return;
-            }
-        };
-        self.messages.push(Message {
-            role: "You".into(),
-            text: prompt.clone(),
-            image: None,
-        });
-        self.messages.push(Message {
-            role: "Assistant".into(),
-            text: String::new(),
-            image: None,
-        });
-        self.status = "Thinking…".into();
-        self.changed_scene = false;
-        self.initial_camera = camera.clone();
-        self.operation_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.revision = revision;
-        let ctx = ctx.clone();
-        self.job = Some(cuemol_agent::start(
-            snapshot,
-            self.settings.clone(),
-            self.history.clone(),
-            key,
-            prompt,
-            Box::new(move || ctx.request_repaint()),
-        ));
+        self.session
+            .start(state, camera, prompt, wake(ctx), revision);
     }
     pub fn poll(&mut self, ctx: &Context) -> Option<AgentCall> {
-        if let Some(result) = self.download.as_ref().and_then(|d| d.job.poll()) {
-            let pending = self.download.take().unwrap();
-            return Some(AgentCall {
-                name: pending.name,
-                arguments: pending.arguments,
-                reply: pending.reply,
-                download: Some(result),
-            });
-        }
-        while let Some(event) = self.job.as_ref().and_then(Job::poll) {
-            match event {
-                Event::Call {
-                    mut name,
-                    mut arguments,
-                    reply,
-                } => {
-                    if name == "export_image"
-                        && cuemol_command::validate_args(&name, &arguments).is_ok()
-                    {
-                        name = "render_image".into();
-                        let map = arguments.as_object_mut().unwrap();
-                        let path = map.remove("path").unwrap();
-                        map.insert("fileName".into(), path);
-                    }
-                    if matches!(
-                        name.as_str(),
-                        "fetch_pdb" | "fetch_url" | "fetch_map" | "fetch_emdb"
-                    ) {
-                        let ctx = ctx.clone();
-                        let job = DownloadJob::start(
-                            name.clone(),
-                            arguments.clone(),
-                            Box::new(move || ctx.request_repaint()),
-                        );
-                        self.download = Some(PendingDownload {
-                            name,
-                            arguments,
-                            reply,
-                            job,
-                        });
-                    } else {
-                        return Some(AgentCall {
-                            name,
-                            arguments,
-                            reply,
-                            download: None,
-                        });
-                    }
-                }
-                Event::Text(text) => {
-                    if self.messages.last().is_none_or(|m| m.role != "Assistant") {
-                        self.messages.push(Message {
-                            role: "Assistant".into(),
-                            text: String::new(),
-                            image: None,
-                        });
-                    }
-                    self.messages.last_mut().unwrap().text.push_str(&text);
-                    self.status = "Writing…".into();
-                }
-                Event::ToolStarted { name, arguments } => {
-                    self.status = format!("Running {name}…");
-                    self.messages.push(Message {
-                        role: "Tool".into(),
-                        text: format!("{name} {arguments}"),
-                        image: None,
-                    });
-                }
-                Event::ToolResult {
-                    name,
-                    summary,
-                    image,
-                    ok,
-                } => {
-                    let texture = image.and_then(|data| {
-                        use base64::Engine;
-                        let bytes = base64::engine::general_purpose::STANDARD
-                            .decode(data)
-                            .ok()?;
-                        let rgba = image::load_from_memory(&bytes).ok()?.into_rgba8();
-                        Some(ctx.load_texture(
-                            format!("agent-image-{}", self.messages.len()),
-                            egui::ColorImage::from_rgba_unmultiplied(
-                                [rgba.width() as usize, rgba.height() as usize],
-                                &rgba,
-                            ),
-                            Default::default(),
-                        ))
-                    });
-                    self.messages.push(Message {
-                        role: if ok { "Result" } else { "Error" }.into(),
-                        text: format!("{name}: {summary}"),
-                        image: texture,
-                    });
-                    self.status = "Thinking…".into();
-                }
-                Event::Finished(result) => {
-                    self.job = None;
-                    match result {
-                        Ok(outcome) => {
-                            self.history = outcome.history;
-                            self.status = format!(
-                                "{} tool calls · {} input / {} output tokens{}",
-                                outcome.tool_calls,
-                                outcome.usage.input,
-                                outcome.usage.output,
-                                if outcome.round_limit {
-                                    " · Round limit reached; send another message to continue."
-                                } else {
-                                    ""
-                                }
-                            );
-                        }
-                        Err(error) => self.status = error,
-                    }
-                }
-            }
-        }
-        None
+        self.session.poll(wake(ctx))
     }
     pub fn show(&mut self, ctx: &Context) -> Option<String> {
         if !self.visible || self.docked {
@@ -326,17 +134,9 @@ impl AgentPanel {
         prompt
     }
     pub fn show_docked(&mut self, ui: &mut egui::Ui) -> Option<String> {
+        self.rects.clear();
         let ctx = ui.ctx().clone();
-        if let Some(result) = self.model_job.as_ref().and_then(ModelJob::poll) {
-            self.model_job = None;
-            match result {
-                Ok(models) => {
-                    self.status = format!("{} models available", models.len());
-                    self.models = models;
-                }
-                Err(error) => self.status = error,
-            }
-        }
+        self.session.poll_models();
         let before = self.settings_json();
         let previous_provider = self
             .settings
@@ -344,7 +144,6 @@ impl AgentPanel {
             .ok()
             .map(|(provider, _)| provider);
         ui.collapsing("Agent settings", |ui| {
-            ui.checkbox(&mut self.settings.enabled, "Enable AI Agent");
             ui.label(
                 "Messages and scene data are sent to the selected provider when you press Send.",
             );
@@ -358,38 +157,20 @@ impl AgentPanel {
                     )
                     .clicked()
                 {
-                    let key = if !self.key.is_empty() {
-                        Ok(self.key.clone())
-                    } else {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            self.settings
-                                .model_spec()
-                                .and_then(|(p, _)| cuemol_agent::credentials::load(p))
-                        }
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            Err("Enter the provider API key first.".to_string())
-                        }
-                    };
-                    match key {
-                        Ok(key) => {
-                            let ctx = ctx.clone();
-                            self.model_job = Some(ModelJob::start(
-                                self.settings.clone(),
-                                key,
-                                Box::new(move || ctx.request_repaint()),
-                            ));
-                        }
-                        Err(error) => self.status = error,
+                    if let Err(error) = self.session.refresh_models(wake(&ctx)) {
+                        self.session.status = error;
                     }
                 }
                 if !self.models.is_empty() {
                     egui::ComboBox::from_label("Available models")
                         .selected_text(&self.settings.model)
                         .show_ui(ui, |ui| {
-                            for model in &self.models {
-                                ui.selectable_value(&mut self.settings.model, model.clone(), model);
+                            for model in &self.session.models {
+                                ui.selectable_value(
+                                    &mut self.session.settings.model,
+                                    model.clone(),
+                                    model,
+                                );
                             }
                         });
                 }
@@ -409,25 +190,14 @@ impl AgentPanel {
                 #[cfg(not(target_arch = "wasm32"))]
                 ui.horizontal(|ui| {
                     if ui.button("Save in OS keychain").clicked() {
-                        match self
-                            .settings
-                            .model_spec()
-                            .and_then(|(p, _)| cuemol_agent::credentials::save(p, &self.key))
-                        {
-                            Ok(()) => {
-                                self.key.zeroize();
-                                self.status = "API key saved in the OS keychain.".into();
-                            }
-                            Err(error) => self.status = error,
+                        if let Err(error) = self.session.save_key() {
+                            self.session.status = error;
                         }
                     }
                     if ui.button("Delete stored key").clicked() {
-                        self.status = self
-                            .settings
-                            .model_spec()
-                            .and_then(|(p, _)| cuemol_agent::credentials::delete(p))
-                            .map(|()| "Stored key deleted.".into())
-                            .unwrap_or_else(|e| e);
+                        if let Err(error) = self.session.delete_key() {
+                            self.session.status = error;
+                        }
                     }
                 });
                 #[cfg(target_arch = "wasm32")]
@@ -438,33 +208,161 @@ impl AgentPanel {
             });
         });
         ui.separator();
+        let footer_height = 5. * ui.text_style_height(&egui::TextStyle::Body)
+            + 2. * ui.spacing().interact_size.y
+            + 7. * ui.spacing().item_spacing.y;
         egui::ScrollArea::vertical()
-            .max_height(330.)
+            .auto_shrink([false, false])
+            .min_scrolled_height(0.)
+            .max_height((ui.available_height() - footer_height).max(60.))
             .stick_to_bottom(true)
             .show(ui, |ui| {
-                for message in &self.messages {
-                    ui.strong(&message.role);
-                    ui.add(egui::Label::new(&message.text).wrap().selectable(true));
-                    if let Some(image) = &message.image {
-                        ui.add(
-                            egui::Image::new((image.id(), image.size_vec2()))
-                                .max_size(egui::vec2(360., 270.)),
-                        );
+                if self.session.messages.is_empty() {
+                    ui.weak("Describe what you want to see. For example: load 1CRN and show it as a cartoon.");
+                }
+                for (index, message) in self.session.transcript() {
+                    if let Some(tool) = message.tool {
+                        let status = tool.result.map_or("running...",|(_,ok)|if ok {"ok"} else {"failed"});
+                        egui::CollapsingHeader::new(format!("{} · {status}",tool.name)).id_salt(("agent-tool",index)).show(ui,|ui| {
+                            ui.strong("Input");
+                            ui.add(egui::Label::new(tool.input).wrap().selectable(true));
+                            if let Some((result,_)) = tool.result {
+                                ui.strong("Result");
+                                ui.add(egui::Label::new(result).wrap().selectable(true));
+                            }
+                        });
+                    } else {
+                        ui.strong(message.role);
+                        ui.add(egui::Label::new(message.text).wrap().selectable(true));
+                    }
+                    if let Some(data) = message.image {
+                        if let std::collections::btree_map::Entry::Vacant(entry) =
+                            self.textures.entry(index)
+                        {
+                            use base64::Engine;
+                            if let Some(rgba) = base64::engine::general_purpose::STANDARD
+                                .decode(data)
+                                .ok()
+                                .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                                .map(|image| image.into_rgba8())
+                            {
+                                entry.insert(ctx.load_texture(
+                                    format!("agent-image-{index}"),
+                                    egui::ColorImage::from_rgba_unmultiplied(
+                                        [rgba.width() as usize, rgba.height() as usize],
+                                        &rgba,
+                                    ),
+                                    Default::default(),
+                                ));
+                            }
+                        }
+                        if let Some(image) = self.textures.get(&index) {
+                            ui.add(
+                                egui::Image::new((image.id(), image.size_vec2()))
+                                    .max_size(egui::vec2(360., 270.)),
+                            );
+                        }
                     }
                 }
             });
         let composer_id = ui.make_persistent_id("agent-composer");
-        let enter = self.settings.enter_sends
-            && ui.memory(|m| m.has_focus(composer_id))
-            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
-        let response = ui.add(
+        self.input_id = Some(composer_id);
+        let focused = ui.memory(|memory| memory.has_focus(composer_id));
+        let mut committed = false;
+        ui.input(|input| {
+            for event in &input.events {
+                if let egui::Event::Ime(event) = event {
+                    committed |= matches!(event, egui::ImeEvent::Commit(_));
+                    self.composing =
+                        matches!(event, egui::ImeEvent::Enabled | egui::ImeEvent::Preedit(_));
+                }
+            }
+        });
+        let mut send = false;
+        let mut recalled = false;
+        if focused && !self.running() && !self.composing && !committed {
+            let range = egui::TextEdit::load_state(ui.ctx(), composer_id)
+                .and_then(|state| state.cursor.char_range());
+            let cursor = range.map_or(self.draft.chars().count(), |range| range.primary.index);
+            let before: String = self.draft.chars().take(cursor).collect();
+            let after: String = self.draft.chars().skip(cursor).collect();
+            if range.is_none_or(|range| range.is_empty()) {
+                for (key, backward, edge) in [
+                    (egui::Key::ArrowUp, true, !before.contains('\n')),
+                    (egui::Key::ArrowDown, false, !after.contains('\n')),
+                ] {
+                    let available = if backward {
+                        self.recall_index.map_or(!self.prompts.is_empty(), |index| {
+                            index + 1 < self.prompts.len()
+                        })
+                    } else {
+                        self.recall_index.is_some()
+                    };
+                    if edge
+                        && available
+                        && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key))
+                    {
+                        if backward {
+                            if self.recall_index.is_none() {
+                                self.recall_draft = self.draft.clone();
+                            }
+                            self.recall_index =
+                                Some(self.recall_index.map_or(0, |index| index + 1));
+                        } else {
+                            self.recall_index =
+                                self.recall_index.and_then(|index| index.checked_sub(1));
+                        }
+                        self.draft = self.recall_index.map_or_else(
+                            || self.recall_draft.clone(),
+                            |index| self.prompts[index].clone(),
+                        );
+                        recalled = true;
+                    }
+                }
+            }
+            if recalled {
+                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), composer_id) {
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::one(
+                            egui::text::CCursor::new(self.draft.chars().count()),
+                        )));
+                    state.store(ui.ctx(), composer_id);
+                }
+            }
+            let enter_sends = self.settings.enter_sends;
+            send = ui.input_mut(|input| {
+                let before = input.events.len();
+                input.events.retain(|event| !matches!(event,egui::Event::Key{key:egui::Key::Enter,pressed:true,modifiers,..}if !modifiers.shift && !modifiers.alt && if enter_sends { *modifiers == egui::Modifiers::NONE } else {modifiers.command || modifiers.ctrl}));
+                input.events.len() != before
+            });
+        }
+        let draft_before_input = self.draft.clone();
+        let response = ui.add_enabled(
+            !self.running(),
             egui::TextEdit::multiline(&mut self.draft)
                 .id(composer_id)
-                .hint_text("Describe the scene change…")
+                .lock_focus(true)
+                .hint_text("Ask for what you want to see. Up arrow for earlier prompts")
                 .desired_rows(3)
                 .desired_width(f32::INFINITY),
         );
-        let mut send = enter && response.has_focus();
+        self.input_rect = Some(response.rect);
+        let rect = response.interact_rect;
+        self.rects.insert(
+            "Agent prompt".into(),
+            [rect.min.x, rect.min.y, rect.width(), rect.height()],
+        );
+        if self.draft != draft_before_input {
+            self.recall_index = None;
+        }
+        ui.small(if self.settings.enter_sends {
+            "Enter to send; Shift+Enter for a new line"
+        } else if ui.ctx().os() == egui::os::OperatingSystem::Mac {
+            "Cmd+Enter to send"
+        } else {
+            "Ctrl+Enter to send"
+        });
         ui.horizontal(|ui| {
             send |= ui
                 .add_enabled(
@@ -473,18 +371,17 @@ impl AgentPanel {
                 )
                 .clicked();
             if ui
-                .add_enabled(self.running(), egui::Button::new("Cancel"))
+                .add_enabled(self.running(), egui::Button::new("Stop"))
                 .clicked()
             {
                 self.cancel("Cancelled; completed edits are kept.");
             }
             if ui
-                .add_enabled(!self.running(), egui::Button::new("New conversation"))
+                .add_enabled(!self.running(), egui::Button::new("Clear chat"))
                 .clicked()
             {
-                self.history = History::default();
-                self.messages.clear();
-                self.status.clear();
+                let _ = self.session.new_conversation();
+                self.textures.clear();
             }
         });
         ui.label(&self.status);
@@ -503,7 +400,141 @@ impl AgentPanel {
         if !self.settings.enabled && self.running() {
             self.cancel("AI Agent disabled.");
         }
-        (send && !self.running() && self.settings.enabled && !self.draft.trim().is_empty())
-            .then(|| std::mem::take(&mut self.draft))
+        if send && !self.running() && self.settings.enabled && !self.draft.trim().is_empty() {
+            let prompt = std::mem::take(&mut self.draft).trim().to_string();
+            self.remember_prompt(&prompt);
+            Some(prompt)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn frame(panel: &mut AgentPanel, ctx: &Context, events: Vec<egui::Event>) -> Option<String> {
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(480., 800.),
+            )),
+            events,
+            ..Default::default()
+        };
+        panel.prepare_input(ctx, &mut input);
+        let mut prompt = None;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                prompt = panel.show_docked(ui);
+            });
+        });
+        prompt
+    }
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+    #[test]
+    fn composer_recalls_prompts_and_preserves_drafts_and_multiline_caret() {
+        let mut panel = AgentPanel::default();
+        panel.settings.enabled = true;
+        panel.load_prompt_history(r#"["recent","older","recent","  "]"#);
+        assert_eq!(panel.prompts, ["recent", "older"]);
+        panel.draft = "draft".into();
+        let ctx = Context::default();
+        frame(&mut panel, &ctx, vec![]);
+        ctx.memory_mut(|memory| memory.request_focus(panel.input_id.unwrap()));
+        frame(&mut panel, &ctx, vec![]);
+        for (key_, expected) in [
+            (egui::Key::ArrowUp, "recent"),
+            (egui::Key::ArrowUp, "older"),
+            (egui::Key::ArrowDown, "recent"),
+            (egui::Key::ArrowDown, "draft"),
+        ] {
+            frame(&mut panel, &ctx, vec![key(key_, egui::Modifiers::NONE)]);
+            assert_eq!(
+                panel.draft,
+                expected,
+                "index={:?} focus={} cursor={:?}",
+                panel.recall_index,
+                ctx.memory(|memory| memory.has_focus(panel.input_id.unwrap())),
+                egui::TextEdit::load_state(&ctx, panel.input_id.unwrap())
+                    .unwrap()
+                    .cursor
+                    .char_range()
+            );
+        }
+        panel.draft = "first\nsecond".into();
+        let id = panel.input_id.unwrap();
+        let mut state = egui::TextEdit::load_state(&ctx, id).unwrap();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(panel.draft.chars().count()),
+            )));
+        state.store(&ctx, id);
+        frame(
+            &mut panel,
+            &ctx,
+            vec![key(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+        );
+        assert_eq!(panel.draft, "first\nsecond");
+    }
+    #[test]
+    fn composer_queues_input_before_send_and_ignores_ime_confirmation() {
+        let mut panel = AgentPanel::default();
+        panel.settings.enabled = true;
+        let ctx = Context::default();
+        frame(&mut panel, &ctx, vec![]);
+        ctx.memory_mut(|memory| memory.request_focus(panel.input_id.unwrap()));
+        frame(&mut panel, &ctx, vec![]);
+        assert!(frame(
+            &mut panel,
+            &ctx,
+            vec![
+                egui::Event::Text("first prompt".into()),
+                key(egui::Key::Enter, egui::Modifiers::CTRL)
+            ]
+        )
+        .is_none());
+        assert_eq!(
+            frame(&mut panel, &ctx, vec![]).as_deref(),
+            Some("first prompt")
+        );
+        panel.settings.enter_sends = true;
+        assert!(frame(
+            &mut panel,
+            &ctx,
+            vec![
+                egui::Event::Ime(egui::ImeEvent::Enabled),
+                egui::Event::Ime(egui::ImeEvent::Preedit("input".into())),
+                key(egui::Key::Enter, egui::Modifiers::NONE)
+            ]
+        )
+        .is_none());
+        assert!(frame(
+            &mut panel,
+            &ctx,
+            vec![
+                egui::Event::Ime(egui::ImeEvent::Commit("converted".into())),
+                key(egui::Key::Enter, egui::Modifiers::NONE)
+            ]
+        )
+        .is_none());
+        assert_eq!(panel.prompts, ["first prompt"]);
+        for index in 0..60 {
+            panel.remember_prompt(&format!("prompt {index}"));
+        }
+        panel.remember_prompt("prompt 59");
+        assert_eq!(panel.prompts.len(), 50);
+        assert_eq!(panel.prompts[0], "prompt 59");
+        assert!(panel.take_prompt_history_changed().is_some());
+        assert!(panel.take_prompt_history_changed().is_none());
     }
 }

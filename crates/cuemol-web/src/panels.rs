@@ -159,6 +159,13 @@ impl App {
                 self.revision,
             );
         }
+        if let Some(history) = self.agent.take_prompt_history_changed() {
+            if let Some(storage) =
+                web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+            {
+                let _ = storage.set_item("cuemol.agent.promptHistory", &history);
+            }
+        }
         if self.agent.take_settings_changed() {
             if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten())
             {

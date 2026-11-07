@@ -648,17 +648,28 @@ include files, native runtime libraries, licenses and pinned source archive.
 
 ## AI Agent
 
-Enable **AI Agent** under **Options > Plugins** in the native application or
+Enable **AI Agent** under **Options > Plugins** in either native frontend or
 **Settings > Plugins** in the browser. Then open **Tools > AI Agent** or the
 **AI Agent** sidebar, choose `openai:model`, `anthropic:model`, or `google:model`,
 and enter that provider's API key. The model field accepts arbitrary model IDs;
 **Refresh available models** queries the provider's catalog. Settings are saved
-in `agent.json` beside the other configuration files. Native keys can be stored
+in `agent.json` beside the TSV configuration file in native egui and Tauri;
+the browser uses local storage. Native keys can be stored
 in the OS credential store, with `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
 `GEMINI_API_KEY` as a fallback. Browser keys remain in the current tab's memory.
 On Linux, saved keys require a running Secret Service, such as GNOME Keyring,
 in the desktop session. Environment variables or `--api-key-stdin` remain
 available when that service is absent.
+
+Use Ctrl+Enter to send, or Cmd+Enter on macOS. The **Enter sends** preference
+uses Enter to send and Shift+Enter for a new line. IME conversion keys do not
+submit a message. Up and Down recall earlier prompts at the first and last line
+of the composer; returning past the newest prompt restores the unsent draft.
+The latest 50 distinct prompts survive restarts. Native egui stores them in
+`agent-prompts.json` beside its configuration; browser and Tauri shells use
+local storage. **Clear chat** resets the conversation without deleting prompt
+recall. Tool rows expand to show their input and result, while image thumbnails
+remain visible. Tauri applies edited settings when sending or with **Apply settings**.
 
 Sending a message shares the prompt, scene description, tool results, and any
 captured images with the selected provider. Replies stream into the panel.

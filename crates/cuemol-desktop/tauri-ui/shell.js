@@ -10,6 +10,7 @@ const cueMolIcons = {
   view: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
   selection: '<path d="M4 9V4h5m6 0h5v5m0 6v5h-5M9 20H4v-5"/><path d="m9 9 8 3-4 1-1 4z"/>',
   crystal: '<path d="m12 2 9 5v10l-9 5-9-5V7zM3 7l9 5 9-5M12 12v10M12 2v10"/>',
+  agent: '<path d="m12 2 3 7 7 3-7 3-3 7-3-7-7-3 7-3z"/>',
   actions: '<path d="m14 2-9 12h6l-1 8 9-12h-6z"/>',
   settings: '<path d="m9 3-1 3-3 1 1 3-2 2 2 2-1 3 3 1 1 3h6l1-3 3-1-1-3 2-2-2-2 1-3-3-1-1-3z"/><circle cx="12" cy="12" r="3"/>',
   new: '<path d="M6 3h8l4 4v14H6zM14 3v5h4M9 14h6m-3-3v6"/>',
@@ -65,7 +66,7 @@ function setCueMolPaletteCollapsed(collapsed, save = true) {
 }
 
 function selectCueMolActivity(name, toggle = true) {
-  if (name === "catalog" && !pluginEnabled("catalog")) name = "explorer";
+  if (["catalog", "agent"].includes(name) && !pluginEnabled(name)) name = "explorer";
   void cancelCueMolNumericDrag();
   cueMolActivity = toggle && cueMolActivity === name ? null : name;
   document.querySelectorAll("[data-activity]").forEach((item) => {
@@ -83,11 +84,12 @@ function selectCueMolActivity(name, toggle = true) {
     }
   });
   document.getElementById("activity-title").textContent = cueMolActivity
-    ? cueMolActivity[0].toUpperCase() + cueMolActivity.slice(1) : "Explorer";
+    ? cueMolActivity === "agent" ? "AI Agent" : cueMolActivity[0].toUpperCase() + cueMolActivity.slice(1) : "Explorer";
   if (cueMolActivity && sidePanelWidth === 0) setSidePanelWidth(expandedSidePanelWidth);
   syncSidePanelVisibility();
   saveCueMolShell();
   if (cueMolActivity === "actions") refreshActionsPane(true);
+  if (cueMolActivity === "agent") void refreshAgent();
   if (snapshot) scheduleRender(0);
 }
 

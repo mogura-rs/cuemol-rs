@@ -1,5 +1,52 @@
 # Validation evidence
 
+## Shared Agent runtime and Tauri conversation interface
+
+The provider, conversation, download, cancellation and model-list state moved
+from the egui panel into `cuemol-ui::agent_runtime::AgentSession`. The optional
+`console-runtime` feature exposes this code without egui. The native and browser
+panels retain their existing adapters; Tauri now uses the same session and
+provides model/settings controls, transient or OS-stored keys, a transcript,
+image thumbnails, prompt recall, Stop and Clear chat. Provider keys are absent
+from snapshots and saved settings. The reference transcript is plain text and
+collapses tool input/results by default; both UI implementations follow it.
+
+Tauri model callbacks wake the model worker and refresh the conversation without
+forcing a viewport redraw for every text event. Scene changes refresh the shared
+snapshot. Image renders and APBS run in workers. A turn adds one scene-undo entry;
+manual scene edits or disabling the plugin stop it. Delayed download and APBS
+results cannot affect a later turn. Tauri shutdown requests cancellation of
+background work and stops its MCP listener before the model thread exits.
+Native egui and Tauri now load Agent settings beside an explicit TSV config path,
+and a stored plugin choice overrides legacy Agent enablement.
+
+The composer supports Ctrl/Cmd+Enter, optional plain Enter, Shift+Enter newlines,
+IME confirmation and a 50-entry distinct prompt history. Native/browser input
+queues preserve text before a send/recall key. Focus and multiline cursor tests
+cover repeated recall, restoring an unsent draft and retaining caret movement.
+The browser checks send through the actual canvas on both WebGL and WebGPU,
+then reload and recall the saved prompts without persisting the API key.
+
+Two shared composer tests, all 208 native GUI tests and all 184 Tauri model tests
+pass. Five optional Tauri tests remain ignored in the normal model run. The
+Tauri Agent tests use loopback provider/structure servers and a mock APBS
+executable; they exercise multiple edits, PNG image results, one-step undo,
+manual interruption, plugin disablement and cancellation followed by a new turn.
+The full 61-case Tauri DOM suite and six browser Agent cases pass. The final
+eight focused browser/Tauri checks pass after the transcript and composer
+refinement. Browser egui and Tauri DOM screenshots were inspected; the Tauri composer and
+status now fit above the application status bar. The shared egui transcript
+uses the remaining panel height while reserving room for its composer. Its
+three affected browser image/composer checks also pass after that layout change.
+
+The earlier implementation checklist correctly identified the Tauri Agent
+interface as missing; the prior usage guide described only native egui and the
+browser. Those sections now cover Tauri and distinguish settings storage across
+frontends. On the authorized macOS host, both screen-capture and accessibility
+preflight checks still return false. Model/Metal results do not establish an
+actual macOS window-input pass, and no live paid-provider request was made.
+
+
 ## Built-in plugin preferences and GUI MCP lifecycle
 
 The current reference's compiled plugin registry supplies defaults and permanent

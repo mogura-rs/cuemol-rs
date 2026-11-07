@@ -130,10 +130,22 @@ async function openShell(page, storage = {}, options = {}) {
       gpuPicking:true,hoverInfo:true,hoverHighlight:true,
       shortcuts:[{id:'view-trans-plusx',key:'ArrowRight',ctrl:true,alt:false,shift:false},{id:'view-trans-minusx',key:'ArrowLeft',ctrl:true,alt:false,shift:false}],
     };
+    const agent = {running:false,message:'Ready',messages:[],models:[],refreshingModels:false,settings:{model:'openai:test-model',reasoning:'low',enter_sends:false,endpoint:'',enabled:true}};
+    const events = new Map();
+    window.__finishAgent=()=>{agent.running=false;agent.message='Complete';agent.messages.push({role:'Tool',text:'get_scene_state {}',image:null,tool:{name:'get_scene_state',input:'{}',result:'{\"objects\":[]}',ok:true}},{role:'Assistant',text:'<img src=x onerror=alert(1)> kept as text',image:null});events.get('cuemol-agent-changed')?.();};
     window.__shellCalls = [];
     window.__actionsRunning = false;
     window.__TAURI__ = {core: {invoke: async (command, args) => {
       window.__shellCalls.push({command, args});
+      if (options.agent && command === 'agent_request') {
+        const {operation, args:input} = args;
+        if(operation==='configure') agent.settings=structuredClone(input.settings);
+        if(operation==='models') agent.models=['openai:test-model','openai:second-model'];
+        if(operation==='start') {agent.running=true;agent.message='Thinking…';agent.messages.push({role:'You',text:input.prompt,image:null});}
+        if(operation==='cancel') {agent.running=false;agent.message='Cancelled; completed edits are kept.';}
+        if(operation==='clear') {agent.messages=[];agent.message='';}
+        return {agent};
+      }
       if (command === 'get_initial_state') return {snapshot, viewport, preferences: options.picking ? structuredClone(preferences) : options.files ? {dropTarget:'new',plugins:preferences.plugins} : {plugins:preferences.plugins}, startupPathsPending: false};
       if (command === 'get_preferences') return structuredClone(preferences);
       if (command === 'set_preferences') { preferences=structuredClone(args.preferences);return {preferences,status:'Options updated'}; }
@@ -526,6 +538,7 @@ async function openShell(page, storage = {}, options = {}) {
       }
       throw new Error(`Unexpected IPC: ${command}`);
     }}};
+    if(options.agent) window.__TAURI__.event={listen:async(name,callback)=>{events.set(name,callback);return ()=>events.delete(name);}};
     const backendInvoke=window.__TAURI__.core.invoke;
     window.__TAURI__.core.invoke=async(command,args)=>structuredClone(await backendInvoke(command,structuredClone(args)));
     if(options.files) window.__TAURI__.webviewWindow={getCurrentWebviewWindow:()=>({
@@ -2119,5 +2132,75 @@ test('Tauri plugin preferences cancel, restore tabs, and retain dialect choices'
   await page.locator('[data-bottom-select="console"]').click();
   await expect(page.locator('[data-console-dialect="PyMOL"]')).toBeHidden();
   await expect(page.locator('[data-console-dialect="ChimeraX"]')).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri Agent sends with explicit settings, retains chat across panels, and stops turns',async({page},testInfo)=>{
+  const errors=await openShell(page,{}, {plugins:{agent:true},agent:true});
+  await page.getByRole('button',{name:'AI Agent',exact:true}).click();
+  const panel=page.locator('[data-activity-panel="agent"]');
+  await expect(panel).toBeVisible();
+  await panel.getByText('Agent settings',{exact:true}).click();
+  await page.locator('#agent-model').fill('openai:second-model');
+  await page.locator('#agent-key').fill('dummy-ui-key');
+  await panel.getByRole('button',{name:'Refresh available models'}).click();
+  await expect(page.locator('#agent-model-list option')).toHaveCount(2);
+  await expect(page.locator('#agent-key')).toHaveValue('');
+  await page.locator('#agent-prompt').fill('Make the molecule blue');
+  await page.locator('#agent-prompt').press('Control+Enter');
+  await expect(page.locator('#agent-status')).toHaveText('Thinking…');
+  await expect(page.locator('#agent-send')).toBeDisabled();
+  await expect(page.locator('#agent-prompt')).toHaveValue('');
+  await page.getByRole('button',{name:'Explorer',exact:true}).click();
+  await page.getByRole('button',{name:'AI Agent',exact:true}).click();
+  await expect(page.locator('#agent-transcript')).toContainText('Make the molecule blue');
+  await page.locator('#agent-cancel').click();
+  await expect(page.locator('#agent-status')).toContainText('Cancelled');
+  await page.locator('#agent-prompt').press('ArrowUp');
+  await expect(page.locator('#agent-prompt')).toHaveValue('Make the molecule blue');
+  await page.locator('#agent-enter-sends').check();
+  await page.locator('#agent-prompt').press('Enter');
+  await expect(page.locator('#agent-status')).toHaveText('Thinking…');
+  await page.evaluate(()=>window.__finishAgent());
+  await expect(page.locator('#agent-transcript')).toContainText('kept as text');
+  await expect(page.locator('#agent-transcript img')).toHaveCount(0);
+  await expect(page.locator('#agent-status')).toHaveText('Complete');
+  await expect(page.locator('#agent-transcript details')).not.toHaveAttribute('open');
+  await page.locator('#agent-transcript summary').click();
+  await expect(page.locator('#agent-transcript details')).toHaveAttribute('open','');
+  await expect(page.locator('#agent-transcript pre').last()).toHaveText('{"objects":[]}');
+  await expect(page.locator('#agent-status')).toBeInViewport({ratio:1});
+  await expect(page.locator('#agent-send')).toBeInViewport({ratio:1});
+  await page.screenshot({path:testInfo.outputPath('tauri-agent.png')});
+  const stored=await page.evaluate(()=>JSON.stringify({...localStorage}));
+  expect(stored).not.toContain('dummy-ui-key');
+  const calls=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='agent_request'));
+  expect(calls.filter(call=>call.args.operation==='start')).toHaveLength(2);
+  expect(calls.find(call=>call.args.operation==='configure').args.args.settings.model).toBe('openai:second-model');
+  await page.locator('#agent-clear').click();
+  await expect(page.locator('#agent-transcript article')).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri Agent respects composition and multiline prompt history boundaries',async({page})=>{
+  const errors=await openShell(page,{'cuemol.agent.promptHistory':JSON.stringify(['recent','older'])},{plugins:{agent:true},agent:true});
+  await page.getByRole('button',{name:'AI Agent',exact:true}).click();
+  const prompt=page.locator('#agent-prompt');
+  await prompt.fill('draft');
+  await prompt.press('ArrowUp');await expect(prompt).toHaveValue('recent');
+  await prompt.press('ArrowUp');await expect(prompt).toHaveValue('older');
+  await prompt.press('ArrowDown');await expect(prompt).toHaveValue('recent');
+  await prompt.press('ArrowDown');await expect(prompt).toHaveValue('draft');
+  await prompt.fill('first\nsecond');
+  await prompt.press('ArrowUp');await expect(prompt).toHaveValue('first\nsecond');
+  await prompt.evaluate(element=>element.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,isComposing:true,bubbles:true})));
+  expect(await page.evaluate(()=>window.__shellCalls.some(call=>call.command==='agent_request'&&call.args.operation==='start'))).toBe(false);
+  await page.getByRole('button',{name:'Settings',exact:true}).click();
+  await page.locator('[data-options-tab="Plugins"]').click();
+  await page.locator('#reference-dialog').getByLabel('AI Agent',{exact:true}).uncheck();
+  await page.locator('#reference-dialog').getByRole('button',{name:'OK',exact:true}).click();
+  await expect(page.locator('[data-activity="agent"]')).toBeHidden();
+  await expect(page.locator('[data-activity-panel="agent"]')).toBeHidden();
   expect(errors).toEqual([]);
 });

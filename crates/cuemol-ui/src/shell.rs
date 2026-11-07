@@ -438,7 +438,7 @@ pub fn paint_icon(ui: &Ui, icon: Icon, rect: Rect, color: Color32) {
         Icon::Selection => glyph::SELECTION,
         Icon::Crystal => glyph::CUBE,
         Icon::History => glyph::SCROLL,
-        Icon::Agent => glyph::ROBOT,
+        Icon::Agent => glyph::SPARKLE,
         Icon::Settings => glyph::GEAR,
         Icon::New => glyph::PLUS,
         Icon::File => glyph::FILE,

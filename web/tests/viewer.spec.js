@@ -1446,3 +1446,43 @@ END
     expect(errors).toEqual([]);
   });
 }
+
+
+for (const backend of ['webgl','webgpu']) test(`browser agent composer ${backend} sends, recalls, and reloads prompt history`,async({page})=>{
+  await enablePlugins(page,['agent']);
+  let requests=0;
+  await page.route('**/mock-api/responses',route=>{
+    requests++;
+    return route.fulfill({contentType:'text/event-stream',body:agentSse([])});
+  });
+  const open=async()=>{
+    await page.goto(`./?renderer=${backend}`);
+    await expect.poll(()=>page.evaluate(()=>window.cuemol?.status().scene.sceneId),{timeout:60000}).toBeGreaterThan(0);
+    const before=requests;
+    await startAgent(page,'Prime the mock session.');
+    await expect.poll(()=>requests).toBe(before+1);
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().agent.running)).toBe(false);
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().ui.rects['Agent prompt'])).toBeTruthy();
+  };
+  const focus=async()=>{
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    const [x,y,w,h]=await page.evaluate(()=>window.cuemol.status().ui.rects['Agent prompt']);
+    await page.mouse.click(x+w/2,y+h/2);
+  };
+  const send=async(expected)=>{
+    const before=requests;
+    await page.keyboard.press('Control+Enter');
+    await expect.poll(()=>requests).toBe(before+1);
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().agent.running)).toBe(false);
+    const last=await page.evaluate(()=>window.cuemol.status().agent.messages.filter(message=>message.role==='You').at(-1).text);
+    expect(last).toBe(expected);
+  };
+  await open();await focus();
+  await page.keyboard.insertText('First prompt');await send('First prompt');
+  await focus();await page.keyboard.insertText('Unsaved draft');await page.keyboard.press('ArrowUp');await send('First prompt');
+  await focus();await page.keyboard.insertText('First line');await page.keyboard.press('Shift+Enter');await page.keyboard.insertText('Second line');
+  await page.keyboard.press('ArrowUp');await send('First line\nSecond line');
+  await expect.poll(()=>page.evaluate(()=>JSON.parse(localStorage.getItem('cuemol.agent.promptHistory')||'[]'))).toEqual(['First line\nSecond line','First prompt']);
+  await open();await focus();await page.keyboard.press('ArrowUp');await send('First line\nSecond line');
+  expect(await page.evaluate(()=>JSON.stringify(localStorage))).not.toContain('mock-browser-key');
+});

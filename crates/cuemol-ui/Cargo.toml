@@ -27,5 +27,5 @@ web-sys = { version = "0.3", features = ["Window", "RequestInit", "Response", "H
 
 [features]
 default = []
-console-runtime = ["cuemol-command/scripting", "dep:cuemol-agent", "dep:cuemol-command", "dep:cuemol-desktop-core", "dep:cuemol-qsys", "dep:serde_json", "dep:base64"]
+console-runtime = ["cuemol-command/scripting", "dep:cuemol-agent", "dep:cuemol-command", "dep:cuemol-desktop-core", "dep:cuemol-qsys", "dep:serde_json", "dep:base64", "dep:zeroize"]
 egui = ["console-runtime", "dep:cuemol-core", "dep:cuemol-gfx", "dep:egui-phosphor", "dep:egui", "dep:zeroize", "dep:image"]

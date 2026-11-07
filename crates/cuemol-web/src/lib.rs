@@ -414,6 +414,14 @@ impl App {
         {
             agent.load_settings(&text);
         }
+        if let Some(history) = storage.as_ref().and_then(|storage| {
+            storage
+                .get_item("cuemol.agent.promptHistory")
+                .ok()
+                .flatten()
+        }) {
+            agent.load_prompt_history(&history);
+        }
         if state.config_value("plugins:agent:enabled").is_empty() && agent.settings.enabled {
             let _ = state.set_plugin_enabled("agent", true);
         }
@@ -1458,6 +1466,7 @@ impl App {
 impl eframe::App for App {
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
         self.console.prepare_input(ctx, input);
+        self.agent.prepare_input(ctx, input);
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {

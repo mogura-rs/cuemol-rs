@@ -240,3 +240,32 @@ fn saved_plugin_choice_overrides_legacy_agent_settings() {
     app.sync_agent_plugin();
     assert!(app.agent.settings.enabled);
 }
+
+#[test]
+fn agent_settings_follow_the_explicit_config_directory_and_plugin_choice() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("agent.json"),
+        r#"{"model":"anthropic:test-model","enabled":true}"#,
+    )
+    .unwrap();
+    let mut app = GuiApplication::new();
+    app.config_path = directory
+        .path()
+        .join("config.tsv")
+        .to_string_lossy()
+        .into_owned();
+    app.state.set_plugin_enabled("agent", false).unwrap();
+    app.load_agent_settings();
+    assert_eq!(app.agent.settings.model, "anthropic:test-model");
+    assert!(!app.agent.settings.enabled);
+    let mut app = GuiApplication::new();
+    app.config_path = directory
+        .path()
+        .join("config.tsv")
+        .to_string_lossy()
+        .into_owned();
+    app.load_agent_settings();
+    assert!(app.agent.settings.enabled);
+    assert!(app.state.plugin_enabled("agent"));
+}

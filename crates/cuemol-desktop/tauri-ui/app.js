@@ -291,6 +291,7 @@ function renderPluginContributions() {
     ['[data-bottom-select="console"], [data-local-action="show-console"]', "console"],
     ['[data-bottom-select="trajectory"], [data-dialog="Open MD Trajectory"]', "mdtools"],
     ['[data-activity="catalog"]', "catalog"],
+    ['[data-activity="agent"]', "agent"],
   ]) document.querySelectorAll(selector).forEach(item => { item.hidden = !pluginEnabled(id); });
   document.querySelectorAll('[data-console-dialect]').forEach(item => { item.hidden = !dialectEnabled(item.dataset.consoleDialect); });
   const active = document.querySelector('[data-bottom-select].active')?.dataset.bottomSelect;
@@ -300,7 +301,8 @@ function renderPluginContributions() {
     trajectoryPlaying = false;
     if (trajectoryTimer) { clearInterval(trajectoryTimer); trajectoryTimer = null; }
   }
-  if (cueMolActivity === 'catalog' && !pluginEnabled('catalog')) selectCueMolActivity('explorer', false);
+  if (['catalog', 'agent'].includes(cueMolActivity) && !pluginEnabled(cueMolActivity)) selectCueMolActivity('explorer', false);
+  if (pluginEnabled('agent') && !agentLoaded) void refreshAgent();
 }
 let moleculeDetails = {
   structureKey: "",
@@ -9691,7 +9693,7 @@ function renderSidePanel(name) {
 
 function syncSidePanelVisibility() {
   const cards = [...sidePanel.querySelectorAll("[data-side-card]")];
-  const anyVisible = cards.some((card) => !card.hidden && !card.classList.contains("activity-inactive")) || ["actions", "view", "catalog"].includes(cueMolActivity);
+  const anyVisible = cards.some((card) => !card.hidden && !card.classList.contains("activity-inactive")) || ["actions", "view", "catalog", "agent"].includes(cueMolActivity);
   sidePanel.hidden = !anyVisible;
   contentHolder?.classList.toggle("no-visible-side-panels", !anyVisible);
   document.querySelectorAll("[data-panel-menu]").forEach((element) => {
@@ -18544,6 +18546,7 @@ setupSidePanelHeightSplitters();
 setupSidePanelSplitter();
 setupBottomPanelSplitter();
 setupRibbonCollapse();
+setupAgent();
 setupTritiumShell();
 
 let remoteModelRefresh = null;
@@ -18577,6 +18580,7 @@ async function start() {
     renderRecentMenu();
     if (window.__TAURI__?.event?.listen) {
       await window.__TAURI__.event.listen("cuemol-model-changed", refreshRemoteModel);
+      await window.__TAURI__.event.listen("cuemol-agent-changed", refreshAgent);
     }
     await setupWindowGeometryPersistence();
     const sequence = ++requestSequence;

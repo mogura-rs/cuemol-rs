@@ -836,6 +836,7 @@ impl App {
                             self.revision,
                         );
                     }
+                    self.ui_rects.extend(self.agent.rects.clone());
                     return;
                 }
                 let (a, b) = match activity {

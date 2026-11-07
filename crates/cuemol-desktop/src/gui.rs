@@ -634,6 +634,7 @@ impl NativeRunner {
             WindowEvent::RedrawRequested => {
                 let mut raw_input = egui_state.take_egui_input(window.as_ref());
                 app.console.prepare_input(&self.egui_ctx, &mut raw_input);
+                app.agent.prepare_input(&self.egui_ctx, &mut raw_input);
                 let mut full_output = self.egui_ctx.run(raw_input, |ctx| {
                     app.ui(ctx, &mut gpu.camera);
                 });
@@ -4755,16 +4756,7 @@ impl GuiApplication {
             .parse::<f32>()
             .unwrap_or(MORPH_NAME_COLUMN_DEFAULT_WIDTH)
             .clamp(MORPH_COLUMN_MIN_WIDTH, 600.0);
-        let mut agent = cuemol_ui::AgentPanel::default();
-        if let Ok(text) =
-            std::fs::read_to_string(cuemol_command::config::directory().join("agent.json"))
-        {
-            agent.load_settings(&text);
-        }
-        if state.config_value("plugins:agent:enabled").is_empty() && agent.settings.enabled {
-            let _ = state.set_plugin_enabled("agent", true);
-        }
-        agent.settings.enabled = state.plugin_enabled("agent");
+        let agent = cuemol_ui::AgentPanel::default();
         Self {
             agent,
             state,
@@ -5101,6 +5093,7 @@ impl GuiApplication {
             Ok(None) => {}
             Err(error) => app.status = format!("Config load failed: {error}"),
         }
+        app.load_agent_settings();
         app.apply_stored_preferences();
         app.load_command_history();
         match crate::run_startup_script(&mut app.state) {
@@ -5117,6 +5110,25 @@ impl GuiApplication {
             }
         }
         app
+    }
+
+    fn agent_config_directory(&self) -> PathBuf {
+        Path::new(&self.config_path)
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(cuemol_command::config::directory)
+    }
+
+    fn load_agent_settings(&mut self) {
+        let directory = self.agent_config_directory();
+        if let Ok(source) = fs::read_to_string(directory.join("agent.json")) {
+            self.agent.load_settings(&source);
+        }
+        if let Ok(source) = fs::read_to_string(directory.join("agent-prompts.json")) {
+            self.agent.load_prompt_history(&source);
+        }
+        self.sync_agent_plugin();
     }
 
     fn agent_ui(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
@@ -5245,8 +5257,16 @@ impl GuiApplication {
                 self.snapshot_revision,
             );
         }
+        if let Some(history) = self.agent.take_prompt_history_changed() {
+            let directory = self.agent_config_directory();
+            if let Err(error) = std::fs::create_dir_all(&directory)
+                .and_then(|()| std::fs::write(directory.join("agent-prompts.json"), history))
+            {
+                self.set_error(error.into());
+            }
+        }
         if self.agent.take_settings_changed() {
-            let directory = cuemol_command::config::directory();
+            let directory = self.agent_config_directory();
             let result = std::fs::create_dir_all(&directory).and_then(|()| {
                 std::fs::write(directory.join("agent.json"), self.agent.settings_json())
             });

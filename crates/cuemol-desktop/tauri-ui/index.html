@@ -7,6 +7,7 @@
     <title>cuemol-rs</title>
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./actions.css">
+    <link rel="stylesheet" href="./agent.css">
     <script src="./shell.js" defer></script>
     <script src="./selection.js" defer></script>
     <script src="./actions.js" defer></script>
@@ -14,6 +15,7 @@
     <script src="./animation.js" defer></script>
     <script src="./camera.js" defer></script>
     <script src="./view.js" defer></script>
+    <script src="./agent.js" defer></script>
     <script src="./app.js" defer></script>
   </head>
   <body>
@@ -276,6 +278,7 @@
             <button type="button" class="activity-item" data-activity="view" aria-label="View" aria-pressed="false" title="View" data-icon="view"></button>
             <button type="button" class="activity-item" data-activity="selection" aria-label="Selection" aria-pressed="false" title="Selection" data-icon="selection"></button>
             <button type="button" class="activity-item" data-activity="crystal" aria-label="Crystal" aria-pressed="false" title="Crystal" data-icon="crystal"></button>
+            <button type="button" class="activity-item" data-activity="agent" aria-label="AI Agent" title="AI Agent" data-icon="agent" hidden></button>
             <button type="button" class="activity-item" data-activity="catalog" aria-label="Component Catalog" title="Component Catalog" data-icon="settings" hidden></button>
             <button type="button" class="activity-item" data-activity="actions" aria-label="Actions" aria-pressed="false" title="Actions" data-icon="actions"></button>
           </div>
@@ -406,6 +409,25 @@
 
 
 
+          <section class="agent-panel activity-inactive" data-activity-panel="agent">
+            <div class="agent-heading"><h2>AI Agent</h2><button id="agent-clear" type="button">Clear chat</button></div>
+            <details class="agent-settings"><summary>Agent settings</summary>
+              <p>Messages and scene data are sent to the selected provider when you press Send.</p>
+              <label>Model<input id="agent-model" data-agent-setting list="agent-model-list" placeholder="provider:model" /></label>
+              <datalist id="agent-model-list"></datalist>
+              <label>Reasoning<select id="agent-reasoning" data-agent-setting><option>default</option><option>low</option><option>medium</option><option>high</option></select></label>
+              <label><input id="agent-enter-sends" data-agent-setting type="checkbox" />Enter sends; Shift+Enter adds a line</label>
+              <label>API key<input id="agent-key" data-agent-setting type="password" autocomplete="off" /></label>
+              <div class="agent-settings-actions"><button id="agent-save-key" data-agent-setting type="button">Save in OS keychain</button><button id="agent-delete-key" data-agent-setting type="button">Delete stored key</button></div>
+              <details><summary>Custom API endpoint</summary><label>Endpoint<input id="agent-endpoint" data-agent-setting type="url" /></label></details>
+              <div class="agent-settings-actions"><button id="agent-models" type="button">Refresh available models</button><button id="agent-apply" data-agent-setting type="button">Apply settings</button></div>
+            </details>
+            <div id="agent-transcript" class="agent-transcript" role="log" aria-label="Agent conversation" aria-live="polite"></div>
+            <div class="agent-composer"><textarea id="agent-prompt" aria-label="Message the AI agent" placeholder="Ask for what you want to see. Up arrow for earlier prompts" rows="3"></textarea>
+              <div class="agent-composer-actions"><span id="agent-shortcut"></span><button id="agent-cancel" type="button">Stop</button><button id="agent-send" type="button">Send</button></div>
+            </div>
+            <div id="agent-status" class="agent-status" role="status"></div>
+          </section>
           <section class="action-panel activity-inactive" data-activity-panel="catalog">
             <details open><summary>Forms</summary><label>Text<input value="Example" /></label><label><input type="checkbox" checked />Enabled</label><label>Number<input type="number" min="0" max="100" value="12" /></label><label>Choice<select><option>First</option><option>Second</option></select></label><button disabled>Disabled</button></details>
             <details open><summary>Lists</summary><details open><summary>Molecule</summary><div>Renderer</div></details></details>

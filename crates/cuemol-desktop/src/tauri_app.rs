@@ -35,6 +35,8 @@ use cuemol_desktop_core::effects::ViewportOptions;
 
 #[path = "tauri_actions.rs"]
 mod actions;
+#[path = "tauri_agent.rs"]
+mod agent;
 #[path = "tauri_console.rs"]
 mod console;
 #[path = "tauri_inspector.rs"]
@@ -1668,6 +1670,8 @@ struct AppModel {
     status: String,
     console_session: cuemol_command::console::Session,
     console_run: Option<console::Execution>,
+    agent: cuemol_ui::agent_runtime::AgentSession,
+    agent_wake: cuemol_ui::agent_runtime::Wake,
 }
 
 struct TauriApbsJob {
@@ -1677,10 +1681,16 @@ struct TauriApbsJob {
     scene_uid: Uid,
     started: std::time::Instant,
     command: Option<cuemol_command::transport::ApiRequest>,
+    agent_reply: Option<cuemol_agent::ToolReply>,
+    agent_cancel: Option<Arc<AtomicBool>>,
 }
 
 impl TauriApbsJob {
     fn reply(&mut self, outcome: Result<serde_json::Value, String>) {
+        if let Some(reply) = self.agent_reply.take() {
+            let _ = reply.try_send(outcome);
+            return;
+        }
         if let Some(request) = self.command.take() {
             let _ = request.reply.send(Some(cuemol_command::tool_response(
                 request.message["id"].clone(),
@@ -1886,9 +1896,12 @@ impl AppModel {
             mcp_listen_port: None,
             console_session: cuemol_command::console::Session::default(),
             console_run: None,
+            agent: Default::default(),
+            agent_wake: Arc::new(|| {}),
             log_lines: startup_log.lines().map(str::to_string).collect(),
             status,
         };
+        model.load_agent_settings();
         model.apply_stored_preferences();
         model.sync_active_scene_properties();
         model
@@ -8114,6 +8127,12 @@ impl AppModel {
 
 enum ModelRequest {
     LocalApiReady,
+    AgentReady,
+    Shutdown,
+    Agent {
+        operation: String,
+        args: serde_json::Value,
+    },
     Inspector {
         tool: String,
         args: serde_json::Value,
@@ -10097,7 +10116,8 @@ fn handle_model_request(
     request: ModelRequest,
 ) -> Result<ModelResponse, String> {
     match request {
-        ModelRequest::LocalApiReady => Ok(ModelResponse::Message(String::new())),
+        ModelRequest::Agent { operation, args } => Ok(ModelResponse::Inspector(model.agent_request(&operation, args)?)),
+        ModelRequest::LocalApiReady | ModelRequest::AgentReady | ModelRequest::Shutdown => Ok(ModelResponse::Message(String::new())),
         ModelRequest::Inspector { tool, args } => Ok(ModelResponse::Inspector(model.inspector_request(&tool, &args)?)),
         ModelRequest::Actions { operation, args } => Ok(ModelResponse::Actions(model.actions_request(&operation, &args)?)),
         ModelRequest::StartRendererWarmup => {
@@ -12325,6 +12345,8 @@ fn handle_model_request(
                 scene_uid: model.desktop.scene_manager().scene_uid_for_object(object_uid).unwrap(),
                 started: std::time::Instant::now(),
                 command: None,
+                agent_reply: None,
+                agent_cancel: None,
             });
             model.status = format!(
                 "APBS calculation started for {} atom(s)",
@@ -12336,7 +12358,12 @@ fn handle_model_request(
             let Some(mut job) = model.apbs_job.take() else {
                 return Ok(ModelResponse::Message("idle".to_string()));
             };
-            if job.command.is_some() && !model.desktop.mcp_server_enabled() {
+            let is_agent = job.agent_reply.is_some();
+            if (job.command.is_some() && !model.desktop.mcp_server_enabled())
+                || job.agent_reply.as_ref().is_some_and(|reply|reply.is_closed())
+                || job.agent_cancel.as_ref().is_some_and(|cancel|cancel.load(Ordering::Relaxed))
+                || (is_agent && model.agent.revision != model.snapshot_revision)
+            {
                 job.cancel.store(true, Ordering::Relaxed);
             }
             match job.receiver.try_recv() {
@@ -12363,14 +12390,15 @@ fn handle_model_request(
                         model.status = "APBS calculation cancelled".into();
                         return Ok(ModelResponse::Message("error:APBS calculation cancelled".into()));
                     }
-                    if job.command.is_some() {
+                    if job.command.is_some() || is_agent {
                         if let Err(error) = model.begin_remote_edit() {
                             let _ = fs::remove_dir_all(output.work_dir);
                             job.reply(Err(error.clone()));
                             return Ok(ModelResponse::Message(format!("error:{error}")));
                         }
                     }
-                    let undo = model.capture_undo();
+                    let mut undo = model.capture_undo();
+                    if is_agent { undo.camera = model.agent.initial_camera().clone(); }
                     let result = model.desktop.open_apbs_potential_in_scene(job.scene_uid, &output.dx_path, &job.potential_name);
                     let _ = fs::remove_dir_all(output.work_dir);
                     let map_uid = match result {
@@ -12389,7 +12417,11 @@ fn handle_model_request(
                     }
                     model.status = format!("APBS calculation complete: {}", job.potential_name);
                     model.invalidate_snapshot(false);
-                    model.push_undo(undo);
+                    if !is_agent || !model.agent.changed_scene { model.push_undo(undo); }
+                    if is_agent {
+                        model.agent.changed_scene = true;
+                        model.agent.revision = model.snapshot_revision;
+                    }
                     Ok(ModelResponse::Message(format!(
                         "complete:{}",
                         map_uid.get()
@@ -13566,13 +13598,28 @@ fn spawn_model(initial_paths: Vec<PathBuf>, app: tauri::AppHandle) -> ManagedSta
         .name("cuemol-tauri-model".to_string())
         .spawn(move || {
             let mut model = AppModel::new_with_config(Vec::new(), config_path);
+            let agent_sender = api_wake_sender.clone();
+            model.agent_wake = Arc::new(move || {
+                let (response, _) = mpsc::channel();
+                let _ = agent_sender.send(ModelEnvelope {
+                    request: ModelRequest::AgentReady,
+                    response,
+                });
+            });
             let mut api = cuemol_command::transport::GuiApiServer::default();
             let mut protocol = cuemol_command::Protocol::without_history();
             loop {
+                let (agent_changed, scene_changed) = model.poll_agent();
+                if scene_changed {
+                    let _ = app.emit("cuemol-model-changed", ());
+                }
+                if agent_changed {
+                    let _ = app.emit("cuemol-agent-changed", ());
+                }
                 if model
                     .apbs_job
                     .as_ref()
-                    .is_some_and(|job| job.command.is_some())
+                    .is_some_and(|job| job.command.is_some() || job.agent_reply.is_some())
                 {
                     let _ = handle_model_request(&mut model, ModelRequest::PollApbsCalculation);
                     if model.apbs_job.is_none() {
@@ -13603,7 +13650,7 @@ fn spawn_model(initial_paths: Vec<PathBuf>, app: tauri::AppHandle) -> ManagedSta
                 let envelope = if model
                     .apbs_job
                     .as_ref()
-                    .is_some_and(|job| job.command.is_some())
+                    .is_some_and(|job| job.command.is_some() || job.agent_reply.is_some())
                 {
                     match receiver.recv_timeout(std::time::Duration::from_millis(30)) {
                         Ok(envelope) => envelope,
@@ -13616,11 +13663,29 @@ fn spawn_model(initial_paths: Vec<PathBuf>, app: tauri::AppHandle) -> ManagedSta
                     };
                     envelope
                 };
+                if matches!(envelope.request, ModelRequest::Shutdown) {
+                    model.agent.cancel("Application closed.");
+                    model.stop_console();
+                    if let Some(job) = &model.apbs_job {
+                        job.cancel.store(true, Ordering::Relaxed);
+                    }
+                    if let Some(job) = &model.pov_render_job {
+                        job.cancel.store(true, Ordering::Relaxed);
+                    }
+                    if let Some(job) = &model.animation_render_job {
+                        job.cancel.store(true, Ordering::Relaxed);
+                    }
+                    api.stop();
+                    let _ = envelope
+                        .response
+                        .send(Ok(ModelResponse::Message("Stopped".into())));
+                    break;
+                }
                 if matches!(envelope.request, ModelRequest::LocalApiReady) {
                     mcp_bridge::poll(&mut model, &api, &mut protocol, || {
                         let _ = app.emit("cuemol-model-changed", ());
                     });
-                } else {
+                } else if !matches!(envelope.request, ModelRequest::AgentReady) {
                     let result = handle_model_request(&mut model, envelope.request);
                     let _ = envelope.response.send(result);
                 }
@@ -16454,6 +16519,18 @@ fn inspector_request(
 }
 
 #[tauri::command]
+fn agent_request(
+    operation: String,
+    args: serde_json::Value,
+    state: State<'_, ManagedState>,
+) -> Result<serde_json::Value, String> {
+    match request_model(&state, ModelRequest::Agent { operation, args })? {
+        ModelResponse::Inspector(value) => Ok(value),
+        _ => Err("Unexpected Agent response".into()),
+    }
+}
+
+#[tauri::command]
 fn actions_request(
     operation: String,
     args: serde_json::Value,
@@ -16936,13 +17013,14 @@ fn base64_encode(data: &[u8]) -> String {
 
 pub fn run() -> Result<(), tauri::Error> {
     let initial_paths = std::env::args_os().skip(1).map(PathBuf::from).collect();
-    tauri::Builder::default()
+    let application = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             app.manage(spawn_model(initial_paths, app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            agent_request,
             get_snapshot,
             get_density_histogram,
             get_molecule_details,
@@ -17152,7 +17230,25 @@ pub fn run() -> Result<(), tauri::Error> {
             load_view,
             export_png,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())?;
+    application.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            if let Some(state) = app.try_state::<ManagedState>() {
+                let (response, finished) = mpsc::channel();
+                if state
+                    .sender
+                    .send(ModelEnvelope {
+                        request: ModelRequest::Shutdown,
+                        response,
+                    })
+                    .is_ok()
+                {
+                    let _ = finished.recv_timeout(std::time::Duration::from_secs(2));
+                }
+            }
+        }
+    });
+    Ok(())
 }
 
 #[cfg(test)]
@@ -17529,6 +17625,8 @@ mod tests {
             mcp_listen_port: None,
             console_session: cuemol_command::console::Session::default(),
             console_run: None,
+            agent: Default::default(),
+            agent_wake: Arc::new(|| {}),
             log_lines: Vec::new(),
             status: "Ready".to_string(),
         }

@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use cuemol_command::tool_response;
 
 impl AppModel {
-    fn start_mcp_apbs(&mut self, request: cuemol_command::transport::ApiRequest) {
+    pub(super) fn start_mcp_apbs(&mut self, request: cuemol_command::transport::ApiRequest) {
         let args = &request.message["params"]["arguments"];
         let Some(object_uid) = args["objId"].as_u64().filter(|id| *id > 0) else {
             let _ = request.reply.send(Some(tool_response(
