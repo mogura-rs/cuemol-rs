@@ -773,7 +773,7 @@ test('input settings capture their own events and persist across reloads',async(
     const r=await page.evaluate(key=>window.cuemol.status().ui.rects[key],key);
     await page.mouse.click(r[0]+r[2]/2,r[1]+r[3]/2);
   };
-  await clickRect('Tools menu');await clickRect('Settings');
+  await clickRect('Edit menu');await clickRect('Settings');
   await clickRect('Settings Mouse & Navigation');await clickRect('Pointing device');await clickRect('Pointing device Mac trackpad');
   await expect.poll(()=>page.evaluate(()=>localStorage.getItem('cuemol.config'))).toContain('view_input:device\ttrackpad');
   const saved=await page.evaluate(()=>localStorage.getItem('cuemol.config'));

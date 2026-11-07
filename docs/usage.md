@@ -799,8 +799,9 @@ print('Startup commands loaded');
 
 ### Settings categories
 
-Options in the native frontends and Settings in the browser use the same
-Display, Input, General, Tools and Plugins groups. Search shows matching
+Edit > Options opens preferences in all three frontends. The browser dialog is
+titled Settings. These controls use the same Display, Input, General, Tools and
+Plugins groups. Search shows matching
 categories across groups. Display includes the theme and default atom-label
 font, size, color, bold and italic values. Input retains the mouse presets,
 pointing-device override, picking controls and keyboard bindings. The native
@@ -901,8 +902,13 @@ AO and 32-sample antialiasing; raytracing settings belong to the Rendering windo
 
 ### Image rendering
 
-In the native egui, browser and Tauri frontends, open Render to preview an image
-before saving it. Tauri also exposes Rendering > Image rendering. The Image tab sets size, physical units, DPI and transparency. The
+In all three frontends, Rendering > Image rendering opens the preview controls
+with the still-image size preset. Rendering > Movie rendering selects movie
+mode and its size preset. Window > Rendering Window reopens the existing
+controls without resetting the mode, size, target, history or movie preferences.
+The current native frontends still host these controls inside the main window;
+a separate OS window remains pending. The Image tab sets size, physical units,
+DPI and transparency. The
 Render tab contains independent supersampling, lighting, AO quality, GI lighting
 and shadow choices, with grouped advanced controls. NPR offers raytracing or AO;
 its Detail tab edits hatch layers and tone specifications. Selecting a quality

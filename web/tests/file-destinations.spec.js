@@ -23,7 +23,7 @@ async function loaded(page,name){
 for(const backend of ['webgl','webgpu'])test(`File destinations ${backend} preserve batches and undo`,async({page},testInfo)=>{
   await page.goto(`./?renderer=${backend}`);
   await expect.poll(async()=>(await status(page))?.scene.sceneId,{timeout:60000}).toBeGreaterThan(0);
-  await click(page,'Tools menu');await click(page,'Settings');await click(page,'Settings Files');
+  await click(page,'Edit menu');await click(page,'Settings');await click(page,'Settings Files');
   await click(page,'Drag and drop opens into',true);await click(page,'Drop target New scene');
   expect(await page.evaluate(()=>localStorage.getItem('cuemol.config'))).toContain('files:drop-target\tnew');
   await page.screenshot({path:testInfo.outputPath('file-destinations.png')});

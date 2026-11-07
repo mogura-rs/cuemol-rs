@@ -278,3 +278,23 @@ test('Tauri NPR Detail follows shared field metadata, primary tone edits, reset 
   await expect(panel.getByRole('tab',{name:'Render',exact:true})).toHaveAttribute('aria-selected','true');
   expect(errors).toEqual([]);
 });
+
+
+test('Tauri Rendering focus preserves the selected mode and custom image size', async ({page}) => {
+  const errors = await open(page);
+  const panel = page.getByRole('dialog', {name:'Rendering', exact:true});
+  await page.evaluate(() => CueMolRendering.open(undefined, true));
+  await panel.getByLabel('Width', {exact:true}).fill('80');
+  await panel.getByLabel('Height', {exact:true}).fill('60');
+  await panel.getByLabel('Frame rate', {exact:true}).fill('12.5');
+  await panel.getByRole('button', {name:'Close Rendering', exact:true}).click();
+  await expect(panel).not.toBeVisible();
+  await page.evaluate(() => CueMolRendering.open());
+  await expect(panel.getByLabel('Width', {exact:true})).toHaveValue('80');
+  await expect(panel.getByLabel('Height', {exact:true})).toHaveValue('60');
+  await expect(panel.getByLabel('Frame rate', {exact:true})).toHaveValue('12.5');
+  const request = await page.evaluate(() => renderCalls.filter(call => call.operation === 'open').at(-1));
+  expect(request.args.movie).toBeUndefined();
+  expect(await panel.evaluate(node => node.contains(document.activeElement))).toBe(true);
+  expect(errors).toEqual([]);
+});

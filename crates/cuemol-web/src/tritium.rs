@@ -353,24 +353,11 @@ impl App {
                             self.call("create_scene", json!({}));
                             ui.close();
                         }
+                        ui.separator();
                         let open_file = ui.button("Open File…");
                         self.record_ui_rect("Open File", &open_file);
                         if open_file.clicked() {
                             choose_file();
-                            ui.close();
-                        }
-                        let options = ui.button("Open with options…");
-                        self.ui_rects.insert("Open with options".into(), [options.rect.min.x, options.rect.min.y, options.rect.width(), options.rect.height()]);
-                        if options.clicked() {
-                            choose_file_input("file-options");
-                            ui.close();
-                        }
-                        if ui.button("Open Scene…").clicked() {
-                            choose_file();
-                            ui.close();
-                        }
-                        if ui.button("Get PDB…").clicked() {
-                            self.open_get_pdb();
                             ui.close();
                         }
                         let recent = ui.menu_button("Open Recent", |ui| {
@@ -388,10 +375,6 @@ impl App {
                         });
                         self.record_ui_rect("Open Recent", &recent.response);
                         ui.separator();
-                        if ui.button("Save Scene").clicked() {
-                            self.save_scene_download();
-                            ui.close();
-                        }
                         if ui.button("Save File As…").clicked() {
                             self.save_object_download();
                             ui.close();
@@ -402,18 +385,28 @@ impl App {
                             self.save_current_view_download();
                             ui.close();
                         }
-                        if ui.button("Save Scene As…").clicked() {
-                            self.save_scene_download();
+                        ui.separator();
+                        let close = ui.button("Close Tab").on_hover_text("Ctrl/Cmd+Alt+W in browsers");
+                        self.record_ui_rect("Close Tab menu", &close);
+                        if close.clicked() {
+                            self.shell_shortcut("close-tab");
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Open Scene…").clicked() {
+                            choose_file();
                             ui.close();
                         }
                         if ui.button("Reload Scene").clicked() {
                             self.reload_scene();
                             ui.close();
                         }
-                        let close = ui.button("Close Tab").on_hover_text("Ctrl/Cmd+Alt+W in browsers");
-                        self.record_ui_rect("Close Tab menu", &close);
-                        if close.clicked() {
-                            self.shell_shortcut("close-tab");
+                        if ui.button("Save Scene").clicked() {
+                            self.save_scene_download();
+                            ui.close();
+                        }
+                        if ui.button("Save Scene As…").clicked() {
+                            self.save_scene_download();
                             ui.close();
                         }
                     });
@@ -431,11 +424,13 @@ impl App {
                             if self.clipboard_focus.text.is_some() { self.clipboard_action(ctx, "redo"); } else { self.call("redo", json!({})); }
                             ui.close();
                         }
+                        ui.separator();
                         for (label, action) in [("Cut", "cut"), ("Copy", "copy"), ("Paste", "paste"), ("Select All", "select-all")] {
                             let response = ui.button(label);
                             self.record_ui_rect(&format!("Edit {label}"), &response);
                             if response.clicked() { self.clipboard_action(ctx, action); ui.close(); }
                         }
+                        ui.separator();
                         if ui.button("Clear undo data").clicked() {
                             self.call("clear_undo", json!({}));
                             ui.close();
@@ -451,107 +446,15 @@ impl App {
                             self.record_ui_rect(label, &button);
                             if button.clicked() { self.select_tool(command); ui.close(); }
                         }
-                    });
-                    self.record_ui_rect("Edit menu", &edit_menu.response);
-                    let scene_menu = ui.menu_button("Scene", |ui| {
-                        ui.menu_button("Background", |ui| {
-                            for (label, value) in [("White", "white"), ("Black", "black")] {
-                                let button = ui.button(label);
-                                self.record_ui_rect(&format!("Scene background {label}"), &button);
-                                if button.clicked() {
-                                    self.call("set_node_prop", json!({"nodeType":"scene","prop":"bgcolor","value":value}));
-                                    ui.close();
-                                }
-                            }
-                        });
-                        let mut proof = self.state.active_scene().and_then(|id| self.state.scene_manager().scene(id))
-                            .and_then(|scene| scene.scene_attribute("use_colproof")).is_some_and(|value| value == "true");
-                        if ui.checkbox(&mut proof, "Use color proofing").changed() {
-                            self.call("set_node_prop", json!({"nodeType":"scene","prop":"use_colproof","value":proof.to_string()}));
-                        }
-                        let properties = ui.button("Properties…");
-                        self.record_ui_rect("Scene Properties", &properties);
-                        if properties.clicked() { self.open_properties("scene", None); ui.close(); }
-                    });
-                    self.record_ui_rect("Scene menu", &scene_menu.response);
-                    let view_menu = ui.menu_button("View", |ui| {
-                        for (value, label) in [(true,"Perspective"),(false,"Orthographic")] {
-                            if ui.selectable_label(self.camera.is_perspective() == value, label).clicked() {
-                                self.call("set_projection", json!({"perspective":value}));
-                                ui.close();
-                            }
-                        }
-                        ui.menu_button("Center mark", |ui| {
-                            for (value,label) in [("crosshair","Cross"),("axis","Axis"),("none","None")] {
-                                if ui.button(label).clicked() {
-                                    self.call("set_node_prop", json!({"nodeType":"view","prop":"centerMark","value":value}));
-                                    ui.close();
-                                }
-                            }
-                        });
-                        let properties = ui.button("View property…");
-                        self.record_ui_rect("View Properties", &properties);
-                        if properties.clicked() { self.open_properties("view", None); ui.close(); }
                         ui.separator();
-                        if cuemol_ui::navigation::palette_menu(ui, &mut self.state) {
-                            self.settings_text = self.state.config_text();
-                            if let Some(storage) =
-                                web_sys::window().and_then(|w| w.local_storage().ok().flatten())
-                            {
-                                let _ = storage.set_item("cuemol.config", &self.settings_text);
-                            }
-                        }
-                        ui.separator();
-                        for activity in Activity::ALL {
-                            if !activity.enabled(&self.state) { continue; }
-                            if ui.button(activity.title()).clicked() {
-                                self.activity = Some(activity);
-                                ui.close();
-                            }
-                        }
-                        ui.separator();
-                        let theme = ui.checkbox(&mut self.dark, "Dark theme");
-                        self.record_ui_rect("Dark theme", &theme);
-                        if theme.changed() {
-                            self.state.put_config_value("layout:theme", if self.dark { "dark" } else { "light" });
-                            self.settings_text = self.state.config_text();
-                            self.settings_draft = None;
-                            if let Some(storage) =
-                                web_sys::window().and_then(|w| w.local_storage().ok().flatten())
-                            {
-                                let _ = storage.set_item(
-                                    "cuemol.theme",
-                                    if self.dark { "dark" } else { "light" },
-                                );
-                                let _ = storage.set_item("cuemol.config", &self.settings_text);
-                            }
-                        }
-                        ui.menu_button("Stereo", |ui| {
-                            for (mode,value,label) in [(cuemol_qsys::StereoMode::None,"none","None"),
-                                (cuemol_qsys::StereoMode::Parallel,"para","Parallel"),
-                                (cuemol_qsys::StereoMode::Cross,"cross","Cross")] {
-                                if ui.selectable_label(self.camera.stereo_mode()==mode,label).clicked() {
-                                    self.call("set_node_prop",json!({"nodeType":"view","prop":"stereoMode","value":value}));
-                                }
-                            }
-                            let mut swap=self.state.active_view_options().swap_stereo_eyes;
-                            if ui.checkbox(&mut swap,"Swap eyes").changed() {
-                                self.call("set_node_prop",json!({"nodeType":"view","prop":"swapStereoEyes","value":swap.to_string()}));
-                            }
-                            let mut angle=self.camera.stereo_distance();
-                            ui.horizontal(|ui| {
-                                ui.label("Eye angle (°)");
-                                if ui.add(egui::DragValue::new(&mut angle).speed(0.1).range(0.0..=180.0)).changed() {
-                                    self.call("set_node_prop",json!({"nodeType":"view","prop":"stereoDist","value":angle.to_string()}));
-                                }
-                            });
-                        });
-                        if ui.button("Fit scene").clicked() {
-                            self.fit(false);
+                        let settings = ui.button("Options");
+                        self.record_ui_rect("Settings", &settings);
+                        if settings.clicked() {
+                            self.shell_shortcut("settings");
                             ui.close();
                         }
                     });
-                    self.record_ui_rect("View menu", &view_menu.response);
+                    self.record_ui_rect("Edit menu", &edit_menu.response);
                     let rendering_menu = ui.menu_button("Rendering", |ui| {
                         let response = ui.button("Image rendering…");
                         self.record_ui_rect("Render image", &response);
@@ -589,6 +492,59 @@ impl App {
                         self.record_ui_rect("Export scene", &submenu.response);
                     });
                     self.record_ui_rect("Rendering menu", &rendering_menu.response);
+                    let scene_menu = ui.menu_button("Scene", |ui| {
+                        ui.menu_button("Background", |ui| {
+                            for (label, value) in [("White", "white"), ("Black", "black")] {
+                                let button = ui.button(label);
+                                self.record_ui_rect(&format!("Scene background {label}"), &button);
+                                if button.clicked() {
+                                    self.call("set_node_prop", json!({"nodeType":"scene","prop":"bgcolor","value":value}));
+                                    ui.close();
+                                }
+                            }
+                        });
+                        ui.separator();
+                        let mut proof = self.state.active_scene().and_then(|id| self.state.scene_manager().scene(id))
+                            .and_then(|scene| scene.scene_attribute("use_colproof")).is_some_and(|value| value == "true");
+                        if ui.checkbox(&mut proof, "Use color proofing").changed() {
+                            self.call("set_node_prop", json!({"nodeType":"scene","prop":"use_colproof","value":proof.to_string()}));
+                        }
+                        let properties = ui.button("Properties…");
+                        self.record_ui_rect("Scene Properties", &properties);
+                        if properties.clicked() { self.open_properties("scene", None); ui.close(); }
+                    });
+                    self.record_ui_rect("Scene menu", &scene_menu.response);
+                    let view_menu = ui.menu_button("View", |ui| {
+                        for (value, label) in [(true,"Perspective"),(false,"Orthographic")] {
+                            if ui.selectable_label(self.camera.is_perspective() == value, label).clicked() {
+                                self.call("set_projection", json!({"perspective":value}));
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        ui.menu_button("Center mark", |ui| {
+                            for (value,label) in [("crosshair","Cross"),("axis","Axis"),("none","None")] {
+                                if ui.button(label).clicked() {
+                                    self.call("set_node_prop", json!({"nodeType":"view","prop":"centerMark","value":value}));
+                                    ui.close();
+                                }
+                            }
+                        });
+                        ui.separator();
+                        if cuemol_ui::navigation::palette_menu(ui, &mut self.state) {
+                            self.settings_text = self.state.config_text();
+                            if let Some(storage) =
+                                web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+                            {
+                                let _ = storage.set_item("cuemol.config", &self.settings_text);
+                            }
+                        }
+                        ui.separator();
+                        let properties = ui.button("View property…");
+                        self.record_ui_rect("View Properties", &properties);
+                        if properties.clicked() { self.open_properties("view", None); ui.close(); }
+                    });
+                    self.record_ui_rect("View menu", &view_menu.response);
                     let tools_menu = ui.menu_button("Tools", |ui| {
                         for (label, command) in [
                             ("Molecular superposition…", "superpose"),
@@ -603,39 +559,23 @@ impl App {
                             self.record_ui_rect(label, &button);
                             if button.clicked() { self.select_tool(command); ui.close(); }
                         }
-                        ui.separator();
-                        if ui.button("Commands…").clicked() {
-                            self.show_console = true;
-                            ui.close();
-                        }
-                        if self.state.plugin_enabled("agent") && ui.button("AI Agent").clicked() {
-                            self.activity = Some(Activity::Agent);
-                            ui.close();
-                        }
-                        let settings = ui.button("Settings");
-                        self.record_ui_rect("Settings", &settings);
-                        if settings.clicked() {
-                            self.settings_text = self.state.config_text();
-                            self.show_settings = true;
-                            ui.close();
-                        }
                     });
                     self.record_ui_rect("Tools menu", &tools_menu.response);
-                    ui.menu_button("Window", |ui| {
-                        for tab in [
-                            "Console",
-                            "Output",
-                            "Animation",
-                            "Sequence",
-                            "MD Trajectory",
-                        ] {
-                            if ui.button(tab).clicked() {
-                                self.bottom_tab = tab.into();
-                                self.bottom_open = true;
-                                ui.close();
-                            }
+                    let window_menu = ui.menu_button("Window", |ui| {
+                        let main = ui.button("Main Window");
+                        self.record_ui_rect("Main Window", &main);
+                        if main.clicked() {
+                            self.render_panel.focused = false;
+                            ui.close();
+                        }
+                        let render = ui.button("Rendering Window");
+                        self.record_ui_rect("Rendering Window", &render);
+                        if render.clicked() {
+                            self.open_render();
+                            ui.close();
                         }
                     });
+                    self.record_ui_rect("Window menu", &window_menu.response);
                     let help = ui.menu_button("Help", |ui| {
                         let about = ui.button("About cuemol-rs");
                         self.record_ui_rect("About cuemol-rs", &about);
@@ -854,7 +794,7 @@ impl App {
         }
     }
     pub(super) fn open_render(&mut self) {
-        self.render_panel.focused = true;
+        self.render_panel.request_focus();
         self.flush_render_settings(0., true);
         self.sync_render_settings();
         self.show_render = true;

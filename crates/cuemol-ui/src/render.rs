@@ -53,6 +53,7 @@ pub struct RenderPanel {
     pub history: RenderHistory,
     pub movie_mode: bool,
     pub focused: bool,
+    focus_requested: bool,
     pub movie: cuemol_command::movie::MovieOptions,
     pub movie_loaded: bool,
     pub temporary_directory: String,
@@ -92,6 +93,7 @@ impl Default for RenderPanel {
             history: RenderHistory::default(),
             movie_mode: false,
             focused: true,
+            focus_requested: false,
             movie: Default::default(),
             movie_loaded: false,
             temporary_directory: String::new(),
@@ -210,6 +212,11 @@ impl RenderPanel {
         ctx.request_repaint();
     }
 
+    pub fn request_focus(&mut self) {
+        self.focused = true;
+        self.focus_requested = true;
+    }
+
     pub fn select_result(&mut self, ctx: &Context, index: usize) -> Result<(), String> {
         let (png, image) = self.history.select_with(index, |png| {
             image::load_from_memory(png)
@@ -309,6 +316,10 @@ impl RenderPanel {
                 }
             });
         if let Some(window) = window {
+            if std::mem::take(&mut self.focus_requested) {
+                ctx.move_to_top(window.response.layer_id);
+                ctx.request_repaint();
+            }
             self.record("Rendering window", &window.response);
             if ctx.input(|input| input.pointer.any_pressed()) {
                 if let Some(position) = ctx.pointer_latest_pos() {

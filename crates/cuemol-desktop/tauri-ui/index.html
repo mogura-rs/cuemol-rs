@@ -29,11 +29,9 @@
         <details class="menu">
           <summary>File</summary>
           <div class="menu-popup file-menu-popup">
-            <button type="button" data-local-action="new-window">New Window</button>
             <button type="button" data-action="new-scene">New Tab</button>
+            <span class="menu-separator"></span>
             <button type="button" data-action="open">Open File…</button>
-            <button type="button" data-dialog="Open PDB">Open PDB…</button>
-            <button type="button" data-dialog="Open MD Trajectory">Open MD Trajectory…</button>
             <div class="menu-submenu">
               <button
                 type="button"
@@ -45,14 +43,18 @@
               </button>
               <div class="menu-popup nested-menu" id="recent-menu" role="menu"></div>
             </div>
+            <span class="menu-separator"></span>
             <button type="button" data-dialog="Save File As">Save File As…</button>
             <button type="button" data-dialog="Save Current View">Save current view…</button>
+            <span class="menu-separator"></span>
             <button type="button" data-action="close-scene">Close Tab</button>
             <span class="menu-separator"></span>
             <button type="button" data-action="open-scene">Open Scene…</button>
             <button type="button" data-local-action="reload-scene">Reload Scene</button>
             <button type="button" data-action="save">Save Scene</button>
             <button type="button" data-action="save-as">Save Scene As…</button>
+            <span class="menu-separator"></span>
+            <button type="button" data-local-action="quit">Quit</button>
           </div>
         </details>
         <details class="menu">
@@ -60,12 +62,13 @@
           <div class="menu-popup">
             <button type="button" data-action="undo">Undo</button>
             <button type="button" data-action="redo">Redo</button>
-            <button type="button" data-action="clear-undo">Clear undo data</button>
             <span class="menu-separator"></span>
             <button type="button" data-action="cut">Cut</button>
             <button type="button" data-action="copy">Copy</button>
             <button type="button" data-action="paste">Paste</button>
             <button type="button" data-action="select-all">Select All</button>
+            <span class="menu-separator"></span>
+            <button type="button" data-action="clear-undo">Clear undo data</button>
             <span class="menu-separator"></span>
             <button type="button" data-dialog="Merge molecule">Merge molecule…</button>
             <button type="button" data-dialog="Delete mol atoms">Delete mol atoms…</button>
@@ -100,13 +103,14 @@
           <div class="menu-popup has-submenu">
             <div class="menu-submenu">
               <button type="button" class="menu-submenu-trigger" aria-haspopup="menu">
-                <span>Background color</span><span class="menu-arrow" aria-hidden="true">›</span>
+                <span>Background</span><span class="menu-arrow" aria-hidden="true">›</span>
               </button>
               <div class="menu-popup nested-menu" role="menu">
                 <button type="button" data-background="white">White</button>
                 <button type="button" data-background="black">Black</button>
               </div>
             </div>
+            <span class="menu-separator"></span>
             <button type="button" data-local-action="color-proof">Use color proofing</button>
             <button type="button" data-dialog="Scene Properties">Properties…</button>
           </div>
@@ -128,8 +132,8 @@
               </div>
             </div>
             <span class="menu-separator"></span>
-            <button type="button" disabled>Hardware stereo</button>
             <button type="button" data-toggle-palette>Tool palette</button>
+            <span class="menu-separator"></span>
             <button type="button" data-dialog="View Property">View property…</button>
           </div>
         </details>
@@ -137,69 +141,28 @@
           <summary>Tools</summary>
           <div class="menu-popup wide-menu">
             <button type="button" data-dialog="Molecular superposition">Molecular superposition…</button>
-            <button type="button" data-dialog="Mol bond editor">Mol bond editor…</button>
             <button type="button" data-dialog="Interaction">Interaction…</button>
             <button type="button" data-dialog="Reassign secondary str">Reassign secondary str…</button>
             <button type="button" data-dialog="Mol morphing animation">Mol morphing animation…</button>
-            <span class="menu-separator"></span>
             <button type="button" data-dialog="Mol surface generation">Mol surface generation…</button>
             <button type="button" data-dialog="Mol surface cutter">Mol surface cutter…</button>
-            <span class="menu-separator"></span>
             <button type="button" data-dialog="APBS elepot calculation">APBS elepot calculation…</button>
-            <span class="menu-separator"></span>
-            <button type="button" data-dialog="Execute script">Execute script…</button>
-            <button type="button" data-local-action="performance-measure">Performance measure</button>
-            <span class="menu-separator"></span>
-            <button type="button" data-dialog="MolClient tools">Molecule tools…</button>
+
           </div>
         </details>
         <details class="menu">
           <summary>Window</summary>
           <div class="menu-popup window-menu-popup">
-            <button type="button" data-local-action="toggle-ribbon">Show/Hide Topbar</button>
-            <button type="button" data-local-action="clear-log">Clear log contents</button>
-            <button type="button" data-local-action="restore-panels">Restore default panel location</button>
-            <span class="menu-separator"></span>
-            <div class="menu-submenu">
-              <button type="button" class="menu-submenu-trigger" aria-haspopup="menu">
-                <span>Panels</span><span class="menu-arrow" aria-hidden="true">›</span>
-              </button>
-              <div class="menu-popup nested-menu" role="menu">
-                <button type="button" class="checked" data-panel-menu="Workspace">Workspace</button>
-                <button type="button" class="checked" data-panel-menu="MolStruct">MolStruct</button>
-                <button type="button" class="checked" data-panel-menu="Selection">Selection</button>
-                <button type="button" class="checked" data-panel-menu="Coloring">Coloring</button>
-                <button type="button" class="checked" data-panel-menu="Symmetry">Symmetry</button>
-                <button type="button" class="checked" data-panel-menu="Density map">Density map</button>
-                <button type="button" class="checked" data-panel-menu="View">View</button>
-                <button type="button" class="checked" data-panel-menu="Animation">Animation</button>
-              </div>
-            </div>
-            <div class="menu-submenu">
-              <button
-                id="windows-menu-trigger"
-                type="button"
-                class="menu-submenu-trigger"
-                aria-haspopup="menu"
-              >
-                <span>Windows</span><span class="menu-arrow" aria-hidden="true">›</span>
-              </button>
-              <div class="menu-popup nested-menu" id="windows-menu" role="menu">
-                <button type="button" class="checked">cuemol-rs</button>
-              </div>
-            </div>
+            <button type="button" data-local-action="focus-main">Main Window</button>
+            <button type="button" data-local-action="focus-rendering">Rendering Window</button>
           </div>
         </details>
         <details class="menu">
           <summary>Help</summary>
           <div class="menu-popup">
-            <button type="button" data-dialog="About plugins">About plugins…</button>
-            <button type="button" data-dialog="About config">About config…</button>
-            <button type="button" data-dialog="Addon manager">Addon manager…</button>
             <button type="button" data-dialog="About cuemol-rs">About cuemol-rs</button>
             <span class="menu-separator"></span>
-            <button type="button" data-local-action="show-console">Console</button>
-            <button type="button" data-local-action="check-updates">Check for updates</button>
+            <button type="button" data-local-action="check-updates">Check for Updates…</button>
           </div>
         </details>
       </header>
@@ -630,7 +593,7 @@
                   <button id="trajectory-block-right" type="button" title="Move block right">›</button>
                   <span id="trajectory-block-count">0 blocks</span>
                 </div>
-                <p id="trajectory-empty">No trajectory in this scene — use File &gt; Open MD Trajectory…</p>
+                <p id="trajectory-empty">No trajectory in this scene — choose a trajectory with File &gt; Open File…</p>
               </div>
             </div>
             <div class="bottom-tabs" role="tablist">

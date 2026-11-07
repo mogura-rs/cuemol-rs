@@ -1109,8 +1109,8 @@ test('Tauri saved collapsed panels reopen and a damaged shell preference uses de
   await expect(page.locator('.side-panel')).not.toBeVisible();
   await page.getByRole('button', {name: 'Explorer', exact: true}).click();
   await expect(page.locator('[data-panel-name="Workspace"]')).toBeVisible();
-  await page.locator('summary').filter({hasText: /^Help$/}).click();
-  await page.getByRole('button', {name: 'Console', exact: true}).click();
+  await page.getByRole('separator', {name: 'Resize bottom panel', exact: true}).press('ArrowUp');
+  await page.locator('[data-bottom-select="console"]').click();
   await expect(page.getByLabel('Console command')).toBeVisible();
   expect(errors).toEqual([]);
 });
@@ -3244,5 +3244,32 @@ test('Tauri image export validates dimensions, fixes the backend, and cancels it
   await dialog.getByRole('button',{name:'OK',exact:true}).click();
   await expect.poll(()=>page.evaluate(()=>imageExportActive)).toBe(false);
   await expect(page.locator('#error-alert-dialog')).toContainText('output is not writable');
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri menus use the current groups and focus Rendering without a mode preset', async ({page}) => {
+  const errors = await openShell(page);
+  expect(await page.locator('.application-menu > .menu > summary').allTextContents()).toEqual([
+    'File','Edit','Rendering','Scene','View','Tools','Window','Help',
+  ]);
+  await page.evaluate(() => {
+    window.__focusedWindows = [];
+    window.__renderFocusRequests = [];
+    window.__TAURI__.webviewWindow = {getCurrentWebviewWindow:() => ({setFocus:async() => __focusedWindows.push('main')})};
+    CueMolRendering.open = async (...args) => __renderFocusRequests.push(args);
+  });
+  const file = page.locator('.menu').filter({has:page.locator('summary', {hasText:/^File$/})});
+  await file.locator('summary').click();
+  await expect(file.getByRole('button', {name:'New Window', exact:true})).toHaveCount(0);
+  await expect(file.getByRole('button', {name:'Quit', exact:true})).toBeVisible();
+  const windowMenu = page.locator('.menu').filter({has:page.locator('summary', {hasText:/^Window$/})});
+  await windowMenu.locator('summary').click();
+  await windowMenu.getByRole('button', {name:'Rendering Window', exact:true}).click();
+  await expect.poll(() => page.evaluate(() => __renderFocusRequests)).toEqual([[]]);
+  await windowMenu.locator('summary').click();
+  await windowMenu.getByRole('button', {name:'Main Window', exact:true}).click();
+  await expect.poll(() => page.evaluate(() => __focusedWindows)).toEqual(['main']);
+  await expect(page.locator('#viewport')).toBeFocused();
   expect(errors).toEqual([]);
 });

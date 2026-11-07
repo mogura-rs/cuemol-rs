@@ -21,6 +21,28 @@ test('Render requests select their mode and reapply its preset without immediate
   await click(page,'Rendering menu'); await click(page,'Render image');
   expect(await page.evaluate(()=>window.cuemol.status().rendering.movieMode)).toBe(false);
 });
+test('Window menu reopens Rendering without resetting its mode, dimensions or history', async ({page}) => {
+  await open(page);
+  await click(page, 'Render mode Movie');
+  await field(page, 'Render Width', 80); await field(page, 'Render Height', 60);
+  await field(page, 'Movie frame rate', 12.5);
+  const before = await page.evaluate(() => window.cuemol.status().rendering);
+  const [x,y,w] = await rect(page, 'Rendering window');
+  await page.mouse.click(x+w-14,y+13); await present(page);
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().ui.rects['Rendering window'])).toBeUndefined();
+  await click(page, 'Window menu'); await click(page, 'Rendering Window');
+  await rect(page, 'Rendering window');
+  expect(await page.evaluate(() => window.cuemol.status().rendering)).toMatchObject({
+    movieMode:true, settings:{width:80,height:60}, movieOptions:{fps:12.5}, historyCount:before.historyCount,
+  });
+  const state = await page.evaluate(() => window.cuemol.status());
+  await click(page, 'Window menu'); await click(page, 'Rendering Window');
+  expect((await page.evaluate(() => window.cuemol.status())).rendering.settings).toEqual(state.rendering.settings);
+  await click(page, 'Window menu'); await click(page, 'Main Window');
+  expect((await page.evaluate(() => window.cuemol.status())).rendering.settings).toEqual(state.rendering.settings);
+  await rect(page, 'Rendering window');
+});
+
 async function present(page) {
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
 }

@@ -139,63 +139,6 @@ const WORKSPACE_PAINT_HUES: &[(&str, i32)] = &[
 const DENSITY_RENDERER_TYPES: &[&str] = &["contour", "isosurf", "gpu_mapmesh", "gpu_mapvol"];
 const SURFACE_RENDERER_TYPES: &[&str] = &["molsurf"];
 const LIGHTWEIGHT_RENDERER_TYPES: &[&str] = &["lwrend"];
-const LEGACY_MENU_SURFACES: &[&str] = &[
-    "About cuemol-rs",
-    "Preferences...",
-    "New Window",
-    "New Tab",
-    "Open File...",
-    "Get PDB...",
-    "Clear Menu",
-    "Save File As...",
-    "Save current view...",
-    "Close Tab",
-    "Open Scene...",
-    "Reload Scene",
-    "Save Scene",
-    "Save Scene As...",
-    "Undo",
-    "Redo",
-    "Clear undo data",
-    "Merge molecule...",
-    "Delete mol atoms...",
-    "Change chain ID...",
-    "Change residue number...",
-    "Options",
-    "POV-Ray rendering...",
-    "Animation rendering...",
-    "Export scene...",
-    "White",
-    "Black",
-    "Use color proofing",
-    "Properties...",
-    "Perspective",
-    "Orthographic",
-    "Cross",
-    "Axis",
-    "None",
-    "Hardware stereo",
-    "View property...",
-    "Molecular superposition...",
-    "Mol bond editor...",
-    "Interaction...",
-    "Reassign secondary str...",
-    "Mol morphing animation...",
-    "Mol surface generation...",
-    "Mol surface cutter...",
-    "APBS elepot calculation...",
-    "Execute script...",
-    "Performance measure",
-    "Mol clinet tools ...",
-    "Show/Hide Topbar",
-    "Clear log contents",
-    "Restore default panel location",
-    "About plugins...",
-    "About config...",
-    "Addon manager...",
-    "Console",
-    "Check for updates",
-];
 
 pub fn run() -> Result<()> {
     run_with_paths(std::env::args_os().skip(1).map(PathBuf::from).collect())
@@ -5404,10 +5347,6 @@ impl GuiApplication {
         let response = egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("New Window").clicked() {
-                        self.new_window();
-                        ui.close();
-                    }
                     if ui.button("New Tab").clicked() {
                         self.open_new_tab_dialog();
                         ui.close();
@@ -5415,27 +5354,6 @@ impl GuiApplication {
                     ui.separator();
                     if ui.button("Open File...").clicked() {
                         self.choose_open_file(camera);
-                        ui.close();
-                    }
-                    if ui.button("Open with options...").clicked() {
-                        if let Some(path) =
-                            native_file_dialog(NativeFileDialog::OpenObject, &self.open_path)
-                        {
-                            self.open_path = path.to_string_lossy().into_owned();
-                            self.request_open_current_path(camera);
-                        }
-                        ui.close();
-                    }
-                    if self.state.plugin_enabled("mdtools")
-                        && ui.button("Open MD Trajectory...").clicked()
-                    {
-                        self.md_trajectory_draft = Some(NativeMdTrajectoryDraft::default());
-                        ui.close();
-                    }
-                    if ui.button("Get PDB...").clicked() {
-                        self.pdb_dialog.reset();
-                        self.pdb_dialog.history = crate::load_pdb_history();
-                        self.show_get_pdb = true;
                         ui.close();
                     }
                     ui.menu_button("Open Recent", |ui| {
@@ -5501,6 +5419,11 @@ impl GuiApplication {
                     }
                     if ui.button("Save Scene As...").clicked() {
                         self.choose_save_scene();
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Quit").clicked() {
+                        self.request_application_exit();
                         ui.close();
                     }
                 });
@@ -5637,12 +5560,6 @@ impl GuiApplication {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    if cuemol_ui::navigation::palette_menu(ui, &mut self.state) {
-                        if let Err(error) = self.persist_config_state() {
-                            self.set_status(error);
-                        }
-                    }
-                    ui.separator();
                     if ui
                         .radio_value(&mut camera.perspective, true, "Perspective")
                         .clicked()
@@ -5656,129 +5573,57 @@ impl GuiApplication {
                         self.set_status("Orthographic projection");
                     }
                     ui.separator();
-                    ui.menu_button("Stereo", |ui| {
-                        for (mode, label) in [
-                            (StereoMode::None, "None"),
-                            (StereoMode::Parallel, "Parallel"),
-                            (StereoMode::Cross, "Cross"),
-                        ] {
-                            ui.radio_value(&mut camera.stereo_mode, mode, label);
-                        }
-                        ui.checkbox(&mut camera.swap_stereo_eyes, "Swap eyes");
-                        ui.horizontal(|ui| {
-                            ui.label("Eye angle (°)");
-                            ui.add(
-                                egui::DragValue::new(&mut camera.stereo_distance)
-                                    .speed(0.1)
-                                    .range(0.0..=180.0),
-                            );
-                        });
-                        camera.store_view_options(&mut self.state);
-                    });
                     ui.menu_button("Center mark", |ui| {
                         ui.radio_value(&mut camera.center_mark, CenterMark::Cross, "Cross");
                         ui.radio_value(&mut camera.center_mark, CenterMark::Axis, "Axis");
                         ui.radio_value(&mut camera.center_mark, CenterMark::None, "None");
                     });
                     ui.separator();
-                    ui.add_enabled(false, egui::Button::new("Hardware stereo"))
-                        .on_hover_text("No hardware stereo buffer is available");
+                    if cuemol_ui::navigation::palette_menu(ui, &mut self.state) {
+                        if let Err(error) = self.persist_config_state() {
+                            self.set_status(error);
+                        }
+                    }
+                    ui.separator();
                     if ui.button("View property...").clicked() {
                         self.open_view_properties(camera);
                         ui.close();
                     }
                 });
                 ui.menu_button("Tools", |ui| {
-                    if self.state.plugin_enabled("agent") && ui.button("AI Agent...").clicked() {
-                        self.agent.visible = true;
-                        ui.close();
-                    }
                     for label in [
                         "Molecular superposition...",
-                        "Mol bond editor...",
                         "Interaction...",
                         "Reassign secondary str...",
                         "Mol morphing animation...",
                         "Mol surface generation...",
                         "Mol surface cutter...",
                         "APBS elepot calculation...",
-                        "Execute script...",
-                        "Performance measure",
-                        "Mol clinet tools ...",
                     ] {
-                        if matches!(
-                            label,
-                            "Mol surface generation..."
-                                | "APBS elepot calculation..."
-                                | "Execute script..."
-                                | "Mol clinet tools ..."
-                        ) {
-                            ui.separator();
-                        }
                         if ui.button(label).clicked() {
                             match label {
-                                "Execute script..." => self.choose_execute_script(),
                                 "Molecular superposition..." => self.open_superposition_dialog(),
                                 "Interaction..." => self.open_interaction_dialog(),
                                 "Reassign secondary str..." => self.open_secondary_dialog(),
+                                "Mol morphing animation..." => self.open_morph_tool(),
                                 "Mol surface generation..." => self.open_surface_generation_tool(),
                                 "Mol surface cutter..." => self.open_surface_cutter_tool(),
                                 "APBS elepot calculation..." => self.open_apbs_tool(),
-                                "Mol morphing animation..." => self.open_morph_tool(),
-                                "Performance measure" => {
-                                    self.perf_measure = !self.perf_measure;
-                                    self.set_status(format!(
-                                        "Performance measure: {}",
-                                        self.perf_measure
-                                    ));
-                                }
-                                "Mol clinet tools ..." => {
-                                    self.tool_dialog = Some("MolClient tools".to_string());
-                                }
-                                _ => {
-                                    self.tool_dialog =
-                                        Some(label.trim_end_matches("...").to_string());
-                                }
+                                _ => unreachable!(),
                             }
                             ui.close();
                         }
                     }
                 });
                 ui.menu_button("Window", |ui| {
-                    if ui.button("Show/Hide Topbar").clicked() {
-                        self.toggle_toolbar();
+                    if ui.button("Main Window").clicked() {
+                        self.ray_panel.focused = false;
                         ui.close();
                     }
-                    ui.separator();
-                    if ui.button("Clear log contents").clicked() {
-                        self.clear_log();
+                    if ui.button("Rendering Window").clicked() {
+                        self.open_native_render();
                         ui.close();
                     }
-                    if ui.button("Restore default panel location").clicked() {
-                        self.restore_panels();
-                        ui.close();
-                    }
-                    ui.menu_button("Panels", |ui| {
-                        for panel in LeftPanel::ALL {
-                            let index = panel.index();
-                            if ui
-                                .checkbox(&mut self.left_panel_visible[index], panel.title())
-                                .changed()
-                            {
-                                let visible = self.left_panel_visible[index];
-                                self.state.put_config_value(
-                                    &format!("left_panel:{}:visible", panel.title()),
-                                    visible.to_string(),
-                                );
-                                if visible {
-                                    self.show_workspace = true;
-                                }
-                            }
-                        }
-                    });
-                    ui.menu_button("Windows", |ui| {
-                        let _ = ui.radio(true, "cuemol-rs");
-                    });
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("About cuemol-rs").clicked() {
@@ -5787,30 +5632,9 @@ impl GuiApplication {
                         ));
                         ui.close();
                     }
-                    ui.separator();
-                    for label in [
-                        "About plugins...",
-                        "About config...",
-                        "Addon manager...",
-                        "Console",
-                        "Check for updates",
-                    ] {
-                        if ui.button(label).clicked() {
-                            match label {
-                                "Console" => {
-                                    self.bottom_tab = BottomTab::Output;
-                                    self.show_console = true;
-                                }
-                                "Check for updates" => {
-                                    self.updates.check(ctx);
-                                }
-                                _ => {
-                                    self.tool_dialog =
-                                        Some(label.trim_end_matches("...").to_string());
-                                }
-                            }
-                            ui.close();
-                        }
+                    if ui.button("Check for Updates...").clicked() {
+                        self.updates.check(ctx);
+                        ui.close();
                     }
                 });
             });
@@ -14943,7 +14767,7 @@ impl GuiApplication {
     }
 
     fn open_native_render(&mut self) {
-        self.ray_panel.focused = true;
+        self.ray_panel.request_focus();
         let mut camera = self
             .state
             .active_view_camera()
@@ -33065,14 +32889,39 @@ mod tests {
     }
 
     #[test]
-    fn native_gui_tracks_legacy_menu_surfaces() {
-        assert!(LEGACY_MENU_SURFACES.len() >= 50);
-        assert!(LEGACY_MENU_SURFACES.contains(&"Open File..."));
-        assert!(LEGACY_MENU_SURFACES.contains(&"Mol surface generation..."));
-        assert!(LEGACY_MENU_SURFACES.contains(&"Restore default panel location"));
-        assert!(LEGACY_MENU_SURFACES.contains(&"Hardware stereo"));
-        assert!(LEGACY_MENU_SURFACES.contains(&"About cuemol-rs"));
-        assert!(!LEGACY_MENU_SURFACES.contains(&"About cuemol-rs-tritium"));
+    fn native_window_menu_reopens_rendering_without_requesting_a_preset() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.request_native_render(true);
+        app.ray_panel.editor.set_size([80, 60], None);
+        app.ray_panel.editor.edited(1.);
+        app.ray_panel.movie.fps = 12.5;
+        app.tool_dialog = None;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1100., 850.))
+            .build(|ctx| app.menu_bar(ctx, &mut camera));
+        harness.run();
+        harness.get_by_label("File").click();
+        harness.run();
+        assert!(harness.query_by_label("Open File...").is_some());
+        assert!(harness.query_by_label("Quit").is_some());
+        assert!(harness.query_by_label("New Window").is_none());
+        harness.get_by_label("Window").click();
+        harness.run();
+        assert!(harness.query_by_label("Main Window").is_some());
+        assert!(harness.query_by_label("Panels").is_none());
+        harness.get_by_label("Rendering Window").click();
+        harness.run();
+        drop(harness);
+        assert_eq!(app.tool_dialog.as_deref(), Some("Native rendering"));
+        assert!(app.ray_panel.movie_mode);
+        assert_eq!(app.ray_panel.editor.pixels(), [80, 60]);
+        assert_eq!(app.ray_panel.movie.fps, 12.5);
+    }
+
+    #[test]
+    fn native_renderer_menu_excludes_generated_surface_objects() {
         assert!(RENDERER_TYPES.contains(&"ballstick"));
         assert!(RENDERER_TYPES.contains(&"disorder"));
         assert!(!RENDERER_TYPES.contains(&"molsurf"));

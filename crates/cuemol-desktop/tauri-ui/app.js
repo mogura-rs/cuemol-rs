@@ -112,8 +112,6 @@ const trajectoryBlockLeft = document.getElementById("trajectory-block-left");
 const trajectoryBlockRight = document.getElementById("trajectory-block-right");
 const trajectoryBlockCount = document.getElementById("trajectory-block-count");
 const recentMenu = document.getElementById("recent-menu");
-const windowsMenu = document.getElementById("windows-menu");
-const windowsMenuTrigger = document.getElementById("windows-menu-trigger");
 const workspaceAdd = document.getElementById("workspace-add");
 const inspectorAddRenderer = document.getElementById("inspector-add-renderer");
 const workspaceProperties = document.getElementById("workspace-properties");
@@ -8584,28 +8582,25 @@ function closeSidePanelCard(card) {
   scheduleRender(140);
 }
 
-async function renderWindowsMenu() {
-  const getAll = tauri?.webviewWindow?.getAllWebviewWindows;
-  const getCurrent = tauri?.webviewWindow?.getCurrentWebviewWindow;
-  if (!windowsMenu || !getAll || !getCurrent) return;
-  try {
-    const [windows, current] = await Promise.all([getAll(), getCurrent()]);
-    windowsMenu.replaceChildren();
-    windows.forEach((appWindow, index) => {
-      const suffix = windows.length > 1 ? ` (${index + 1})` : "";
-      const item = button(`cuemol-rs${suffix}`, appWindow.label === current.label ? "checked" : "", async () => {
-        closeMenus();
-        await appWindow.setFocus();
-      });
-      windowsMenu.append(item);
-    });
-  } catch (error) {
-    console.warn("Cannot enumerate cuemol-rs windows:", error);
-  }
-}
-
 async function handleLocalAction(action) {
   switch (action) {
+    case "focus-main": {
+      const getCurrent = tauri?.webviewWindow?.getCurrentWebviewWindow || tauri?.window?.getCurrentWindow;
+      const appWindow = await getCurrent?.();
+      await appWindow?.setFocus?.();
+      viewport?.focus({preventScroll: true});
+      break;
+    }
+    case "focus-rendering":
+      await CueMolRendering.open();
+      break;
+    case "quit": {
+      const getCurrent = tauri?.webviewWindow?.getCurrentWebviewWindow || tauri?.window?.getCurrentWindow;
+      const appWindow = await getCurrent?.();
+      await appWindow?.close?.();
+      break;
+    }
+
     case "new-window": {
       const WebviewWindow = tauri?.webviewWindow?.WebviewWindow;
       if (!WebviewWindow) {
@@ -15462,7 +15457,7 @@ function renderTrajectory() {
   trajectoryEmpty.hidden = blocks.length > 0;
   trajectoryEmpty.textContent = trajectory
     ? "No trajectory blocks — add a trajectory file."
-    : "No trajectory in this scene — use File > Open MD Trajectory…";
+    : "No trajectory in this scene — choose a trajectory with File > Open File…";
 
   const blocksKey = JSON.stringify([
     trajectory?.objectUid ?? null,
@@ -16707,7 +16702,7 @@ workspaceProperties.addEventListener("click", async () => {
 document.querySelectorAll("[data-local-action]").forEach((element) => {
   element.addEventListener("click", () => {
     closeMenus();
-    handleLocalAction(element.dataset.localAction);
+    handleLocalAction(element.dataset.localAction).catch(showError);
   });
 });
 
@@ -16760,8 +16755,6 @@ document.querySelectorAll("[data-panel-menu]").forEach((element) => {
   });
 });
 
-windowsMenuTrigger?.addEventListener("pointerenter", renderWindowsMenu);
-windowsMenuTrigger?.addEventListener("focus", renderWindowsMenu);
 
 document.querySelectorAll(".menu").forEach((menu) => {
   menu.addEventListener("toggle", () => {

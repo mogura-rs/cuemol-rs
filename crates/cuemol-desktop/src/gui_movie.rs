@@ -334,6 +334,18 @@ mod tests {
         app.request_native_render(true);
         assert_eq!(app.ray_panel.editor.pixels(), [320, 240]);
         assert_eq!(app.ray_panel.editor.number("umbreon.aoDistance"), 4.);
+        app.ray_panel.editor.set_size([800, 600], None);
+        app.ray_panel.editor.edited(1.);
+        app.tool_dialog = None;
+        app.open_native_render();
+        assert!(app.ray_panel.movie_mode);
+        assert_eq!(app.ray_panel.editor.pixels(), [800, 600]);
+        assert_eq!(app.ray_panel.movie.fps, 29.97);
+        let before = app.state.clone();
+        let undo = app.undo_stack.len();
+        app.open_native_render();
+        assert!(app.state.same_undo_state(&before));
+        assert_eq!(app.undo_stack.len(), undo);
         app.request_native_render(false);
         assert_eq!(app.ray_panel.editor.pixels(), [1200, 1200]);
         assert_eq!(app.ray_panel.editor.number("dpi"), 600.);

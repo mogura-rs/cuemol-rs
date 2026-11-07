@@ -9,7 +9,7 @@ async function click(page,key){
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
 }
 async function settings(page){
-  await click(page,'Tools menu');await click(page,'Settings');await click(page,'Settings Mouse & Navigation');
+  await click(page,'Edit menu');await click(page,'Settings');await click(page,'Settings Mouse & Navigation');
   const [x,y,w,h]=(await status(page)).ui.rects['Settings window'];
   await page.mouse.move(x+w-30,y+h/2);await page.mouse.wheel(0,-1600);
   await expect.poll(async()=>(await status(page)).ui.rects['GPU picking'][1]).toBeGreaterThan(y+25);

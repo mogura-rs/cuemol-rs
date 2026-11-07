@@ -1,5 +1,35 @@
 # Validation evidence
 
+## Current application menu and Rendering reopen behavior
+
+The current reference removed the old New Window, hardware-stereo placeholder,
+legacy tool entries and panel-layout menu. Native egui, Tauri and browser now
+share the File/Edit/Rendering/Scene/View/Tools/Window order and corresponding
+entries. Browser preferences are available through Edit > Options. Normal file
+loading still detects trajectory files; its empty-state guidance was corrected
+when the dedicated legacy menu entry was removed. Native Quit uses the existing
+unsaved-scene guard. Tauri's Main Window action has explicit focus permission.
+
+Window > Rendering Window preserves the current mode, custom dimensions,
+target and history. Tauri previously defaulted an unspecified mode to Still;
+its no-argument reopen now leaves the mode unchanged. Shared egui focus raises
+the existing panel without requesting a size preset. These are currently
+modeless panels inside the main native window; they do not yet establish parity
+with the reference's separate OS rendering window. Branding and platform menu
+placement remain under audit.
+
+The existing native GUI suite passes 237 cases; an additional real egui menu
+interaction test also passes. Shared UI passes 74 cases, shell contracts pass
+68 cases, and the Tauri capability build check passes. The rebuilt browser's
+128-case run passes 127 cases. Its single failed new test requested a nonexistent
+status field; the corrected reopen check passes separately. That run includes
+all 84 Tauri shell operation cases, browser preferences, file destinations,
+picking, rendering and keyboard/menu operations. Five existing Tauri Rendering
+cases passed in the earlier run; the new focus/mode case and the changed browser
+input-settings case pass in the focused rerun. Earlier failures from removed
+Help > Console and obsolete source-contract strings were corrected to test the
+current controls. No unresolved product failure remains in these checks.
+
 ## Browser image-export workflow
 
 The browser's immediate Save PNG action has been replaced with explicit PNG and

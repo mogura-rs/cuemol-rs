@@ -308,17 +308,16 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "Umbreon ray-traced image…",
         "Movie rendering…",
         "Molecular superposition",
-        "Mol bond editor",
         "Interaction",
         "Mol surface generation",
         "APBS elepot calculation",
-        "Molecule tools…",
-        "Restore default panel location",
-        "Check for updates",
+        "Main Window",
+        "Rendering Window",
+        "Check for Updates…",
     ] {
         assert!(HTML.contains(item), "missing menu item {item}");
     }
-    assert!(HTML.contains("<span>Background color</span>"));
+    assert!(HTML.contains("<span>Background</span>"));
     assert!(HTML.contains("<button type=\"button\" data-background=\"white\">White</button>"));
     assert!(HTML.contains("<button type=\"button\" data-background=\"black\">Black</button>"));
     assert!(HTML.contains("<span>Center mark</span>"));
@@ -428,7 +427,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
             "missing native MolClient {label}"
         );
     }
-    assert!(HTML.contains("Molecule tools…"));
+    assert!(!HTML.contains("data-dialog=\"MolClient tools\""));
     assert!(JS.contains("get_molclient_renderer_setup"));
     assert!(JS.contains("rendererSetup: result.rendererSetup"));
     assert!(TAURI_APP_RS.contains("CreateMoleculeFromSmiles"));
@@ -468,11 +467,11 @@ fn tauri_main_menu_matches_the_reference_inventory() {
 }
 
 #[test]
-fn tauri_window_menu_toggles_reference_panels_and_lists_windows() {
-    assert!(HTML.contains("<span>Panels</span>"));
-    assert!(HTML.contains("<span>Windows</span>"));
-    assert_eq!(HTML.matches("data-panel-menu=").count(), 8);
-    assert!(HTML.contains("id=\"windows-menu\""));
+fn tauri_window_menu_focuses_main_and_rendering_while_panels_keep_local_controls() {
+    assert!(HTML.contains("data-local-action=\"focus-main\""));
+    assert!(HTML.contains("data-local-action=\"focus-rendering\""));
+    assert!(JS.contains("await CueMolRendering.open();"));
+    assert!(!HTML.contains("data-panel-menu="));
     assert!(CSS.contains(".window-menu-popup"));
     assert!(CSS.contains(".application-menu {"));
     assert!(CSS.contains("z-index: 40"));
@@ -505,8 +504,7 @@ fn tauri_window_menu_toggles_reference_panels_and_lists_windows() {
     assert!(NATIVE_GUI_RS.contains("fn left_panel_resize_handle"));
     assert!(NATIVE_GUI_RS.contains(".small_button(\"×\")"));
     assert!(NATIVE_GUI_RS.contains("Close panel"));
-    assert!(JS.contains("getAllWebviewWindows"));
-    assert!(JS.contains("await appWindow.setFocus()"));
+    assert!(JS.contains("await appWindow?.setFocus?.()"));
     assert!(JS.contains("WINDOW_GEOMETRY_STORAGE_KEY"));
     assert!(JS.contains("function setupWindowGeometryPersistence()"));
     assert!(JS.contains("await appWindow.setSize("));

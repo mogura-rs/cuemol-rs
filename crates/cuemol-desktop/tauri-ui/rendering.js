@@ -390,10 +390,11 @@ const CueMolRendering = (() => {
   async function close() {
     try{await request('close');dialogElement.close();clearInterval(timer);}catch{}
   }
-  async function open(backend,movie=false) {
+  async function open(backend,movie) {
     if(!dialogElement)build();
     await request('open',{backend,movie});
     if(!dialogElement.open)dialogElement.show();
+    if(!dialogElement.contains(document.activeElement)){dialogElement.tabIndex=-1;dialogElement.focus({preventScroll:true});}
     clearInterval(timer);timer=setInterval(()=>{if(!pending&&dialogElement.open)send('poll');},250);
     frame();
   }
