@@ -144,7 +144,9 @@ async function initialize() {
 }
 async function pickDirectory() {
   if (typeof showDirectoryPicker !== 'function') throw failure('This browser does not support choosing an output folder');
-  const handle = await showDirectoryPicker({id: 'cuemol-movies', mode: 'readwrite'});
+  let handle;
+  try { handle = await showDirectoryPicker({id: 'cuemol-movies', mode: 'readwrite'}); }
+  catch (error) { if (error.name === 'AbortError') return null; throw error; }
   await initialize();
   return navigator.locks.request('cuemol-movie-folder-registry', async () => {
     const records = await folderRecords();
@@ -335,11 +337,14 @@ function downloadFile(file) {
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 async function saveMovie(path) {
-  const destination = typeof showSaveFilePicker === 'function'
-    ? showSaveFilePicker({suggestedName: path.split('/').at(-1)}) : null;
+  let destination;
+  if (typeof showSaveFilePicker === 'function') {
+    try { destination = await showSaveFilePicker({suggestedName: path.split('/').at(-1)}); }
+    catch (error) { if (error.name === 'AbortError') return; throw error; }
+  }
   const file = await movieFile(path);
   if (!destination) { downloadFile(file); return; }
-  const writer = await (await destination).createWritable();
+  const writer = await destination.createWritable();
   try { await file.stream().pipeTo(writer); }
   catch (error) { await writer.abort().catch(() => {}); throw error; }
 }

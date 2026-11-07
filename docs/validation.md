@@ -1,5 +1,33 @@
 # Validation evidence
 
+## Browser movie pickers and cancellation
+
+A headed Chromium window now exercises the real Linux directory and save
+dialogs, including the browser's write-access confirmation. Mouse and keyboard
+input choose a folder and filename containing spaces; neither picker API nor
+its result is replaced. The application writes three 64-by-48 PNG
+frames and a 29.97-fps MP4 to that folder. Save movie as produces identical
+bytes, and bundled FFmpeg decodes all three frames at the expected size with
+different frame hashes. Cancelling either dialog preserves settings, output
+history and existing files. Screenshots were inspected.
+
+This check exposed an application issue: cancelling a picker replaced the
+render log with the browser's internal AbortError text. A regression fails on
+the prior build and passes after treating picker cancellation as an empty
+result. Other failures, including permission errors, remain visible. The save
+path now awaits the picker before opening the source file, so an early picker
+rejection cannot leave an unobserved promise. The focused regression covers
+folder and save cancellation, retained history/logs and a real error path.
+All eight browser movie adapter and Rendering checks pass, including WebGL and
+WebGPU output, re-encoding, cleanup, locks and cancellation during output. The
+optimized WASM build, formatting and diff checks also pass.
+
+The native-dialog harness initially used Enter and observed an aborted
+selection. Using explicit mouse actions separates selection
+from permission approval. The final run uses a fresh browser profile and exits
+successfully with no page errors. This evidence covers Linux Chromium; other
+browser/OS picker integrations remain outside this run.
+
 ## Rendering controls preserve saved numeric values
 
 The shared egui controls previously clamped stored image dimensions, DPI and
@@ -153,9 +181,10 @@ pass. A fresh CLI with GUI and bundled web assets builds, and all 43 served file
 match the staged manifest, including JavaScript/WASM MIME types. The embedded
 application passes the mode-request regression; the preceding embedded build
 also passed a complete movie output workflow. The browser tests
-exercise real downloads and movie tabs; custom-folder tests use genuine browser
-storage handles through a substituted picker. Actual OS directory/save dialogs
-have not been driven. Browser storage availability and codec support remain
+exercise real downloads and movie tabs; the initial custom-folder tests use
+genuine browser storage handles through a substituted picker. Real Linux
+directory/save dialogs are now covered by the later picker check above.
+Browser storage availability and codec support remain
 platform-dependent, and these checks do not establish complete reference parity.
 
 ## Scene-scoped application history

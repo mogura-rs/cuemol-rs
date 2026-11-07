@@ -536,10 +536,11 @@ impl App {
                     && options == self.render_panel.movie =>
             {
                 match result {
-                    Ok(info) => self
+                    Ok(info) if !info.is_null() => self
                         .render_panel
                         .movie
                         .set_custom(info["label"].as_str().unwrap_or_default().into()),
+                    Ok(_) => {}
                     Err(error) => self.render_panel.message = error,
                 }
             }

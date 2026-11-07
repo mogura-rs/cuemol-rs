@@ -949,6 +949,7 @@ frame and bounded history previews stay in memory. Frame browsing serializes
 reads and gives priority to the latest slider request. Choose a custom folder
 with the folder button when the browser supports directory access. Save movie as
 uses the browser's file picker or a download, and Open movie opens a media tab.
+Cancelling a folder or save picker preserves the settings, history and render log.
 Browser temporary output follows the retention policy above, but clearing site
 storage or browser eviction can also remove it. Custom folders are never swept.
 

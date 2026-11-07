@@ -144,3 +144,43 @@ test('Movie output continues after closing Rendering and Stop preserves concurre
   await click(page, 'Render');
   await page.screenshot({path:testInfo.outputPath('movie-stopped-with-live-edits.png')});
 });
+
+test('Movie picker cancellation preserves settings, output history and the render log', async ({page}) => {
+  test.setTimeout(120000);
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  await ready(page, 'webgl');
+  const before = (await status(page)).rendering;
+  await page.evaluate(() => {
+    globalThis.pickerCalls = 0;
+    globalThis.showDirectoryPicker = async () => {
+      pickerCalls++;
+      throw new DOMException('The user aborted a request.', 'AbortError');
+    };
+  });
+  await click(page, 'Browse movie folder');
+  await expect.poll(() => page.evaluate(() => pickerCalls)).toBe(1);
+  await call(page, 'get_render_settings');
+  expect((await status(page)).rendering).toEqual(before);
+  await click(page, 'Start Render');
+  await expect.poll(async () => (await status(page)).rendering.historyCount, {timeout:90000}).toBe(1);
+  const rendered = (await status(page)).rendering;
+  await page.evaluate(() => {
+    globalThis.showSaveFilePicker = async () => {
+      pickerCalls++;
+      throw new DOMException('The user aborted a request.', 'AbortError');
+    };
+  });
+  await click(page, 'Save movie as');
+  await expect.poll(() => page.evaluate(() => pickerCalls)).toBe(2);
+  await call(page, 'get_render_settings');
+  expect((await status(page)).rendering).toEqual(rendered);
+  await page.evaluate(() => {
+    globalThis.showSaveFilePicker = async () => {
+      throw new DOMException('Permission denied by test', 'SecurityError');
+    };
+  });
+  await click(page, 'Save movie as');
+  await expect.poll(async () => (await status(page)).rendering.message).toBe('Permission denied by test');
+  expect((await status(page)).rendering.current).toEqual(rendered.current);
+  expect(errors).toEqual([]);
+});
