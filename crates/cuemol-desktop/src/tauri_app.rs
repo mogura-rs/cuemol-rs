@@ -10695,7 +10695,7 @@ fn handle_model_request(
                 return Ok(ModelResponse::FileRendererSetup(None));
             };
             let object_name = path
-                .file_name()
+                .file_stem()
                 .and_then(|name| name.to_str())
                 .filter(|name| !name.trim().is_empty())
                 .ok_or_else(|| "the file name is invalid".to_string())?;
@@ -10717,6 +10717,13 @@ fn handle_model_request(
                     file_setup.msms_reader_options,
                 )?,
             };
+            if file_setup.target == crate::GuiFileRendererTarget::Molecule {
+                setup.options.insert(0, RendererSetupOptionDto {
+                    name: "auto".into(), description: "Automatic representations".into(), preset: false,
+                });
+                setup.renderer_type = "auto".into();
+                setup.renderer_name = "auto1".into();
+            }
             setup.amber_prmtop_options = file_setup.amber_prmtop_reader_options;
             setup.map_header = file_setup.map_header;
             Ok(ModelResponse::FileRendererSetup(Some(setup)))
@@ -18275,9 +18282,13 @@ mod tests {
         };
         assert_eq!(
             defaults.object_name,
-            path.file_name().unwrap().to_string_lossy()
+            path.file_stem().unwrap().to_string_lossy()
         );
         assert_eq!(defaults.target_kind, "molecule");
+        assert_eq!(defaults.renderer_type, "auto");
+        assert_eq!(defaults.options[0].name, "auto");
+        assert!(model.snapshot().objects.is_empty());
+        assert!(model.undo_stack.is_empty());
         assert!(!defaults.options.is_empty());
         assert_eq!(
             defaults.reader_options.as_ref().map(|options| (

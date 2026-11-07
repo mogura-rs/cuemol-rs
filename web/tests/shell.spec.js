@@ -1,3 +1,4 @@
+import {acceptFileOptions} from './support.js';
 import {test, expect} from '@playwright/test';
 import {readFile} from 'node:fs/promises';
 
@@ -13,6 +14,7 @@ async function command(page, name, args={}) {
 }
 async function click(page, name) {
   await expect.poll(async()=>(await status(page)).ui.rects[name]?.length).toBe(4);
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
   const [x,y,w,h]=(await status(page)).ui.rects[name];
   await page.mouse.click(x+w/2,y+h/2);
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
@@ -21,6 +23,7 @@ async function setup(page) {
   await page.goto('./?renderer=webgl');
   await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
   await page.locator('#files').setInputFiles({name:'shell.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
+  await acceptFileOptions(page, {fixtureNames:true});
   await expect.poll(async()=>(await status(page)).scene.objects.length).toBe(1);
   const [x,y,w,h]=(await status(page)).ui.rects.Viewport;
   await page.mouse.click(x+w*.9,y+h*.8);
@@ -107,7 +110,9 @@ test('browser Edit menu opens a working molecular edit form',async({page})=>{
   const object=await setup(page);
   await click(page,'Edit menu');
   await click(page,'Delete mol atoms…');
-  await click(page,'Command Run');
+  await click(page,'Molecule edit Selection');
+  await page.keyboard.type('*');
+  await click(page,'Molecule edit OK');
   await expect.poll(async()=>(await status(page)).scene.objects[0].atoms).toBe(0);
   await command(page,'undo');
   await expect.poll(async()=>(await status(page)).scene.objects[0].atoms).toBe(object.atoms);
@@ -127,12 +132,12 @@ test('browser toolbar history jumps over several edits',async({page},testInfo)=>
   await expect.poll(async()=>(await status(page)).scene.objects[0].name).toBe('Second edit');
 });
 
-test('browser Crystal action creates symmetry mates through its command form',async({page})=>{
+test('browser Crystal action creates symmetry mates through its pane',async({page})=>{
   const object=await setup(page);
   await command(page,'set_symmetry',{objId:object.id,a:20,b:20,c:20,alpha:90,beta:90,gamma:90,spaceGroup:1});
   await click(page,'Crystal');
-  await click(page,'Show symmetry mates…');
-  await click(page,'Command Run');
+  await click(page,'Symmetry mates');
+  await click(page,'Symmetry extent 20 Å');
   await expect.poll(async()=>(await status(page)).scene.objects[0].renderers.some(r=>r.type==='*symm')).toBe(true);
   await command(page,'undo');
   await expect.poll(async()=>(await status(page)).scene.objects[0].renderers.some(r=>r.type==='*symm')).toBe(false);

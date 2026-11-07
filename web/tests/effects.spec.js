@@ -1,3 +1,4 @@
+import {acceptFileOptions} from './support.js';
 import {test, expect} from '@playwright/test';
 import {PNG} from 'pngjs';
 
@@ -26,6 +27,7 @@ for (const backend of ['webgpu', 'webgl']) {
     }
     expect(await page.evaluate(()=>window.cuemol.backend)).toBe(backend);
     await page.locator('#files').setInputFiles({name:'contacts.pdb', mimeType:'application/octet-stream', buffer:Buffer.from(pdb)});
+  await acceptFileOptions(page, {fixtureNames:true});
     await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
     const command=async(name,args)=>{
       const id=await page.evaluate(([name,args])=>window.cuemol.command(name,args),[name,args]);

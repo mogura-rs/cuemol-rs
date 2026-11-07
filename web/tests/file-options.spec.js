@@ -121,7 +121,7 @@ test('CCP4 header inspection is bounded and reader options precede map centering
 test('browser companion files load NAMD coordinates and portable MSMS surfaces',async({page})=>{
   await ready(page);
   const coor=Buffer.alloc(28);coor.writeInt32LE(1);[1.25,-2.5,3.75].forEach((x,i)=>coor.writeDoubleLE(x,4+i*8));
-  await load(page,'frame.coor',coor);
+  await load(page,'frame.coor',coor,{accept:false});
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().ui.rects['File choose companion']),{timeout:60000}).toBeTruthy();
   expect((await page.evaluate(()=>window.cuemol.status())).scene.objects).toHaveLength(0);
   const psf='PSF\n\n       1 !NTITLE\n REMARKS tiny\n       1 !NATOM\n       1 SEG      1 LIG  C1   C       0.000000       12.0110           0\n       0 !NBOND: bonds\n';
@@ -131,7 +131,7 @@ test('browser companion files load NAMD coordinates and portable MSMS surfaces',
   expect(state.scene.objects[0].atoms).toBe(1);
   const result=await call(page,'execute_script',{source:`print(cuemol.getObject(${state.scene.objects[0].id}).getAtomByID(1).pos.x);`});
   expect(Number(JSON.parse(result.message).log.trim())).toBe(1.25);
-  await load(page,'triangle.face',Buffer.from('# MSMS\n# faces\n1\n1 2 3\n'));
+  await load(page,'triangle.face',Buffer.from('# MSMS\n# faces\n1\n1 2 3\n'),{accept:false});
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().ui.rects['File choose companion'])).toBeTruthy();
   await companion(page,'triangle.vert','# MSMS\n# vertices\n3\n0 0 0 0 0 1\n1 0 0 0 0 1\n0 1 0 0 0 1\n');
   await finish(page,'triangle.face');
@@ -230,4 +230,37 @@ test('compressed MTZ reader choices create a map with one-step history',async({p
   expect(state.scene.maps).toHaveLength(0);
   state=await call(page,'redo');
   expect(state.scene.maps).toHaveLength(1);
+});
+
+
+for (const backend of ['webgl','webgpu']) test(`ordinary file opens always wait for options (${backend})`, async ({page},testInfo) => {
+  await ready(page,backend);
+  const before=await call(page,'clear_undo');
+  await page.locator('#files').setInputFiles(file('first.pdb',pdb));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().ui.rects['File options Open'])).toBeTruthy();
+  expect((await page.evaluate(()=>window.cuemol.status())).scene.objects).toEqual(before.scene.objects);
+  await page.screenshot({path:testInfo.outputPath('ordinary-file-options.png')});
+  await click(page,'File options Cancel');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().loading)).toBe(false);
+  expect((await page.evaluate(()=>window.cuemol.status())).scene.objects).toHaveLength(0);
+  await page.locator('#files').setInputFiles([file('first.pdb',pdb),file('second.pdb',pdb)]);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Choose options for first.pdb');
+  await click(page,'File options Open');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Choose options for second.pdb');
+  const first=(await page.evaluate(()=>window.cuemol.status())).scene.objects;
+  expect(first).toHaveLength(1);expect(first[0].name).toBe('first');
+  expect(first[0].renderers[0].type).toBe('ribbon');
+  await click(page,'File options Cancel');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().loading)).toBe(false);
+  expect((await page.evaluate(()=>window.cuemol.status())).scene.objects).toEqual(first);
+  expect((await call(page,'undo')).scene.objects).toHaveLength(0);
+  expect((await call(page,'redo')).scene.objects).toEqual(first);
+  await page.evaluate(source=>{
+    const files=new DataTransfer();files.items.add(new File([source],'dropped.pdb'));
+    document.dispatchEvent(new DragEvent('drop',{bubbles:true,dataTransfer:files}));
+  },pdb);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Choose options for dropped.pdb');
+  expect((await page.evaluate(()=>window.cuemol.status())).scene.objects).toEqual(first);
+  await finish(page,'dropped.pdb');
+  expect((await page.evaluate(()=>window.cuemol.status())).scene.objects).toHaveLength(2);
 });

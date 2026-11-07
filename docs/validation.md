@@ -1,5 +1,38 @@
 # Validation evidence
 
+## Options before every object-file open
+
+Following the explicit user choice, native egui, browser and Tauri file opens
+now display setup for every supported object file. This includes ordinary
+molecules, command-line inputs and dropped files. Scene, camera, ICC and
+trajectory inputs retain their dedicated flows. Each batch waits for acceptance
+or cancellation before advancing. Automatic molecular representations remain
+the initial choice, so accepting the defaults creates protein ribbons,
+nucleotide cartoons and ball-and-stick for other atoms. Automatic mode disables
+the single renderer-name field; explicit representations keep it editable.
+Object names remove the final filename extension and receive unique suffixes.
+
+The native suite passes 217 cases, and the Tauri model suite passes 188 with
+five existing ignored cases. Linux OS input confirms deferred startup,
+automatic ligand rendering, two-file acceptance/cancellation and Undo/Redo.
+The existing XDND destination/failure/redo check also passes after adapting it
+to the per-file options flow. Native, browser and Tauri screenshots were
+inspected. The 315-case browser baseline passed 312 and exposed three outdated harness
+assumptions: dragging before options were accepted, the old generic molecule
+edit form, and the old generic symmetry form. The harness now waits for field
+focus, accepts options before releasing the parser, enters an explicit deletion
+selection and uses the symmetry pane. All three failed cases pass in the eight
+focused loading, file-option, navigation and shell reruns. The loading regression
+also passed three consecutive isolated runs before the final suite.
+
+The former guide described immediate ordinary molecule loading and optional
+setup. It now describes the selected every-open behavior; the earlier validation
+entry is explicitly historical. Existing browser fixtures deliberately set
+object names to their previous test targets while accepting the new dialog.
+The native OS checker also accepts startup options before waiting for objects.
+These harness changes preserve the existing behavior assertions. Per-object-class
+renderer history remains a separate open item.
+
 ## Secondary-structure dialog
 
 Native egui and the browser share the Reassign secondary structure form. Its
@@ -39,9 +72,8 @@ and kept successful forms open; native/Tauri also recorded empty undo steps.
 Tauri defaulted to the active selection and closed after failures. These gaps
 are corrected, and the guide/checklist now distinguish secondary structure from
 the remaining transformation and surface dialogs. The previously documented
-immediate molecule-open default is being replaced following the explicit user
-choice to show reader options for every file open; its verification belongs to
-the following reader-options change.
+immediate molecule-open default was subsequently replaced by the reader-options
+change above, following the explicit user choice to show options every time.
 
 
 ## Molecule edit dialogs and residue-index bounds
@@ -126,7 +158,7 @@ open. The command catalog's own defaults are unchanged.
 
 ## Browser reader options and native deferred imports
 
-Native egui and the browser now expose optional file setup. The browser dialog
+At this stage, native egui and the browser introduced optional file setup. The browser dialog
 covers PDB/mmCIF flags, renderer/preset selection and names, selection, map-center
 policies, CCP4 strides/kinds/limits, MTZ columns and companion files. Required
 NAMD/MSMS companions open the dialog automatically. AMBER companions are optional.
@@ -136,7 +168,8 @@ successful imports form one history entry. Native reader sections now collapse
 and reset, and action buttons stay outside their scroll area.
 
 The native drop/startup queue retains its batch while a companion dialog is
-open. Ordinary molecules still load immediately. Maps now receive a contour
+open. Ordinary molecules initially loaded immediately; the later per-file
+options change above replaces that default. Maps receive a contour
 renderer and the shared Auto policy. Cancelling options skips that file, and
 changing scenes discards the pending companion batch. Tests cover preserved
 first destinations, no insertion before acceptance, cancellation, stale scene

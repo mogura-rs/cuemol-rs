@@ -974,7 +974,7 @@ impl App {
                             if file.name().to_ascii_lowercase().ends_with(".qax") {
                                 open_file(file);
                             } else {
-                                self.queue_request(loading::Source::File(
+                                self.queue_request(loading::Source::Options(
                                     file,
                                     Some(batch.clone()),
                                 ));

@@ -1,3 +1,4 @@
+import {acceptFileOptions} from './support.js';
 import {test, expect} from '@playwright/test';
 
 const pdb = `HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C
@@ -40,6 +41,7 @@ async function setup(page, backend = 'webgl') {
   await page.goto(`./?renderer=${backend}`);
   await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout:60000}).toBeGreaterThan(0);
   await page.locator('#files').setInputFiles({name:'inspector.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
+  await acceptFileOptions(page, {fixtureNames:true});
   await expect.poll(async () => (await status(page)).scene.objects.length).toBe(1);
   const object = (await status(page)).scene.objects[0];
   const created = await command(page,'create_renderer',{objId:object.id,rendererType:'ribbon',name:'Properties'});
@@ -387,6 +389,7 @@ test('Map pages follow map kind, retain an empty display limit and batch center 
   bytes.writeFloatLE(7,80); bytes.writeFloatLE(3.5,84); bytes.writeFloatLE(2,216);
   for(let i=0;i<64;i++)bytes.writeFloatLE(i%8,1024+i*4);
   await page.locator('#files').setInputFiles({name:'kind.mrc',mimeType:'application/octet-stream',buffer:bytes});
+  await acceptFileOptions(page, {fixtureNames:true});
   await expect.poll(async()=>(await status(page)).scene.maps.length).toBe(1);
   const map=(await status(page)).scene.maps[0];
   const created=await command(page,'create_renderer',{objId:map.id,rendererType:'contour',name:'Map controls'});

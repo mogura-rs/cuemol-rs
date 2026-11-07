@@ -1,3 +1,4 @@
+import {acceptFileOptions} from './support.js';
 import {test, expect} from '@playwright/test';
 import {PNG} from 'pngjs';
 
@@ -34,6 +35,7 @@ for (const backend of ['webgl','webgpu']) {
     expect(await page.evaluate(() => window.cuemol.backend)).toBe(backend);
     for (const [index,name] of ['Probe','Target'].entries()) {
       await page.locator('#files').setInputFiles({name:`${name}.pdb`,mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
+  await acceptFileOptions(page, {fixtureNames:true});
       await expect.poll(async () => (await status(page)).scene.objects.length).toBe(index+1);
     }
     let [probe,target] = (await status(page)).scene.objects;
@@ -93,6 +95,7 @@ for (const backend of ['webgl','webgpu']) {
     expect(bytes.toString()).toContain('sel1="focus"');
     await command(page,'create_scene',{name:'reload'});
     await page.locator('#files').setInputFiles({name:'measurement.qsc',mimeType:'application/octet-stream',buffer:bytes});
+  await acceptFileOptions(page, {fixtureNames:true});
     await expect.poll(async () => (await status(page)).message).toBe('Loaded measurement.qsc');
     const objects = (await status(page)).scene.objects;
     probe = objects.find(object => object.name === 'Probe');
@@ -119,6 +122,7 @@ HETATM    3  C3  LIG A   1       4.000  -2.000   0.000  1.00 10.00           C
 END
 `;
     await page.locator('#files').setInputFiles({name:'arrows.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(arrows)});
+  await acceptFileOptions(page, {fixtureNames:true});
     await expect.poll(async () => (await status(page)).scene.objects.length).toBe(1);
     const object = (await status(page)).scene.objects[0];
     for (const renderer of object.renderers) await command(page,'delete_node',{nodeType:'renderer',nodeId:renderer.id});

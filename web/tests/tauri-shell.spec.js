@@ -175,6 +175,13 @@ async function openShell(page, storage = {}, options = {}) {
         snapshot.status=args.selection1 === 'none' ? 'No interaction was found' : 'Defined 1 interaction(s) in measure';
         return structuredClone(snapshot);
       }
+      if(options.fileDefaults && command==='get_file_renderer_setup')return {
+        targetKind:'molecule',objectName:args.path.replace(/\.[^.]+$/,''),rendererType:'auto',rendererName:'auto1',recenter:true,
+        options:[{name:'auto',description:'Automatic representations',preset:false},{name:'cpk',description:'CPK',preset:false}],
+      };
+      if(options.fileDefaults && command==='open_path_with_renderer_setup') {
+        snapshot.openedPaths=[args.path];snapshot.status='Loaded '+args.path;return {snapshot,viewport};
+      }
       if(options.files && command==='get_file_renderer_setup')return null;
       if(options.files && command==='open_paths') {
         const context=args.openContext;
@@ -2561,5 +2568,28 @@ test('secondary dialog gates modes, preserves errors, remembers molecule and res
   await expect(dialog.getByRole('alert')).toContainText('active scene changed');
   expect((await last()).ignoreBulge).toBe(true);
   await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri file opens show options for each file and preserve automatic representations',async({page},testInfo)=>{
+  const errors=await openShell(page,{}, {files:true,fileDefaults:true});
+  await page.evaluate(()=>{void openSelectedPaths(['first.pdb','second.pdb'],true);});
+  const dialog=page.locator('#reference-dialog');
+  await expect(dialog.getByLabel('Object:',{exact:true})).toHaveValue('first');
+  await expect(dialog.getByLabel('Renderer type:',{exact:true})).toHaveValue('auto');
+  await expect(dialog.getByLabel('Renderer name:',{exact:true})).toBeDisabled();
+  expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='open_path_with_renderer_setup').length)).toBe(0);
+  await dialog.getByLabel('Renderer type:',{exact:true}).selectOption('cpk');
+  await expect(dialog.getByLabel('Renderer name:',{exact:true})).toBeEnabled();
+  await dialog.getByLabel('Renderer type:',{exact:true}).selectOption('auto');
+  await page.screenshot({path:testInfo.outputPath('tauri-file-defaults.png')});
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await expect(dialog.getByLabel('Object:',{exact:true})).toHaveValue('second');
+  const calls=await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='open_path_with_renderer_setup'));
+  expect(calls).toHaveLength(1);expect(calls[0].args.fileSetup.rendererSetup.rendererType).toBe('auto');
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='open_path_with_renderer_setup').length)).toBe(1);
   expect(errors).toEqual([]);
 });

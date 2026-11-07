@@ -1,3 +1,4 @@
+import {acceptFileOptions} from './support.js';
 import {test, expect} from '@playwright/test';
 import {PNG} from 'pngjs';
 
@@ -25,6 +26,7 @@ for (const backend of ['webgl', 'webgpu']) {
     expect(await page.evaluate(() => window.cuemol.backend)).toBe(backend);
     for (const [index, name] of ['Probe', 'Target'].entries()) {
       await page.locator('#files').setInputFiles({name:`${name}.pdb`, mimeType:'application/octet-stream', buffer:Buffer.from(pdb)});
+  await acceptFileOptions(page, {fixtureNames:true});
       await expect.poll(async () => (await status(page)).scene.objects.length).toBe(index + 1);
     }
     const [probe, target] = (await status(page)).scene.objects;
@@ -81,6 +83,7 @@ for (const backend of ['webgl', 'webgpu']) {
     await page.goto(`./?renderer=${backend}`);
     await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout:60000}).toBeGreaterThan(0);
     await page.locator('#files').setInputFiles({name:'Probe.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
+  await acceptFileOptions(page, {fixtureNames:true});
     await expect.poll(async () => (await status(page)).scene.objects.length).toBe(1);
     const object=(await status(page)).scene.objects[0];
     const result=await command(page,'execute_script',{source:`
@@ -114,6 +117,7 @@ for (const backend of ['webgl', 'webgpu']) {
     await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout:60000}).toBeGreaterThan(0);
     for (const name of ['Probe','Target']) {
       await page.locator('#files').setInputFiles({name:`${name}.pdb`,mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
+  await acceptFileOptions(page, {fixtureNames:true});
       await expect.poll(async () => (await status(page)).scene.objects.length).toBe(name === 'Probe' ? 1 : 2);
     }
     const [probe, target] = (await status(page)).scene.objects;
@@ -144,6 +148,7 @@ for (const backend of ['webgl', 'webgpu']) {
     await page.goto(`./?renderer=${backend}`);
     await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout:60000}).toBeGreaterThan(0);
     await page.locator('#files').setInputFiles({name:'Probe.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
+  await acceptFileOptions(page, {fixtureNames:true});
     await expect.poll(async () => (await status(page)).scene.objects.length).toBe(1);
     const object = (await status(page)).scene.objects[0];
     await command(page, 'rename_node', {nodeType:'object',nodeId:object.id,name:'renamed'});

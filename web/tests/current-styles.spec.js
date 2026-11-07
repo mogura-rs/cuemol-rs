@@ -1,3 +1,4 @@
+import {acceptFileOptions} from './support.js';
 import {test, expect} from '@playwright/test';
 import {PNG} from 'pngjs';
 
@@ -23,6 +24,7 @@ for (const backend of ['webgl','webgpu']) {
     await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
     for(const name of ['First','Second']) {
       await page.locator('#files').setInputFiles({name:`${name}.pdb`,mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
+  await acceptFileOptions(page, {fixtureNames:true});
       await expect.poll(async()=>(await status(page)).scene.objects.length).toBe(name==='First'?1:2);
     }
     const [first,second]=(await status(page)).scene.objects;
@@ -47,6 +49,7 @@ for (const backend of ['webgl','webgpu']) {
     await page.reload();
     await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
     await page.locator('#files').setInputFiles({name:'palette.qsc',mimeType:'application/octet-stream',buffer:Buffer.concat(chunks)});
+  await acceptFileOptions(page, {fixtureNames:true});
     await expect.poll(async()=>(await status(page)).message).toBe('Loaded palette.qsc');
     expect((await status(page)).scene.objects).toHaveLength(2);
     const reloaded=(await status(page)).scene.objects;

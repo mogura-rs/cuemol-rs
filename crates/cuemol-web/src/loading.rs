@@ -110,7 +110,7 @@ impl App {
     }
 
     pub(super) fn queue_source(&mut self, file: web_sys::File) {
-        self.queue_request(Source::File(file, None));
+        self.queue_request(Source::Options(file, None));
     }
 
     pub(super) fn queue_request(&mut self, source: Source) {
@@ -185,19 +185,6 @@ impl App {
         let (file, camera_replace) = match source {
             Source::File(file, batch) => {
                 self.source_batch = batch;
-                let plain = file.name().to_ascii_lowercase();
-                let plain = plain
-                    .strip_suffix(".gz")
-                    .or_else(|| plain.strip_suffix(".bz2"))
-                    .or_else(|| plain.strip_suffix(".xz"))
-                    .unwrap_or(&plain);
-                if [".coor", ".face", ".vert"]
-                    .iter()
-                    .any(|suffix| plain.ends_with(suffix))
-                {
-                    self.inspect_file_options(file, generation);
-                    return;
-                }
                 (file, None)
             }
             Source::Options(file, batch) => {

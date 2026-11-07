@@ -2,7 +2,7 @@ import {test,expect} from '@playwright/test';
 import {PNG} from 'pngjs';
 import {gzipSync} from 'node:zlib';
 import {existsSync, readFileSync} from 'node:fs';
-import {load,call,enablePlugins} from './support.js';
+import {acceptFileOptions, load,call,enablePlugins} from './support.js';
 const structure=`HETATM    1  C1  LIG A   1      -2.000   0.000   0.000  1.00 10.00           C  
 HETATM    2  O1  LIG A   1       0.000   0.000   0.000  1.00 10.00           O  
 HETATM    3  N1  LIG A   1       1.300   1.000   0.000  1.00 10.00           N  
@@ -1188,6 +1188,7 @@ test('browser trajectories append ordered files across molecules and retain bloc
   await page.locator('#files').setInputFiles([
     file('first.pdb',Buffer.from(structure)),file('first.dcd',dcd(2,10)),file('second.dcd',dcd(3,20)),
   ]);
+  await acceptFileOptions(page, {fixtureNames:true});
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Indexed 3 frames; 5 frames');
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().busy)).toBe(false);
   const first=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
@@ -1202,6 +1203,7 @@ test('browser trajectories append ordered files across molecules and retain bloc
     await call(page,'set_frame',{objId:first,frame});expect(await x(first)).toBe(expected);
   }
   await page.locator('#files').setInputFiles([file('other.pdb',Buffer.from(structure)),file('other.dcd',dcd(2,40))]);
+  await acceptFileOptions(page, {fixtureNames:true});
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Indexed 2 frames; 2 frames');
   const second=(await page.evaluate(()=>window.cuemol.status())).scene.objects.find(object=>object.id!==first).id;
   expect((await list()).map(item=>item.frames)).toEqual([6,2]);

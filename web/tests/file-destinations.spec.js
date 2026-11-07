@@ -1,5 +1,5 @@
 import {test,expect} from '@playwright/test';
-import {load,call} from './support.js';
+import {load,call,acceptFileOptions} from './support.js';
 const pdb='HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n';
 const status=page=>page.evaluate(()=>window.cuemol?.status());
 async function click(page,key,left=false){
@@ -14,6 +14,7 @@ async function drop(page,files){
     for(const [name,text] of files)data.items.add(new File([text],name));
     document.dispatchEvent(new DragEvent('drop',{bubbles:true,dataTransfer:data}));
   },files);
+  await acceptFileOptions(page);
 }
 async function loaded(page,name){
   await expect.poll(async()=>(await status(page)).message,{timeout:60000}).toBe(`Loaded ${name}`);

@@ -1,3 +1,4 @@
+import {acceptFileOptions} from './support.js';
 import {test,expect} from '@playwright/test';
 import {PNG} from 'pngjs';
 
@@ -18,6 +19,7 @@ async function setup(page) {
   await page.goto('./?renderer=webgl');
   await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
   await page.locator('#files').setInputFiles({name:'picks.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
+  await acceptFileOptions(page, {fixtureNames:true});
   await expect.poll(async()=>(await status(page)).scene.objects.length).toBe(1);
   await command(page,'set_projection',{perspective:false});
   await command(page,'set_view',{center:[0,0,0],zoom:20,distance:200,slab:50});
@@ -185,6 +187,7 @@ test('short viewports keep the tool palette above the console and allow scrollin
 test('cross-molecule measurement values follow transforms and survive scene reloads',async({page},testInfo)=>{
   const {id}=await setup(page);
   await page.locator('#files').setInputFiles({name:'other.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
+  await acceptFileOptions(page, {fixtureNames:true});
   await expect.poll(async()=>(await status(page)).scene.objects.length).toBe(2);
   const other=(await status(page)).scene.objects.find(o=>o.id!==id).id;
   await command(page,'set_view',{center:[0,0,0],zoom:20,distance:200,slab:50});
@@ -201,6 +204,7 @@ test('cross-molecule measurement values follow transforms and survive scene relo
   expect(scene.toString()).toContain('mol2="renamed"');
   await command(page,'create_scene',{name:'reload'});
   await page.locator('#files').setInputFiles({name:'measure.qsc',mimeType:'application/octet-stream',buffer:scene});
+  await acceptFileOptions(page, {fixtureNames:true});
   await expect.poll(async()=>(await status(page)).message).toBe('Loaded measure.qsc');
   await expect.poll(async()=>(await status(page)).ui.navigation.measurementLabels).toEqual(['5.00']);
   const restored=(await status(page)).scene.objects.find(o=>o.name==='renamed').id;
@@ -227,6 +231,7 @@ ATOM     12  C   ALA A   3       5.500   0.000   0.000  1.00 10.00           C
 END
 `;
   await page.locator('#files').setInputFiles({name:'backbone.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(protein)});
+  await acceptFileOptions(page, {fixtureNames:true});
   await expect.poll(async()=>(await status(page)).scene.objects.length).toBe(1);
   await command(page,'set_projection',{perspective:false});
   await command(page,'set_view',{center:[0,0,0],zoom:20,distance:200,slab:50});
@@ -252,6 +257,7 @@ for (const backend of ['webgl','webgpu']) {
     await page.goto(`./?renderer=${backend}`);
     await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
     await page.locator('#files').setInputFiles({name:'sphere.pdb',mimeType:'application/octet-stream',buffer:Buffer.from('HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n')});
+  await acceptFileOptions(page, {fixtureNames:true});
     await expect.poll(async()=>(await status(page)).scene.objects.length).toBe(1);
     const object=(await status(page)).scene.objects[0].id;
     await command(page,'create_renderer',{objId:object,rendererType:'cpk'});
@@ -311,6 +317,7 @@ ATOM      6  N3    U A   2       3.000   2.000   0.000  1.00 10.00           N
 END
 `;
   await page.locator('#files').setInputFiles({name:'bases.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(structure)});
+  await acceptFileOptions(page, {fixtureNames:true});
   await expect.poll(async()=>(await status(page)).scene.objects.length).toBe(1);
   const object=(await status(page)).scene.objects[0];
   for(const renderer of object.renderers)await command(page,'set_node_prop',{nodeType:'renderer',nodeId:renderer.id,prop:'visible',value:'false'});

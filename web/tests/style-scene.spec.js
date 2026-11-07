@@ -1,3 +1,4 @@
+import {acceptFileOptions} from './support.js';
 import {test, expect} from '@playwright/test';
 import {PNG} from 'pngjs';
 
@@ -22,6 +23,7 @@ for (const backend of ['webgl', 'webgpu']) {
     await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout:60000}).toBeGreaterThan(0);
     expect(await page.evaluate(() => window.cuemol.backend)).toBe(backend);
     await page.locator('#files').setInputFiles({name:'styles.pdb', mimeType:'application/octet-stream', buffer:Buffer.from(pdb)});
+  await acceptFileOptions(page, {fixtureNames:true});
     await expect.poll(async () => (await status(page)).scene.objects.length).toBe(1);
     const object = (await status(page)).scene.objects[0];
     for (const renderer of object.renderers) await command(page, 'delete_node', {nodeType:'renderer', nodeId:renderer.id});

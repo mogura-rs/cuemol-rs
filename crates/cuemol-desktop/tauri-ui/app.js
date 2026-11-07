@@ -4818,7 +4818,9 @@ function showRendererSetup(setup) {
     mtzControls = { amplitude, phase, weight, resolution, gridSize };
   }
   let rendererNameDefault = true;
+  rendererName.disabled = rendererType.value === "auto";
   rendererType.addEventListener("change", () => {
+    rendererName.disabled = rendererType.value === "auto";
     if (rendererNameDefault) {
       rendererName.value = suggestedRendererName(rendererType.value);
     }

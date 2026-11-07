@@ -59,20 +59,26 @@ it does not require filesystem paths.
 
 ### Reader options
 
-Native egui and the browser provide **File > Open with options…** for reader
-settings, object/renderer names, renderer types or presets, selection and view
-centering. Ordinary molecule opens keep their immediate automatic display.
-Tauri presents its existing setup dialog for supported object files. Native and
-browser reader sections can be collapsed and reset; their action buttons remain
-outside the scrolling content.
+Native egui, the browser and Tauri show options before loading each supported
+object file, including ordinary molecule opens, drops and file-manager inputs.
+The dialog provides reader settings, object/renderer names, renderer types or
+presets, selection and view centering. Molecules default to Automatic
+representations, which creates protein ribbons, nucleotide cartoons and
+ball-and-stick for the remaining atoms. The renderer name is disabled in this
+mode because each representation receives its own name. Object names remove the
+last filename extension and gain a suffix when already used. **File > Open with
+options…** remains an alias for the same flow. Scene, camera, profile and
+trajectory files retain their dedicated loading flows.
 
-The dialogs accept optional AMBER coordinates when opening a topology. An empty
-coordinate choice loads topology only. NAMD coordinates require a PSF topology;
-MSMS faces/vertices require the matching companion. The browser uses a second
-file chooser for companions and opens these required options automatically.
-Native drops and file-manager opens wait for companion options before advancing
-the batch. Cancellation leaves that file unloaded. Switching scenes cancels the
-pending native/browser dialog and its remaining batch.
+Native and browser reader sections can be collapsed and reset; action buttons
+remain outside the scrolling content. The dialogs accept optional AMBER
+coordinates when opening a topology. An empty coordinate choice loads topology
+only. NAMD coordinates require a PSF topology; MSMS faces/vertices require the
+matching companion. The browser uses a second file chooser for companions.
+Each batch waits for the current file's options. Accepting the first valid file
+establishes the batch destination; cancelling a file leaves it unloaded and
+creates no history. Switching scenes cancels the pending native/browser dialog
+and its remaining batch.
 
 Linked and embedded native QSC saves retain loaded AMBER coordinates; linked
 sources preserve the companion path and compression setting. Browser scene

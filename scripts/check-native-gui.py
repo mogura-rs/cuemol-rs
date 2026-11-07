@@ -201,6 +201,7 @@ def main():
     parser.add_argument('--camera-only', action='store_true')
     parser.add_argument('--view-only', action='store_true')
     parser.add_argument('--file-drop-only', action='store_true')
+    parser.add_argument('--file-options-only', action='store_true')
     parser.add_argument('--picking-only', action='store_true')
     parser.add_argument('--plugins-only', action='store_true')
     parser.add_argument('--settings-only', action='store_true')
@@ -261,6 +262,16 @@ def main():
                 state = call('get_scene_state')
                 return state if state.get('objects') else None
 
+            startup = wait_for(lambda: call('get_scene_state'), timeout=90)
+            startup_deferred = not startup.get('objects')
+            if startup_deferred:
+                initial_x, initial_y, initial_width, initial_height = wait_for(lambda: window_bounds(process.pid, content=True))
+                time.sleep(0.3)
+                if args.file_options_only:
+                    ImageGrab.grab(bbox=(initial_x, initial_y, initial_x + initial_width, initial_y + initial_height)).save(work / 'file-options-startup.png')
+                pyautogui.moveTo(initial_x + 387, initial_y + 339)
+                time.sleep(0.12)
+                pyautogui.click()
             state = wait_for(loaded, timeout=90)
             bounds = wait_for(lambda: window_bounds(process.pid))
             outer_x, outer_y, outer_width, outer_height = bounds
@@ -303,6 +314,37 @@ def main():
             def input_focused(box):
                 pixels = capture().crop(box).getdata()
                 return sum(b - r > 30 and g - r > 10 for r, g, b in pixels) > 100
+
+            if args.file_options_only:
+                if not startup_deferred:
+                    raise RuntimeError('Startup file loading did not wait for options')
+                original = call('get_scene_state')['objects'][0]
+                if original['name'] != fixture.stem or original['atoms'] != 3:
+                    raise RuntimeError('Startup options did not preserve the file name or molecule')
+                if not any(renderer['type'] == 'ballstick' for renderer in original['renderers']):
+                    raise RuntimeError('Automatic representations did not create ligand ball-and-stick')
+                call('clear_undo')
+                drop_files_x11(process.pid, [fixture, fixture])
+                time.sleep(0.4)
+                if len(call('get_scene_state')['objects']) != 1:
+                    raise RuntimeError('Dropped files were loaded before accepting options')
+                capture('file-options-drop.png')
+                click_at(x + 387, y + 339)
+                wait_for(lambda: len(call('get_scene_state')['objects']) == 2)
+                time.sleep(0.3)
+                capture('file-options-second.png')
+                click_at(x + 428, y + 339)
+                time.sleep(0.3)
+                if len(call('get_scene_state')['objects']) != 2:
+                    raise RuntimeError('Cancelling the second file changed the accepted objects')
+                call('undo')
+                wait_for(lambda: len(call('get_scene_state')['objects']) == 1)
+                call('redo')
+                wait_for(lambda: len(call('get_scene_state')['objects']) == 2)
+                capture('file-options-final.png')
+                report.update(ok=True, file_options=True, startup_deferred=True, batch_accept_cancel=True, undo_redo=True)
+                print(json.dumps(report), flush=True)
+                return
 
             if args.settings_only:
                 primary = 'command' if sys.platform == 'darwin' else 'ctrl'
@@ -477,6 +519,13 @@ def main():
                 second = work / 'second molecule.pdb'
                 second.write_bytes(fixture.read_bytes())
                 drop_files_x11(process.pid, [fixture, second])
+                time.sleep(0.4)
+                if call('get_scene_state')['sceneId'] != original:
+                    raise RuntimeError('The destination changed before accepting file options')
+                click_at(x + 387, y + 339)
+                wait_for(lambda: call('get_scene_state')['sceneId'] != original)
+                time.sleep(0.3)
+                click_at(x + 387, y + 339)
                 wait_for(lambda: len(call('get_scene_state')['objects']) == 2)
                 dropped = call('get_scene_state')
                 if dropped['sceneId'] == original:

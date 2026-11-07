@@ -69,12 +69,6 @@ impl FileOptions {
             .map(|option| option.name.clone())
             .unwrap_or_default();
         let mut base = name.to_string();
-        for suffix in [".gz", ".bz2", ".xz"] {
-            if base.to_ascii_lowercase().ends_with(suffix) {
-                base.truncate(base.len() - suffix.len());
-                break;
-            }
-        }
         if let Some((stem, _)) = base.rsplit_once('.') {
             base = stem.to_string();
         }

@@ -1,5 +1,5 @@
 import {test, expect} from '@playwright/test';
-import {load, call} from './support.js';
+import {acceptFileOptions, load, call} from './support.js';
 import {gzipSync} from 'node:zlib';
 
 const pdb = 'HETATM    1  C1  LIG A   1      -2.000   0.000   0.000  1.00 10.00           C  \nHETATM    2  O1  LIG A   1       0.000   0.000   0.000  1.00 10.00           O  \nEND\n';
@@ -98,13 +98,20 @@ test('loading keeps navigation and edits responsive and Escape cancels pending i
   await load(page, 'original.pdb', Buffer.from(pdb));
   await loaded(page, 'original.pdb');
   const before = await call(page, 'clear_undo');
-  const release = await holdWorker(page);
+  expect(before.ui.navigation.tool).toBe('Navigate');
+  let release = async () => {};
   try {
-    await load(page, 'cancelled.pdb', Buffer.from(pdb));
+    await load(page, 'cancelled.pdb', Buffer.from(pdb), {accept:false});
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().ui.rects['File options Open'])).toBeTruthy();
+    release = await holdWorker(page);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const accept = await page.evaluate(() => window.cuemol.status().ui.rects['File options Open']);
+    await page.mouse.click(accept[0] + accept[2] / 2, accept[1] + accept[3] / 2);
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().ui.rects['File options Open'])).toBeFalsy();
     await expect.poll(() => page.evaluate(() => window.cuemol.status().loading)).toBe(true);
     const id = await page.evaluate(object => window.cuemol.command('set_node_prop', {nodeType: 'object', nodeId: object, prop: 'name', value: 'edited while loading'}), before.scene.objects[0].id);
     await expect.poll(() => page.evaluate(() => window.cuemol.status().lastCommand)).toBe(id);
-    const rect = before.ui.rects.Viewport;
+    const rect = await page.evaluate(() => window.cuemol.status().ui.rects.Viewport);
     await page.mouse.move(rect[0] + rect[2] / 2, rect[1] + rect[3] / 2);
     await page.mouse.down();
     await page.mouse.move(rect[0] + rect[2] / 2 + 75, rect[1] + rect[3] / 2 + 35, {steps: 8});
@@ -143,6 +150,7 @@ test('queued files load in order and an invalid file does not block the queue', 
     {name: 'broken.pdb', mimeType: 'application/octet-stream', buffer: Buffer.from('invalid')},
     {name: 'last.pdb', mimeType: 'application/octet-stream', buffer: Buffer.from(pdb)},
   ]);
+  await acceptFileOptions(page, {fixtureNames:true});
   await loaded(page, 'last.pdb');
   const objects = (await page.evaluate(() => window.cuemol.status())).scene.objects;
   expect(objects.map(object => object.name)).toEqual(['first.pdb', 'last.pdb']);
@@ -164,6 +172,7 @@ test('a queued scene becomes the destination for its following molecule', async 
     {name: 'queued.qsc', mimeType: 'application/octet-stream', buffer: Buffer.concat(chunks)},
     {name: 'following.pdb', mimeType: 'application/octet-stream', buffer: Buffer.from(pdb)},
   ]);
+  await acceptFileOptions(page, {fixtureNames:true});
   await loaded(page, 'following.pdb');
   const state = await page.evaluate(() => window.cuemol.status());
   expect(state.scene.sceneId).not.toBe(before);
@@ -239,7 +248,7 @@ test('scene changes cancel pending ICC input before it alters the new scene', as
       return read.call(this);
     };
   });
-  await load(page, 'late.icc', Buffer.from(profile));
+  await load(page, 'late.icc', Buffer.from(profile), {accept:false});
   await expect.poll(() => page.evaluate(() => typeof window.releaseProfile)).toBe('function');
   const before = await page.evaluate(() => window.cuemol.status().scene.sceneId);
   const id = await page.evaluate(() => window.cuemol.command('create_scene', {name: 'New scene'}));

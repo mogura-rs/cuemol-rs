@@ -1,3 +1,4 @@
+import {acceptFileOptions} from './support.js';
 import {test, expect} from '@playwright/test';
 import {PNG} from 'pngjs';
 
@@ -27,6 +28,7 @@ async function setup(page,theme='dark',source=pdb,name='sequence.pdb') {
   await page.goto('./?renderer=webgl');
   await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
   await page.locator('#files').setInputFiles({name,mimeType:'application/octet-stream',buffer:Buffer.from(source)});
+  await acceptFileOptions(page, {fixtureNames:true});
   await expect.poll(async()=>(await status(page)).scene.objects.length).toBe(1);
   await choose(page,'Sequence');
   await expect.poll(async()=>(await status(page)).ui.rects['Sequence origin']?.length).toBe(4);
@@ -126,6 +128,7 @@ test('sequence refreshes after another molecule is loaded and selects the clicke
   await page.mouse.click(...await cell(page,2));
   await expect.poll(async()=>(await status(page)).selection).toBe("'A'.2.*");
   await page.locator('#files').setInputFiles({name:'other.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(pdb.replaceAll('GLY','VAL'))});
+  await acceptFileOptions(page, {fixtureNames:true});
   await expect.poll(async()=>(await status(page)).scene.objects.length).toBe(2);
   const other=(await status(page)).scene.objects.find(object=>object.id!==first).id;
   await page.mouse.click(...await cell(page,3,1));

@@ -5554,7 +5554,7 @@ impl GuiApplication {
                             native_file_dialog(NativeFileDialog::OpenObject, &self.open_path)
                         {
                             self.open_path = path.to_string_lossy().into_owned();
-                            self.request_open_current_path_with_options(camera, true);
+                            self.request_open_current_path(camera);
                         }
                         ui.close();
                     }
@@ -16295,14 +16295,6 @@ impl GuiApplication {
     }
 
     fn request_open_current_path(&mut self, camera: &mut CameraController) {
-        self.request_open_current_path_with_options(camera, false);
-    }
-
-    fn request_open_current_path_with_options(
-        &mut self,
-        camera: &mut CameraController,
-        force_options: bool,
-    ) {
         let open_path = self.open_path.trim().to_string();
         if open_path.is_empty() {
             self.set_status("Open path is empty");
@@ -16326,51 +16318,43 @@ impl GuiApplication {
             return;
         }
         match self.state.file_renderer_setup_for_path(&path) {
-            Ok(Some(file_setup))
-                if !force_options
-                    && file_setup.target == crate::GuiFileRendererTarget::Molecule
-                    && file_setup.namd_coor_reader_options.is_none()
-                    && file_setup.amber_prmtop_reader_options.is_none() =>
-            {
-                self.open_current_path(camera);
-            }
-            Ok(Some(file_setup)) => {
-                let object_name = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("object")
-                    .to_string();
-                self.open_renderer_setup(
-                    &object_name,
-                    NativeRendererSetupAction::OpenPath(path),
-                    file_setup.target,
-                    NativeRendererReaderOptions {
-                        molecule: file_setup.molecule_reader_options,
-                        namd_coor: file_setup.namd_coor_reader_options,
-                        amber_prmtop: file_setup.amber_prmtop_reader_options,
-                        map_header: file_setup.map_header,
-                        density_map: file_setup.density_map_reader_options,
-                        msms: file_setup.msms_reader_options,
+            Ok(Some(file_setup)) => self.open_file_renderer_setup(path, file_setup),
+            Ok(None) => self.open_current_path(camera),
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn open_file_renderer_setup(&mut self, path: PathBuf, file_setup: crate::GuiFileRendererSetup) {
+        let object_name = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("object")
+            .to_string();
+        self.open_renderer_setup(
+            &object_name,
+            NativeRendererSetupAction::OpenPath(path),
+            file_setup.target,
+            NativeRendererReaderOptions {
+                molecule: file_setup.molecule_reader_options,
+                namd_coor: file_setup.namd_coor_reader_options,
+                amber_prmtop: file_setup.amber_prmtop_reader_options,
+                map_header: file_setup.map_header,
+                density_map: file_setup.density_map_reader_options,
+                msms: file_setup.msms_reader_options,
+            },
+        );
+        if file_setup.target == crate::GuiFileRendererTarget::Molecule {
+            if let Some(draft) = self.renderer_setup_draft.as_mut() {
+                draft.options.insert(
+                    0,
+                    crate::GuiRendererSetupOption {
+                        name: "auto".into(),
+                        description: "Automatic representations".into(),
+                        preset: false,
                     },
                 );
-                if force_options && file_setup.target == crate::GuiFileRendererTarget::Molecule {
-                    if let Some(draft) = self.renderer_setup_draft.as_mut() {
-                        draft.options.insert(
-                            0,
-                            crate::GuiRendererSetupOption {
-                                name: "auto".into(),
-                                description: "Automatic representations".into(),
-                                preset: false,
-                            },
-                        );
-                        draft.renderer_type = "auto".into();
-                        draft.renderer_name = "auto1".into();
-                    }
-                }
-            }
-            Ok(None) => self.open_current_path(camera),
-            Err(error) => {
-                self.set_error(error);
+                draft.renderer_type = "auto".into();
+                draft.renderer_name = "auto1".into();
             }
         }
     }
@@ -26815,10 +26799,14 @@ impl GuiApplication {
                                 ui.end_row();
 
                                 ui.label("Renderer name:");
-                                let name_response = ui.add_sized(
-                                    [240.0, 22.0],
-                                    egui::TextEdit::singleline(&mut draft.renderer_name),
-                                );
+                                let name_response = ui
+                                    .add_enabled_ui(draft.renderer_type != "auto", |ui| {
+                                        ui.add_sized(
+                                            [240.0, 22.0],
+                                            egui::TextEdit::singleline(&mut draft.renderer_name),
+                                        )
+                                    })
+                                    .inner;
                                 if name_response.changed() && !draft.renderer_name.trim().is_empty()
                                 {
                                     draft.renderer_name_default = false;
@@ -28875,28 +28863,20 @@ impl GuiApplication {
                 self.request_open_current_path(camera);
                 continue;
             }
-            let needs_companion = self
-                .state
-                .file_renderer_setup_for_path(&path)
-                .ok()
-                .flatten()
-                .is_some_and(|setup| {
-                    setup.namd_coor_reader_options.is_some()
-                        || setup.amber_prmtop_reader_options.is_some()
-                        || setup.msms_reader_options.is_some()
-                });
-            if needs_companion {
-                let source_scene = self.state.active_scene();
-                self.request_open_current_path(camera);
-                if let Some(draft) = self.renderer_setup_draft.as_mut() {
-                    draft.action = NativeRendererSetupAction::OpenPathInBatch {
-                        path,
-                        batch,
-                        source_scene,
-                    };
+            match self.state.file_renderer_setup_for_path(&path) {
+                Ok(Some(file_setup)) => {
+                    let source_scene = self.state.active_scene();
+                    self.open_file_renderer_setup(path.clone(), file_setup);
+                    if let Some(draft) = self.renderer_setup_draft.as_mut() {
+                        draft.action = NativeRendererSetupAction::OpenPathInBatch {
+                            path,
+                            batch,
+                            source_scene,
+                        };
+                    }
                 }
-            } else {
-                self.open_current_path_in_batch(camera, Some(&mut batch.borrow_mut()));
+                Ok(None) => self.open_current_path_in_batch(camera, Some(&mut batch.borrow_mut())),
+                Err(error) => self.set_error(error),
             }
         }
     }
@@ -34039,6 +34019,50 @@ mod tests {
         assert!(!app.state.active_object_summaries().is_empty());
     }
 
+    fn accept_pending_file_options(app: &mut GuiApplication, camera: &mut CameraController) {
+        let draft = app
+            .renderer_setup_draft
+            .take()
+            .expect("file options must precede loading");
+        let setup = crate::GuiRendererSetup {
+            object_name: draft.object_name,
+            renderer_type: draft.renderer_type,
+            renderer_name: draft.renderer_name,
+            selection: draft.selection_enabled.then_some(draft.selection),
+            recenter: draft.recenter,
+            map_center_policy: (draft.target == crate::GuiFileRendererTarget::DensityMap)
+                .then_some(draft.map_center_policy),
+        };
+        let options = NativeFileReaderOptions {
+            molecule: draft.reader_options.as_ref(),
+            namd_coor: draft.namd_coor_options.as_ref(),
+            amber_prmtop: draft.amber_prmtop_options.as_ref(),
+            density_map: draft.density_map_options.as_ref(),
+            msms: draft.msms_options.as_ref(),
+        };
+        match draft.action {
+            NativeRendererSetupAction::OpenPath(path) => {
+                app.open_path_with_renderer_setup(path, draft.target, options, setup, camera)
+            }
+            NativeRendererSetupAction::OpenPathInBatch {
+                path,
+                batch,
+                source_scene,
+            } => {
+                assert_eq!(source_scene, app.state.active_scene());
+                app.open_path_with_renderer_setup_in_batch(
+                    path,
+                    draft.target,
+                    options,
+                    setup,
+                    camera,
+                    Some(&mut batch.borrow_mut()),
+                );
+            }
+            _ => panic!("expected a file load"),
+        }
+    }
+
     #[test]
     fn native_file_drop_maps_have_renderers_and_preserve_xtal_view() {
         let directory = tempfile::tempdir().unwrap();
@@ -34049,6 +34073,8 @@ mod tests {
         camera.target = Vec3::new(40.0, 50.0, 60.0);
         let before = camera.to_qsys_camera("before");
         app.handle_window_event(&WindowEvent::DroppedFile(path), &mut camera);
+        assert!(app.undo_stack.is_empty());
+        accept_pending_file_options(&mut app, &mut camera);
         let scene = app.state.active_scene().unwrap();
         let maps = app.state.density_map_summaries(scene);
         assert_eq!(maps.len(), 1);
@@ -34128,6 +34154,7 @@ mod tests {
         assert_ne!(destination, original);
         assert_eq!(batch.borrow().scene(), Some(destination));
         app.process_pending_file_opens(&mut camera);
+        accept_pending_file_options(&mut app, &mut camera);
         assert_eq!(app.state.active_scene(), Some(destination));
         assert_eq!(app.state.active_object_summaries().len(), 2);
         let molecule = app
@@ -34149,6 +34176,7 @@ mod tests {
         app.file_drop_batch = None;
         app.renderer_setup_draft = None;
         app.process_pending_file_opens(&mut camera);
+        accept_pending_file_options(&mut app, &mut camera);
         assert_ne!(app.state.active_scene(), Some(original));
         assert_eq!(app.state.active_object_summaries().len(), 1);
         assert!(app.pending_file_opens.is_empty());
@@ -34184,6 +34212,13 @@ mod tests {
         let mut app = GuiApplication::new();
         let mut camera = CameraController::default();
         assert!(app.handle_window_event(&WindowEvent::DroppedFile(path), &mut camera));
+        assert!(app.state.active_object_summaries().is_empty());
+        assert!(app.undo_stack.is_empty());
+        assert_eq!(
+            app.renderer_setup_draft.as_ref().unwrap().renderer_type,
+            "auto"
+        );
+        accept_pending_file_options(&mut app, &mut camera);
         assert_eq!(app.state.active_object_summaries().len(), 1);
     }
 
@@ -34195,6 +34230,8 @@ mod tests {
         let mut app = GuiApplication::new();
         let mut camera = CameraController::default();
         app.handle_window_event(&WindowEvent::DroppedFile(path), &mut camera);
+        assert!(app.undo_stack.is_empty());
+        accept_pending_file_options(&mut app, &mut camera);
         let scene = app.state.active_scene().unwrap();
         assert_eq!(app.state.active_surface_summaries().len(), 1);
         assert!(app.state.scene_is_modified(scene));
@@ -34216,11 +34253,13 @@ mod tests {
         app.state.put_config_value("files:drop-target", "new");
         for _ in 0..2 {
             app.handle_window_event(&WindowEvent::DroppedFile(path.clone()), &mut camera);
+            accept_pending_file_options(&mut app, &mut camera);
         }
         assert_eq!(app.state.active_scene(), Some(original));
         assert_eq!(app.state.active_object_summaries().len(), 2);
         app.file_drop_batch = None;
         app.handle_window_event(&WindowEvent::DroppedFile(path.clone()), &mut camera);
+        accept_pending_file_options(&mut app, &mut camera);
         assert_ne!(app.state.active_scene(), Some(original));
         assert_eq!(app.state.active_object_summaries().len(), 1);
         app.undo(&mut camera);
@@ -38395,21 +38434,28 @@ mod tests {
     }
 
     #[test]
-    fn native_optional_file_setup_defers_molecule_loading_without_changing_fast_open() {
+    fn native_file_setup_defers_each_molecule_load_and_preserves_cancellation() {
         let path =
             std::env::temp_dir().join(format!("cuemol-optional-file-{}.pdb", std::process::id()));
         fs::write(&path, "ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n").unwrap();
         let mut app = GuiApplication::new();
         app.open_path = path.to_string_lossy().into_owned();
         let mut camera = CameraController::default();
-        app.request_open_current_path_with_options(&mut camera, true);
+        app.request_open_current_path(&mut camera);
         assert!(app.state.active_object_summaries().is_empty());
         assert!(app.undo_stack.is_empty());
         let draft = app.renderer_setup_draft.take().unwrap();
         assert_eq!(draft.renderer_type, "auto");
         assert!(draft.reader_options.is_some());
         app.request_open_current_path(&mut camera);
-        assert!(app.renderer_setup_draft.is_none());
+        assert!(app.state.active_object_summaries().is_empty());
+        assert!(app.undo_stack.is_empty());
+        accept_pending_file_options(&mut app, &mut camera);
+        assert_eq!(app.state.active_object_summaries().len(), 1);
+        assert_eq!(app.undo_stack.len(), 1);
+        app.request_open_recent_path(&mut camera);
+        assert!(app.renderer_setup_draft.is_some());
+        app.renderer_setup_draft = None;
         assert_eq!(app.state.active_object_summaries().len(), 1);
         assert_eq!(app.undo_stack.len(), 1);
         fs::remove_file(path).unwrap();
