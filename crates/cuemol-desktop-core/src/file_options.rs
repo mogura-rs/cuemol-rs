@@ -15,6 +15,8 @@ pub enum GuiFileReaderOptions {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GuiFileOpenMetadata {
+    #[serde(default)]
+    pub object_class: String,
     pub target: GuiFileRendererTarget,
     pub reader: GuiFileReaderOptions,
     pub map_header: Option<GuiMapHeader>,
@@ -110,6 +112,14 @@ impl GuiFileOpenMetadata {
             .then(|| GuiMapHeader::from_bytes(prefix))
             .transpose()?;
         Ok(Some(Self {
+            object_class: if target == GuiFileRendererTarget::DensityMap
+                && (extension == "dx" || sniff(cuemol_molstr::HandlerSniffer::QdfPot))
+            {
+                "ElePotMap"
+            } else {
+                target.object_class()
+            }
+            .into(),
             target,
             reader,
             map_header,

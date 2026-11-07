@@ -29,7 +29,11 @@ pub struct FileOptions {
 }
 
 impl FileOptions {
-    pub fn new(name: &str, metadata: GuiFileOpenMetadata, state: &DesktopAppState) -> Self {
+    pub fn new(name: &str, mut metadata: GuiFileOpenMetadata, state: &DesktopAppState) -> Self {
+        if metadata.object_class.is_empty() {
+            metadata.object_class = metadata.target.object_class().into();
+        }
+        let original_state = state;
         let mut fallback = None;
         let scene = state.active_scene().unwrap_or_else(|| {
             let mut empty = DesktopAppState::new();
@@ -64,9 +68,9 @@ impl FileOptions {
                 (option.name.clone(), name)
             })
             .collect();
-        let renderer_type = options
-            .first()
-            .map(|option| option.name.clone())
+        let renderer_type = original_state
+            .renderer_history_type(&metadata.object_class, &options)
+            .or_else(|| options.first().map(|option| option.name.clone()))
             .unwrap_or_default();
         let mut base = name.to_string();
         if let Some((stem, _)) = base.rsplit_once('.') {
@@ -146,7 +150,9 @@ impl FileOptions {
                     self.setup.renderer_type != "auto",
                     egui::TextEdit::singleline(&mut self.setup.renderer_name),
                 );
-                self.renderer_name_edited |= response.changed();
+                if response.changed() {
+                    self.renderer_name_edited = !self.setup.renderer_name.is_empty();
+                }
                 record(&mut self.rects, "File renderer name", response);
                 ui.end_row();
                 if self.metadata.target == GuiFileRendererTarget::Molecule {
@@ -511,4 +517,53 @@ fn mtz_column(
             });
         record(rects, &format!("File {label}"), response.response);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_history_handles_empty_scenes_stale_presets_and_distinct_map_classes() {
+        let mut state = DesktopAppState::new();
+        state.remember_renderer_type("MolCoord", "cpk");
+        state.remember_renderer_type("DensityMap", "isosurf");
+        state.remember_renderer_type("ElePotMap", "contour");
+        let metadata = GuiFileOpenMetadata::inspect("test.pdb", b"", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            FileOptions::new("test.pdb", metadata.clone(), &state)
+                .setup
+                .renderer_type,
+            "cpk"
+        );
+        state.remember_renderer_type("MolCoord", "RemovedPreset");
+        assert_eq!(
+            FileOptions::new("test.pdb", metadata, &state)
+                .setup
+                .renderer_type,
+            "auto"
+        );
+        for (name, expected, class) in [
+            ("map.cns", "isosurf", "DensityMap"),
+            ("potential.dx.gz", "contour", "ElePotMap"),
+        ] {
+            let metadata = GuiFileOpenMetadata::inspect(name, b"", None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(metadata.object_class, class);
+            let form = FileOptions::new(name, metadata, &state);
+            assert_eq!(form.setup.renderer_type, expected);
+            assert!(form.setup.renderer_name.starts_with(expected));
+        }
+        let before = state.config_text();
+        let metadata = GuiFileOpenMetadata::inspect("other.pdb", b"", None)
+            .unwrap()
+            .unwrap();
+        let mut cancelled = FileOptions::new("other.pdb", metadata, &state);
+        cancelled.setup.renderer_type = "ribbon".into();
+        drop(cancelled);
+        assert_eq!(state.config_text(), before);
+    }
 }

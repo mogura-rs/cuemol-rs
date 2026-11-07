@@ -1,5 +1,44 @@
 # Validation evidence
 
+## Renderer history per object class
+
+A shared configuration record now remembers renderer types and presets by the
+actual object class. File metadata distinguishes DensityMap from ElePotMap,
+including compressed OpenDX and QDF potential data. Native/Tauri New Renderer
+uses the selected object's class, shares its choices with file options and
+ignores incompatible or removed presets. Without valid history, molecular files
+retain Automatic representations; explicit renderer creation starts with simple.
+Names are proposed across the scene and follow type changes until manually edited.
+
+File confirmation records the offered choice before parsing, matching the current
+reference hook. Cancel leaves history untouched. Failed parsing keeps the scene
+unchanged while retaining the confirmed preference; types not offered by the
+selector are not recorded by the Tauri file request. Scene Undo/Redo preserves
+application preferences, and normal configuration persistence restores them on
+restart. The browser file form also retains history when no scene exists yet.
+
+The focused shared-core and shared-form tests pass. Native model tests pass 220
+cases, and the macOS Tauri suite passes 191 with five existing ignored cases.
+Three Tauri DOM cases verify per-file options, map/AMBER settings and class-aware
+renderer requests, selected defaults and manual-name retention. Linux OS input
+passes startup selection from stored history, two-file acceptance/cancellation,
+Undo/Redo and persistence of independent molecule/map choices. The browser
+baseline passes 11 existing file cases. Both new WebGL/WebGPU history cases pass
+after correcting the harness to scroll hidden menu items and resolve the named
+object instead of assuming list order or renderer fields on map summaries.
+These cases also verify browser reload. Native, browser and Tauri screenshots
+were inspected. The native constructor now starts with the shared configuration
+path; tests use a temporary directory, so saving history cannot create a config
+file in the source package.
+
+The old single desktop renderer preference and the browser's unconditional first
+choice did not implement the reference's per-class history. The old persistence
+test name claimed reference behavior but only checked the legacy file round trip;
+it now describes that limited scope. The usage guide previously described
+Automatic as unconditional and now states the no-history default. The dedicated
+browser New Renderer form remains open in the checklist; its existing quick-add
+control does not establish dialog parity.
+
 ## Molecular surface forms, naming and read-only queries
 
 The native and browser frontends now share generation, regeneration and plane-cut

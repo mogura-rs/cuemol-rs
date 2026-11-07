@@ -264,3 +264,45 @@ for (const backend of ['webgl','webgpu']) test(`ordinary file opens always wait 
   await finish(page,'dropped.pdb');
   expect((await page.evaluate(()=>window.cuemol.status())).scene.objects).toHaveLength(2);
 });
+
+for (const backend of ['webgl', 'webgpu']) {
+  test(`renderer history is class-specific and survives cancel, undo and reload (${backend})`, async ({page}, testInfo) => {
+    await ready(page, backend);
+    await options(page, 'first.pdb', pdb);
+    await click(page, 'File renderer type');
+    const menu = await page.evaluate(() => window.cuemol.status().ui.rects['File renderer type']);
+    await page.mouse.move(menu[0] + menu[2]/2, menu[1] + menu[3] + 90);
+    await page.mouse.wheel(0, 160);
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().ui.rects['File renderer cpk'][1])).toBeLessThan(menu[1] + 180);
+    await click(page, 'File renderer cpk');
+    await finish(page, 'first.pdb');
+    let state = await page.evaluate(() => window.cuemol.status());
+    expect(state.scene.objects[0].renderers[0].type).toBe('cpk');
+    expect(state.scene.objects[0].renderers[0].name).toBe('cpk1');
+    await call(page, 'undo');
+    await options(page, 'density.mrc', mrc());
+    await click(page, 'File renderer type');
+    await click(page, 'File renderer isosurf');
+    await finish(page, 'density.mrc');
+    await options(page, 'cancelled.pdb', pdb);
+    await click(page, 'File renderer type');
+    await click(page, 'File renderer ballstick');
+    await click(page, 'File options Cancel');
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().loading)).toBe(false);
+    await options(page, 'remembered.pdb', pdb);
+    await finish(page, 'remembered.pdb');
+    state = await page.evaluate(() => window.cuemol.status());
+    expect(state.scene.objects.find(object => object.name === 'remembered').renderers[0].type).toBe('cpk');
+    await options(page, 'second.mrc', mrc());
+    await page.screenshot({path: testInfo.outputPath('renderer-history.png')});
+    await finish(page, 'second.mrc');
+    state = await page.evaluate(() => window.cuemol.status());
+    expect(state.scene.objects.find(object => object.name === 'second').renderers[0].type).toBe('isosurf');
+    await page.reload();
+    await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout: 60000}).toBeGreaterThan(0);
+    await options(page, 'after-reload.pdb', pdb);
+    await finish(page, 'after-reload.pdb');
+    state = await page.evaluate(() => window.cuemol.status());
+    expect(state.scene.objects.find(object => object.name === 'after-reload').renderers[0].type).toBe('cpk');
+  });
+}

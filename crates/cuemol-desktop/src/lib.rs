@@ -1084,7 +1084,7 @@ mod download_tests {
     }
 
     #[test]
-    fn renderer_setup_preferences_match_reference_persistence() {
+    fn legacy_renderer_setup_preferences_roundtrip() {
         let path = std::env::temp_dir().join(format!(
             "cuemol-pdb-renderer-preferences-test-{}-{}.txt",
             std::process::id(),

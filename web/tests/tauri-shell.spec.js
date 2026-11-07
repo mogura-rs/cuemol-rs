@@ -188,6 +188,10 @@ async function openShell(page, storage = {}, options = {}) {
         snapshot.status=args.selection1 === 'none' ? 'No interaction was found' : 'Defined 1 interaction(s) in measure';
         return structuredClone(snapshot);
       }
+      if (options.rendererHistory && command === 'get_workspace_renderer_setup_options') {
+        if (args.objectUid !== 3) throw new Error('Renderer history needs the selected object class');
+        return {rendererType:'ribbon', recenter:true, options:['simple','cpk','ribbon'].map(name=>({name,description:name}))};
+      }
       if(options.fileDefaults && command==='get_file_renderer_setup')return {
         targetKind:'molecule',objectName:args.path.replace(/\.[^.]+$/,''),rendererType:'auto',rendererName:'auto1',recenter:true,
         options:[{name:'auto',description:'Automatic representations',preset:false},{name:'cpk',description:'CPK',preset:false}],
@@ -2742,5 +2746,27 @@ test('surface dialogs match defaults, reset drafts and keep failed input', async
   await page.evaluate(async () => { window.__interactionSceneChanged(); await mutate('get_snapshot'); });
   await dialog.getByRole('button', {name:'OK', exact:true}).click();
   await expect(dialog.getByRole('alert')).toContainText('active scene changed');
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri new renderer uses the selected object history and follows only default names', async ({page}, testInfo) => {
+  const errors = await openShell(page, {}, {rendererHistory:true});
+  const open = () => page.evaluate(() => showNewWorkspaceRendererDialog(snapshot.scenes[0], 'renderer', snapshot.objects[0]));
+  await open();
+  const dialog = page.locator('#reference-dialog');
+  await expect(dialog.getByLabel('Renderer type:', {exact:true})).toHaveValue('ribbon');
+  await expect(dialog.getByLabel('Renderer name:', {exact:true})).toHaveValue('ribbon1');
+  await dialog.getByLabel('Renderer type:', {exact:true}).selectOption('cpk');
+  await expect(dialog.getByLabel('Renderer name:', {exact:true})).toHaveValue('cpk1');
+  await dialog.getByLabel('Renderer name:', {exact:true}).fill('custom');
+  await dialog.getByLabel('Renderer type:', {exact:true}).selectOption('simple');
+  await expect(dialog.getByLabel('Renderer name:', {exact:true})).toHaveValue('custom');
+  await page.screenshot({path:testInfo.outputPath('tauri-renderer-history.png')});
+  await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
+  await open();
+  await expect(dialog.getByLabel('Renderer type:', {exact:true})).toHaveValue('ribbon');
+  await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
+  expect(await page.evaluate(() => window.__shellCalls.filter(call=>call.command==='create_workspace_renderer').length)).toBe(0);
   expect(errors).toEqual([]);
 });

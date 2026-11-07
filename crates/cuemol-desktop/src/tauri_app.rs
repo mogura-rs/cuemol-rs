@@ -8009,6 +8009,7 @@ enum ModelRequest {
     GetWorkspaceRendererSetupOptions {
         scene_uid: u64,
         kind: String,
+        object_uid: Option<u64>,
     },
     GetAtomIntrDefs {
         object_uid: u64,
@@ -8501,6 +8502,7 @@ enum ModelResponse {
     ViewPropertiesUpdate(Box<ViewPropertiesUpdateDto>),
     StyleProperties(StylePropertiesDto),
     RendererStyleOptions(Vec<RendererStyleOptionDto>),
+    WorkspaceRendererSetupOptions(WorkspaceRendererSetupOptionsDto),
     AtomIntrDefs(Vec<AtomIntrDefDto>),
     FileRendererSetup(Option<RendererSetupDto>),
     PdbRendererSetup(RendererSetupDto),
@@ -9694,11 +9696,11 @@ fn renderer_setup_defaults(
         .molecule_renderer_setup_options(scene_uid)
         .map_err(|error| error.to_string())?;
     let preferences = crate::load_renderer_setup_preferences();
-    let renderer_type = preferences
-        .renderer_type
-        .filter(|renderer_type| options.iter().any(|option| option.name == *renderer_type))
-        .or_else(|| options.first().map(|option| option.name.clone()))
-        .ok_or_else(|| "no compatible molecular renderers are available".to_string())?;
+    let renderer_type = model
+        .desktop
+        .renderer_history_type("MolCoord", &options)
+        .or_else(|| cuemol_desktop_core::renderer_history::default_type(&options))
+        .ok_or_else(|| "no compatible renderers are available".to_string())?;
     let object_name = model
         .desktop
         .suggest_object_name(scene_uid, base_object_name)
@@ -9739,12 +9741,11 @@ fn density_map_renderer_setup_defaults(
 ) -> Result<RendererSetupDto, String> {
     let scene_uid = model.desktop.ensure_active_scene();
     let options = model.desktop.density_map_renderer_setup_options();
-    let preferences = crate::load_renderer_setup_preferences();
-    let renderer_type = preferences
-        .renderer_type
-        .filter(|renderer_type| options.iter().any(|option| option.name == *renderer_type))
-        .or_else(|| options.first().map(|option| option.name.clone()))
-        .ok_or_else(|| "no compatible density-map renderers are available".to_string())?;
+    let renderer_type = model
+        .desktop
+        .renderer_history_type("DensityMap", &options)
+        .or_else(|| cuemol_desktop_core::renderer_history::default_type(&options))
+        .ok_or_else(|| "no compatible renderers are available".to_string())?;
     let object_name = model
         .desktop
         .suggest_object_name(scene_uid, base_object_name)
@@ -9795,10 +9796,11 @@ fn surface_renderer_setup_defaults(
     let scene_uid = model.desktop.ensure_active_scene();
     let options = model.desktop.surface_renderer_setup_options();
     let preferences = crate::load_renderer_setup_preferences();
-    let renderer_type = options
-        .first()
-        .map(|option| option.name.clone())
-        .ok_or_else(|| "no compatible surface renderers are available".to_string())?;
+    let renderer_type = model
+        .desktop
+        .renderer_history_type("MolSurfObj", &options)
+        .or_else(|| cuemol_desktop_core::renderer_history::default_type(&options))
+        .ok_or_else(|| "no compatible renderers are available".to_string())?;
     let object_name = model
         .desktop
         .suggest_object_name(scene_uid, base_object_name)
@@ -10342,7 +10344,7 @@ fn handle_model_request(
                 })
                 .collect(),
         )),
-        ModelRequest::GetWorkspaceRendererSetupOptions { scene_uid, kind } => {
+        ModelRequest::GetWorkspaceRendererSetupOptions { scene_uid, kind, object_uid } => {
             let options = match kind.as_str() {
                 "renderer" => model
                     .desktop
@@ -10357,15 +10359,16 @@ fn handle_model_request(
                 }],
                 _ => return Err(format!("unsupported renderer target: {kind}")),
             };
-            Ok(ModelResponse::RendererStyleOptions(
-                options
-                    .into_iter()
-                    .map(|option| RendererStyleOptionDto {
-                        name: option.name,
-                        description: option.description,
-                    })
-                    .collect(),
-            ))
+            let object_class = object_uid.and_then(|uid| model.desktop.renderer_object_class(Uid::new(uid)))
+                .unwrap_or_else(|| match kind.as_str() { "densityRenderer" => "DensityMap", "surfaceRenderer" => "MolSurfObj", "lwRenderer" => "LWObject", _ => "MolCoord" }.into());
+            let renderer_type = model.desktop.renderer_history_type(&object_class, &options)
+                .or_else(|| cuemol_desktop_core::renderer_history::default_type(&options));
+            Ok(ModelResponse::WorkspaceRendererSetupOptions(WorkspaceRendererSetupOptionsDto {
+                renderer_type, recenter: true,
+                options: options.into_iter().map(|option| RendererStyleOptionDto {
+                    name: option.name, description: option.description,
+                }).collect(),
+            }))
         }
         ModelRequest::GetAtomIntrDefs {
             object_uid,
@@ -10517,6 +10520,8 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::CreateWorkspaceRenderer(input) => {
+            let object_class = model.desktop.renderer_object_class(Uid::new(input.object_uid));
+            let renderer_type = input.renderer_type.clone();
             let undo = model.capture_undo();
             match model.create_workspace_renderer(input) {
                 Ok(()) => model.push_undo(undo),
@@ -10524,6 +10529,10 @@ fn handle_model_request(
                     model.restore_undo(undo)?;
                     return Err(error);
                 }
+            }
+            if let Some(object_class) = object_class {
+                model.desktop.remember_renderer_type(&object_class, &renderer_type);
+                let _ = model.save_config();
             }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -10728,9 +10737,14 @@ fn handle_model_request(
                 setup.options.insert(0, RendererSetupOptionDto {
                     name: "auto".into(), description: "Automatic representations".into(), preset: false,
                 });
-                setup.renderer_type = "auto".into();
-                setup.renderer_name = "auto1".into();
             }
+            let history_options = setup.options.iter().map(|option| crate::GuiRendererSetupOption {
+                name: option.name.clone(), description: option.description.clone(), preset: option.preset,
+            }).collect::<Vec<_>>();
+            setup.renderer_type = model.desktop.renderer_history_type(&file_setup.object_class, &history_options)
+                .or_else(|| history_options.first().map(|option| option.name.clone())).unwrap_or_default();
+            setup.renderer_name = model.desktop.suggest_renderer_name_in_active_scene(&setup.renderer_type)
+                .unwrap_or_else(|_| format!("{}1", setup.renderer_type));
             setup.amber_prmtop_options = file_setup.amber_prmtop_reader_options;
             setup.map_header = file_setup.map_header;
             Ok(ModelResponse::FileRendererSetup(Some(setup)))
@@ -10748,6 +10762,19 @@ fn handle_model_request(
             width,
             height,
         } => {
+            if let Ok(Some(file_setup)) = model.desktop.file_renderer_setup_for_path(&path) {
+                let options = match target {
+                    crate::GuiFileRendererTarget::Molecule => model.desktop.active_scene()
+                        .and_then(|scene| model.desktop.molecule_renderer_setup_options(scene).ok()).unwrap_or_default(),
+                    crate::GuiFileRendererTarget::DensityMap => model.desktop.density_map_renderer_setup_options(),
+                    crate::GuiFileRendererTarget::Surface => model.desktop.surface_renderer_setup_options(),
+                };
+                if options.iter().any(|option| option.name == renderer_setup.renderer_type)
+                    || (target == crate::GuiFileRendererTarget::Molecule && renderer_setup.renderer_type == "auto") {
+                    model.desktop.remember_renderer_type(&file_setup.object_class, &renderer_setup.renderer_type);
+                    let _ = model.save_config();
+                }
+            }
             model.start_renderer_warmup();
             let undo = model.capture_undo();
             let recenter = renderer_setup.recenter;
@@ -13523,6 +13550,7 @@ fn snapshot_response(response: ModelResponse) -> Result<AppSnapshot, String> {
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::WorkspaceRendererSetupOptions(_)
         | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
@@ -13552,6 +13580,7 @@ fn molecule_details_response(response: ModelResponse) -> Result<MoleculeDetailsD
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::WorkspaceRendererSetupOptions(_)
         | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
@@ -13581,6 +13610,7 @@ fn viewport_response(response: ModelResponse) -> Result<ViewportDto, String> {
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::WorkspaceRendererSetupOptions(_)
         | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
@@ -13610,6 +13640,7 @@ fn animation_frame_response(response: ModelResponse) -> Result<AnimationFrameDto
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::WorkspaceRendererSetupOptions(_)
         | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
@@ -13639,6 +13670,7 @@ fn trajectory_frame_response(response: ModelResponse) -> Result<TrajectoryFrameD
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::WorkspaceRendererSetupOptions(_)
         | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
@@ -13668,6 +13700,7 @@ fn application_info_response(response: ModelResponse) -> Result<ApplicationInfoD
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::WorkspaceRendererSetupOptions(_)
         | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
@@ -13697,6 +13730,7 @@ fn preferences_response(response: ModelResponse) -> Result<PreferencesDto, Strin
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::WorkspaceRendererSetupOptions(_)
         | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
@@ -13726,6 +13760,7 @@ fn preferences_update_response(response: ModelResponse) -> Result<PreferencesUpd
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::WorkspaceRendererSetupOptions(_)
         | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
@@ -13757,6 +13792,7 @@ fn initial_state_response(response: ModelResponse) -> Result<InitialStateDto, St
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::WorkspaceRendererSetupOptions(_)
         | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
@@ -13795,6 +13831,7 @@ fn view_properties_response(response: ModelResponse) -> Result<ViewPropertiesDto
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::WorkspaceRendererSetupOptions(_)
         | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
@@ -13865,6 +13902,7 @@ fn view_properties_update_response(
         | ModelResponse::ViewProperties(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::WorkspaceRendererSetupOptions(_)
         | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
@@ -14434,21 +14472,20 @@ fn get_renderer_style_options(
 fn get_workspace_renderer_setup_options(
     scene_uid: u64,
     kind: String,
+    object_uid: Option<u64>,
     state: State<'_, ManagedState>,
 ) -> Result<WorkspaceRendererSetupOptionsDto, String> {
-    let options = renderer_style_options_response(request_model(
+    match request_model(
         &state,
-        ModelRequest::GetWorkspaceRendererSetupOptions { scene_uid, kind },
-    )?)?;
-    let preferences = crate::load_renderer_setup_preferences();
-    let renderer_type = preferences
-        .renderer_type
-        .filter(|renderer_type| options.iter().any(|option| option.name == *renderer_type));
-    Ok(WorkspaceRendererSetupOptionsDto {
-        renderer_type,
-        recenter: preferences.recenter,
-        options,
-    })
+        ModelRequest::GetWorkspaceRendererSetupOptions {
+            scene_uid,
+            kind,
+            object_uid,
+        },
+    )? {
+        ModelResponse::WorkspaceRendererSetupOptions(options) => Ok(options),
+        _ => Err("unexpected renderer setup response".into()),
+    }
 }
 
 #[tauri::command]
@@ -14645,16 +14682,10 @@ fn create_workspace_renderer(
     input: WorkspaceNewRendererInput,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
-    let renderer_type = input.renderer_type.clone();
-    let recenter = input
-        .recenter
-        .unwrap_or_else(|| crate::load_renderer_setup_preferences().recenter);
-    let snapshot = snapshot_response(request_model(
+    snapshot_response(request_model(
         &state,
         ModelRequest::CreateWorkspaceRenderer(input),
-    )?)?;
-    let _ = crate::save_renderer_setup_preferences(&renderer_type, recenter);
-    Ok(snapshot)
+    )?)
 }
 
 #[tauri::command]
@@ -15068,10 +15099,6 @@ fn open_path_with_renderer_setup(
         (None, None) => None,
     };
     let renderer_setup = crate::GuiRendererSetup::from(file_setup.renderer_setup);
-    let _ = crate::save_renderer_setup_preferences(
-        &renderer_setup.renderer_type,
-        renderer_setup.recenter,
-    );
     molecule_selection_update_response(request_model(
         &state,
         ModelRequest::OpenPathWithRendererSetup {
@@ -18278,6 +18305,94 @@ mod tests {
     }
 
     #[test]
+    fn renderer_history_separates_classes_and_file_setup_uses_workspace_choice() {
+        let mut model = model_without_gpu();
+        let scene = model.desktop.ensure_active_scene();
+        model.desktop.open_bytes("input.pdb", b"ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let molecule = model.desktop.active_object_summaries()[0].uid;
+        handle_model_request(
+            &mut model,
+            ModelRequest::CreateWorkspaceRenderer(WorkspaceNewRendererInput {
+                kind: "renderer".into(),
+                object_uid: molecule.get(),
+                renderer_type: "cpk".into(),
+                renderer_name: "remembered".into(),
+                selection: None,
+                group_name: None,
+                density_centering: None,
+                recenter: Some(false),
+            }),
+        )
+        .unwrap();
+        model
+            .desktop
+            .remember_renderer_type("DensityMap", "isosurf");
+        model.desktop.remember_renderer_type("ElePotMap", "contour");
+        let directory = tempfile::tempdir().unwrap();
+        let pdb = directory.path().join("input.pdb");
+        fs::write(&pdb, b"ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        for _ in 0..2 {
+            let ModelResponse::FileRendererSetup(Some(setup)) = handle_model_request(
+                &mut model,
+                ModelRequest::GetFileRendererSetup {
+                    path: pdb.to_string_lossy().into_owned(),
+                },
+            )
+            .unwrap() else {
+                panic!("file setup");
+            };
+            assert_eq!(setup.renderer_type, "cpk");
+            assert!(setup.renderer_name.starts_with("cpk"));
+        }
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        let ModelResponse::WorkspaceRendererSetupOptions(setup) = handle_model_request(
+            &mut model,
+            ModelRequest::GetWorkspaceRendererSetupOptions {
+                scene_uid: scene.get(),
+                kind: "renderer".into(),
+                object_uid: Some(molecule.get()),
+            },
+        )
+        .unwrap() else {
+            panic!("workspace setup");
+        };
+        assert_eq!(setup.renderer_type.as_deref(), Some("cpk"));
+        assert_eq!(
+            model
+                .desktop
+                .renderer_history_type(
+                    "DensityMap",
+                    &model.desktop.density_map_renderer_setup_options()
+                )
+                .as_deref(),
+            Some("isosurf")
+        );
+        assert_eq!(
+            model
+                .desktop
+                .renderer_history_type(
+                    "ElePotMap",
+                    &model.desktop.density_map_renderer_setup_options()
+                )
+                .as_deref(),
+            Some("contour")
+        );
+        model
+            .desktop
+            .remember_renderer_type("MolCoord", "DeletedRendPreset");
+        let ModelResponse::FileRendererSetup(Some(setup)) = handle_model_request(
+            &mut model,
+            ModelRequest::GetFileRendererSetup {
+                path: pdb.to_string_lossy().into_owned(),
+            },
+        )
+        .unwrap() else {
+            panic!("file setup");
+        };
+        assert_eq!(setup.renderer_type, "auto");
+    }
+
+    #[test]
     fn file_open_renderer_setup_precedes_molecule_loading() {
         let path = std::env::temp_dir().join(format!(
             "cuemol-renderer-setup-open-{}.pdb",
@@ -20005,15 +20120,18 @@ mod tests {
         let response = handle_model_request(
             &mut model,
             ModelRequest::GetWorkspaceRendererSetupOptions {
+                object_uid: Some(object_uid.get()),
                 scene_uid: scene_uid.get(),
                 kind: "renderer".to_string(),
             },
         )
         .unwrap();
-        let ModelResponse::RendererStyleOptions(options) = response else {
+        let ModelResponse::WorkspaceRendererSetupOptions(setup) = response else {
             panic!("expected renderer setup options");
         };
-        assert!(options
+        assert_eq!(setup.renderer_type.as_deref(), Some("cpk"));
+        assert!(setup
+            .options
             .iter()
             .any(|option| option.name == "Default1RendPreset"));
 

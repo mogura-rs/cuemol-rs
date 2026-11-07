@@ -361,6 +361,20 @@ impl App {
         }
         match action {
             Some(Action::Open) => {
+                self.state.remember_renderer_type(
+                    &pending.dialog.metadata.object_class,
+                    &pending.dialog.setup.renderer_type,
+                );
+                if let Some(selection) = pending.dialog.setup.selection.as_deref() {
+                    self.state.remember_selection(selection);
+                    self.persist_selection_history();
+                }
+                self.settings_text = self.state.config_text();
+                if let Some(storage) =
+                    web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+                {
+                    let _ = storage.set_item("cuemol.config", &self.settings_text);
+                }
                 self.source_setup = Some(pending.dialog.setup);
                 self.source_target = Some(pending.dialog.metadata.target);
                 let reader = pending.dialog.metadata.reader;

@@ -202,6 +202,7 @@ def main():
     parser.add_argument('--view-only', action='store_true')
     parser.add_argument('--file-drop-only', action='store_true')
     parser.add_argument('--file-options-only', action='store_true')
+    parser.add_argument('--renderer-history-only', action='store_true')
     parser.add_argument('--picking-only', action='store_true')
     parser.add_argument('--plugins-only', action='store_true')
     parser.add_argument('--settings-only', action='store_true')
@@ -224,6 +225,9 @@ def main():
         f'window:width\t{window_width}\nwindow:height\t{window_height}\n'
         f'window:x\t{window_x}\nwindow:y\t{window_y}\n'
         'plugins:mcp:enabled\ttrue\nmcp:port\t0\n')
+    if args.renderer_history_only:
+        with (config / 'config.tsv').open('a') as stream:
+            stream.write('cuemol.fopenOptions.rendTypeByObjType\t{"MolCoord":"cpk","DensityMap":"isosurf"}\n')
     if args.animation_timeline_only:
         with (config / 'config.tsv').open('a') as stream:
             stream.write('bottom_panel:tab\tanimation\nbottom_panel:visible\ttrue\nbottom_panel:height\t300\n')
@@ -267,7 +271,7 @@ def main():
             if startup_deferred:
                 initial_x, initial_y, initial_width, initial_height = wait_for(lambda: window_bounds(process.pid, content=True))
                 time.sleep(0.3)
-                if args.file_options_only:
+                if args.file_options_only or args.renderer_history_only:
                     ImageGrab.grab(bbox=(initial_x, initial_y, initial_x + initial_width, initial_y + initial_height)).save(work / 'file-options-startup.png')
                 pyautogui.moveTo(initial_x + 387, initial_y + 339)
                 time.sleep(0.12)
@@ -315,14 +319,15 @@ def main():
                 pixels = capture().crop(box).getdata()
                 return sum(b - r > 30 and g - r > 10 for r, g, b in pixels) > 100
 
-            if args.file_options_only:
+            if args.file_options_only or args.renderer_history_only:
                 if not startup_deferred:
                     raise RuntimeError('Startup file loading did not wait for options')
                 original = call('get_scene_state')['objects'][0]
                 if original['name'] != fixture.stem or original['atoms'] != 3:
                     raise RuntimeError('Startup options did not preserve the file name or molecule')
-                if not any(renderer['type'] == 'ballstick' for renderer in original['renderers']):
-                    raise RuntimeError('Automatic representations did not create ligand ball-and-stick')
+                expected_type = 'cpk' if args.renderer_history_only else 'ballstick'
+                if not any(renderer['type'] == expected_type for renderer in original['renderers']):
+                    raise RuntimeError(f'File options did not use the expected renderer: {expected_type}')
                 call('clear_undo')
                 drop_files_x11(process.pid, [fixture, fixture])
                 time.sleep(0.4)
@@ -342,7 +347,15 @@ def main():
                 call('redo')
                 wait_for(lambda: len(call('get_scene_state')['objects']) == 2)
                 capture('file-options-final.png')
-                report.update(ok=True, file_options=True, startup_deferred=True, batch_accept_cancel=True, undo_redo=True)
+                if args.renderer_history_only:
+                    for obj in call('get_scene_state')['objects']:
+                        if not any(renderer['type'] == 'cpk' for renderer in obj['renderers']):
+                            raise RuntimeError('The accepted file did not restore molecule renderer history')
+                    saved = (config / 'config.tsv').read_text()
+                    if '"MolCoord":"cpk"' not in saved or '"DensityMap":"isosurf"' not in saved:
+                        raise RuntimeError('Renderer history did not preserve both object classes')
+                report.update(ok=True, file_options=True, startup_deferred=True, batch_accept_cancel=True,
+                              renderer_history=args.renderer_history_only, undo_redo=True)
                 print(json.dumps(report), flush=True)
                 return
 

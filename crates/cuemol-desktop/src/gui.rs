@@ -1247,6 +1247,7 @@ enum NativeTrajectoryPanelAction {
 
 #[derive(Debug, Clone)]
 struct NativeRendererSetupDraft {
+    object_class: String,
     action: NativeRendererSetupAction,
     target: crate::GuiFileRendererTarget,
     reader_open: bool,
@@ -4868,7 +4869,9 @@ impl GuiApplication {
             morph_name_column_width,
             morph_name_column_drag_start_width: None,
             morph_frame_name: "frame".to_string(),
-            config_path: "cuemol-desktop.conf".to_string(),
+            config_path: crate::renderer_preferences_path("config.tsv")
+                .to_string_lossy()
+                .into_owned(),
             config_key: "gui:background".to_string(),
             config_value: "black".to_string(),
             plugin_dir: default_user_dir("plugins"),
@@ -16290,8 +16293,9 @@ impl GuiApplication {
                 msms: file_setup.msms_reader_options,
             },
         );
-        if file_setup.target == crate::GuiFileRendererTarget::Molecule {
-            if let Some(draft) = self.renderer_setup_draft.as_mut() {
+        if let Some(draft) = self.renderer_setup_draft.as_mut() {
+            draft.object_class = file_setup.object_class;
+            if file_setup.target == crate::GuiFileRendererTarget::Molecule {
                 draft.options.insert(
                     0,
                     crate::GuiRendererSetupOption {
@@ -16300,9 +16304,16 @@ impl GuiApplication {
                         preset: false,
                     },
                 );
-                draft.renderer_type = "auto".into();
-                draft.renderer_name = "auto1".into();
             }
+            draft.renderer_type = self
+                .state
+                .renderer_history_type(&draft.object_class, &draft.options)
+                .or_else(|| draft.options.first().map(|option| option.name.clone()))
+                .unwrap_or_default();
+            draft.renderer_name = self
+                .state
+                .suggest_renderer_name_in_active_scene(&draft.renderer_type)
+                .unwrap_or_else(|_| format!("{}1", draft.renderer_type));
         }
     }
 
@@ -26352,10 +26363,12 @@ impl GuiApplication {
             }
         };
         let preferences = crate::load_renderer_setup_preferences();
-        let renderer_type = preferences
-            .renderer_type
-            .filter(|renderer_type| options.iter().any(|option| option.name == *renderer_type))
-            .unwrap_or_else(|| options[0].name.clone());
+        let object_class = target.object_class().to_string();
+        let renderer_type = self
+            .state
+            .renderer_history_type(&object_class, &options)
+            .or_else(|| cuemol_desktop_core::renderer_history::default_type(&options))
+            .unwrap_or_default();
         let object_name = self
             .state
             .suggest_object_name(scene_uid, base_object_name)
@@ -26365,6 +26378,7 @@ impl GuiApplication {
             .suggest_renderer_name(scene_uid, &renderer_type)
             .unwrap_or_else(|_| format!("{renderer_type}1"));
         self.renderer_setup_draft = Some(NativeRendererSetupDraft {
+            object_class,
             action,
             target,
             reader_open: reader_options.namd_coor.is_some()
@@ -26923,7 +26937,9 @@ impl GuiApplication {
             if let Some(selection) = setup.selection.as_deref() {
                 self.remember_selection_history(selection);
             }
-            let _ = crate::save_renderer_setup_preferences(&setup.renderer_type, setup.recenter);
+            self.state
+                .remember_renderer_type(&draft.object_class, &setup.renderer_type);
+            let _ = self.persist_config_state();
             match draft.action {
                 NativeRendererSetupAction::PdbDownload => {
                     self.start_pdb_download(ctx, Some(setup));
@@ -27344,17 +27360,15 @@ impl GuiApplication {
             .state
             .molecule_renderer_setup_options(scene_uid)
             .unwrap_or_default();
-        if !options
-            .iter()
-            .any(|option| option.name == self.new_renderer_type)
-        {
-            let preferences = crate::load_renderer_setup_preferences();
-            self.new_renderer_type = preferences
-                .renderer_type
-                .filter(|renderer_type| options.iter().any(|option| option.name == *renderer_type))
-                .or_else(|| options.first().map(|option| option.name.clone()))
-                .unwrap_or_else(|| "simple".to_string());
-        }
+        let object_class = self
+            .state
+            .renderer_object_class(object_uid)
+            .unwrap_or_else(|| "MolCoord".into());
+        self.new_renderer_type = self
+            .state
+            .renderer_history_type(&object_class, &options)
+            .or_else(|| cuemol_desktop_core::renderer_history::default_type(&options))
+            .unwrap_or_else(|| "simple".into());
         self.new_renderer_name = self
             .state
             .suggest_renderer_name_in_active_scene(&self.new_renderer_type)
@@ -27385,21 +27399,19 @@ impl GuiApplication {
                 self.new_renderer_owner = Some(NativePropertyObject::DensityMap(map_uid));
                 self.new_renderer_recenter = false;
                 self.new_renderer_density_move_view = false;
-                if !DENSITY_RENDERER_TYPES.contains(&self.new_renderer_type.as_str()) {
-                    self.new_renderer_type = "contour".to_string();
-                }
-                let serial = self
+                let object_class = self
                     .state
-                    .density_map_summary(map_uid)
-                    .map(|map| {
-                        map.renderers
-                            .iter()
-                            .filter(|renderer| renderer.renderer_type == self.new_renderer_type)
-                            .count()
-                            + 1
-                    })
-                    .unwrap_or(1);
-                self.new_renderer_name = format!("{} {serial}", self.new_renderer_type);
+                    .renderer_object_class(map_uid)
+                    .unwrap_or_else(|| "DensityMap".into());
+                let options = self.state.density_map_renderer_setup_options();
+                self.new_renderer_type = self
+                    .state
+                    .renderer_history_type(&object_class, &options)
+                    .unwrap_or_else(|| "contour".into());
+                self.new_renderer_name = self
+                    .state
+                    .suggest_renderer_name_in_active_scene(&self.new_renderer_type)
+                    .unwrap_or_else(|_| format!("{}1", self.new_renderer_type));
                 self.new_renderer_name_default = true;
             }
             WorkspaceAuxSelection::Surface { surface_uid, .. } => {
@@ -27407,12 +27419,10 @@ impl GuiApplication {
                 self.new_renderer_recenter = crate::load_renderer_setup_preferences().recenter;
                 self.new_renderer_density_move_view = false;
                 self.new_renderer_type = "molsurf".to_string();
-                let serial = self
+                self.new_renderer_name = self
                     .state
-                    .surface_summary(surface_uid)
-                    .map(|surface| surface.renderers.len() + 1)
-                    .unwrap_or(1);
-                self.new_renderer_name = format!("molsurf {serial}");
+                    .suggest_renderer_name_in_active_scene(&self.new_renderer_type)
+                    .unwrap_or_else(|_| format!("{}1", self.new_renderer_type));
                 self.new_renderer_name_default = true;
             }
             WorkspaceAuxSelection::Lightweight { object_uid, .. } => {
@@ -27420,12 +27430,10 @@ impl GuiApplication {
                 self.new_renderer_recenter = crate::load_renderer_setup_preferences().recenter;
                 self.new_renderer_density_move_view = false;
                 self.new_renderer_type = "lwrend".to_string();
-                let serial = self
+                self.new_renderer_name = self
                     .state
-                    .lw_object_summary(object_uid)
-                    .map(|object| object.renderers.len() + 1)
-                    .unwrap_or(1);
-                self.new_renderer_name = format!("lwrend {serial}");
+                    .suggest_renderer_name_in_active_scene(&self.new_renderer_type)
+                    .unwrap_or_else(|_| format!("{}1", self.new_renderer_type));
                 self.new_renderer_name_default = true;
             }
         }
@@ -27660,10 +27668,17 @@ impl GuiApplication {
                     self.remember_selection_history(selection);
                 }
                 if renderer_type != "*group" {
-                    let _ = crate::save_renderer_setup_preferences(
-                        &renderer_type,
-                        self.new_renderer_recenter,
-                    );
+                    let object_uid = match owner {
+                        NativePropertyObject::Molecule(uid)
+                        | NativePropertyObject::DensityMap(uid)
+                        | NativePropertyObject::Surface(uid)
+                        | NativePropertyObject::Lightweight(uid) => uid,
+                    };
+                    if let Some(object_class) = self.state.renderer_object_class(object_uid) {
+                        self.state
+                            .remember_renderer_type(&object_class, &renderer_type);
+                        let _ = self.persist_config_state();
+                    }
                 }
                 if recenter {
                     let _ = self.fit_workspace_selection(camera);
@@ -38141,6 +38156,69 @@ mod tests {
         assert_eq!(
             setup.reader_options.as_ref().map(|options| options.kind),
             Some(crate::GuiMoleculeReaderKind::Pdb)
+        );
+    }
+
+    #[test]
+    fn renderer_history_is_shared_by_file_and_workspace_dialogs() {
+        let mut app = GuiApplication::new();
+        let directory = tempfile::tempdir().unwrap();
+        app.config_path = directory
+            .path()
+            .join("config.xml")
+            .to_string_lossy()
+            .into_owned();
+        let path = directory.path().join("history.pdb");
+        let bytes = b"ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n";
+        fs::write(&path, bytes).unwrap();
+        app.state.open_bytes("history.pdb", bytes).unwrap();
+        let object = app.state.active_object_summaries()[0].uid;
+        app.open_renderer_dialog_in_group(object, None);
+        assert_eq!(app.new_renderer_type, "simple");
+        app.new_renderer_type = "cpk".into();
+        app.new_renderer_name = "remembered".into();
+        app.new_renderer_recenter = false;
+        let mut camera = CameraController::default();
+        app.create_renderer_from_dialog(&mut camera);
+        app.undo(&mut camera);
+        let setup = app
+            .state
+            .file_renderer_setup_for_path(&path)
+            .unwrap()
+            .unwrap();
+        app.open_file_renderer_setup(path.clone(), setup);
+        assert_eq!(
+            app.renderer_setup_draft.as_ref().unwrap().renderer_type,
+            "cpk"
+        );
+        app.renderer_setup_draft.as_mut().unwrap().renderer_type = "ribbon".into();
+        app.renderer_setup_draft = None;
+        app.open_renderer_dialog_in_group(object, None);
+        assert_eq!(app.new_renderer_type, "cpk");
+        app.state.remember_renderer_type("DensityMap", "isosurf");
+        let scene = app.state.active_scene().unwrap();
+        let map = app
+            .state
+            .add_density_map(scene, "map", cuemol_xtal::DensityMap::new());
+        app.open_aux_renderer_dialog(WorkspaceAuxSelection::DensityMap {
+            scene_uid: scene,
+            map_uid: map,
+            renderer_uid: None,
+        });
+        assert_eq!(app.new_renderer_type, "isosurf");
+        app.open_renderer_dialog_in_group(object, None);
+        assert_eq!(app.new_renderer_type, "cpk");
+        app.state
+            .remember_renderer_type("MolCoord", "MissingPreset");
+        let setup = app
+            .state
+            .file_renderer_setup_for_path(&path)
+            .unwrap()
+            .unwrap();
+        app.open_file_renderer_setup(path, setup);
+        assert_eq!(
+            app.renderer_setup_draft.as_ref().unwrap().renderer_type,
+            "auto"
         );
     }
 

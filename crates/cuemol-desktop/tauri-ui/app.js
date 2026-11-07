@@ -11813,6 +11813,7 @@ async function showNewWorkspaceRendererDialog(scene, kind, object, groupName = n
   try {
     setupDefaults = await invoke("get_workspace_renderer_setup_options", {
       sceneUid: scene.uid,
+      objectUid: object.uid,
       kind,
     });
   } catch (error) {
@@ -11826,9 +11827,7 @@ async function showNewWorkspaceRendererDialog(scene, kind, object, groupName = n
   const compatibleTypes = compatibleOptions.map((option) => option.name);
   const selectedType = compatibleTypes.includes(setupDefaults?.rendererType)
     ? setupDefaults.rendererType
-    : compatibleTypes.includes(rendererType.value)
-      ? rendererType.value
-      : compatibleTypes[0];
+    : compatibleTypes[0];
   const objectName = dialogField("Object:", object.name);
   objectName.disabled = true;
   const type = dialogSelect(

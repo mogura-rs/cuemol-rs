@@ -62,7 +62,7 @@ it does not require filesystem paths.
 Native egui, the browser and Tauri show options before loading each supported
 object file, including ordinary molecule opens, drops and file-manager inputs.
 The dialog provides reader settings, object/renderer names, renderer types or
-presets, selection and view centering. Molecules default to Automatic
+presets, selection and view centering. Without compatible history, molecules default to Automatic
 representations, which creates protein ribbons, nucleotide cartoons and
 ball-and-stick for the remaining atoms. The renderer name is disabled in this
 mode because each representation receives its own name. Object names remove the
@@ -79,6 +79,15 @@ Each batch waits for the current file's options. Accepting the first valid file
 establishes the batch destination; cancelling a file leaves it unloaded and
 creates no history. Switching scenes cancels the pending native/browser dialog
 and its remaining batch.
+
+Renderer choices are remembered separately for each object class. Molecular,
+density-map, electrostatic-potential and surface choices do not overwrite one
+another. File options and the native/Tauri New Renderer dialogs share this
+history. A removed preset or unsupported stored type falls back to the default.
+Confirming a file dialog remembers the offered choice; cancelling does not.
+Undo preserves these preferences, and the next application/browser session
+restores them. Renderer names follow type changes until edited by hand; clearing
+the name lets the next type change propose a default again.
 
 Linked and embedded native QSC saves retain loaded AMBER coordinates; linked
 sources preserve the companion path and compression setting. Browser scene

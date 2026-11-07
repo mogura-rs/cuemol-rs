@@ -11,6 +11,7 @@ pub use reader_options::{
 pub mod plugins;
 #[cfg(feature = "scripting")]
 pub mod preferences;
+pub mod renderer_history;
 pub use clipboard::GuiClipboardPayload;
 pub use file_open::{FileOpenBatch, FileOpenTarget};
 mod scene_save;
@@ -1578,6 +1579,7 @@ pub enum GuiFileRendererTarget {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GuiFileRendererSetup {
+    pub object_class: String,
     pub map_header: Option<GuiMapHeader>,
     pub target: GuiFileRendererTarget,
     pub molecule_reader_options: Option<GuiMoleculeReaderOptions>,
@@ -13530,6 +13532,7 @@ impl DesktopAppState {
             let namd_coor_reader_options = (format == "namdcoor")
                 .then(|| self.namd_coor_reader_options_for_path(path.as_ref()));
             return Ok(Some(GuiFileRendererSetup {
+                object_class: "MolCoord".into(),
                 map_header: None,
                 target: GuiFileRendererTarget::Molecule,
                 molecule_reader_options: molecule_reader_options_for_format(format),
@@ -13560,6 +13563,12 @@ impl DesktopAppState {
                 _ => None,
             };
             return Ok(Some(GuiFileRendererSetup {
+                object_class: if matches!(format, "apbs" | "qdfpot") {
+                    "ElePotMap"
+                } else {
+                    "DensityMap"
+                }
+                .into(),
                 map_header: if format == "ccp4map" {
                     Some(GuiMapHeader::from_path(path.as_ref())?)
                 } else {
@@ -13584,6 +13593,7 @@ impl DesktopAppState {
                 },
             });
             return Ok(Some(GuiFileRendererSetup {
+                object_class: "MolSurfObj".into(),
                 map_header: None,
                 target: GuiFileRendererTarget::Surface,
                 molecule_reader_options: None,
