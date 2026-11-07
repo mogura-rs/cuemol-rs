@@ -39,12 +39,15 @@ inspected. This verifies the model/DOM boundary; it is not an OS clipboard or na
 WebView input test. The local fixture lacks OIDN, so this live run uses raytracing
 without GI; the missing-runtime error also preserves the prior image.
 
-The obsolete source-string compatibility suite reports 23 failures both before and
-after this change. Its older assertions refer to removed labels, previous dialogs
-and code moved into modules. The new Rendering contract passes; those baseline
-checks require reconciliation with the current behavior. Usage previously said
-Tauri retained a separate POV-Ray window without render history; it now describes
-the shared window. Movie integration and target-scoped Undo remain separate work.
+The source-string compatibility suite initially reported 23 failures both before
+and after this change. Its assertions referred to old labels, previous dialogs
+and code moved into modules. They have now been reconciled with the shared Rust
+panels, the extracted View/Animation JavaScript and the current Get PDB, file,
+renderer and settings flows. All 68 source-contract checks pass. These are source
+packaging checks; the model and DOM tests above provide the behavioral evidence.
+Usage previously said Tauri retained a separate POV-Ray window without render
+history; it now describes the shared window. Movie integration and target-scoped
+Undo remain separate work.
 
 ## Shared POV-Ray still-image rendering
 

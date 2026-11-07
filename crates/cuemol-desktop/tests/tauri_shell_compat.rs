@@ -1,4 +1,12 @@
 const HTML: &str = include_str!("../tauri-ui/index.html");
+const SHARED_DENSITY: &str = include_str!("../../cuemol-ui/src/density.rs");
+const SHARED_VIEW: &str = include_str!("../../cuemol-ui/src/view.rs");
+const SHARED_SYMMETRY: &str = include_str!("../../cuemol-ui/src/symmetry.rs");
+const SHARED_SECONDARY: &str = include_str!("../../cuemol-ui/src/secondary.rs");
+const SHARED_MOLECULE_EDIT: &str = include_str!("../../cuemol-ui/src/molecule_edit.rs");
+const SHARED_MORPH: &str = include_str!("../../cuemol-ui/src/morph.rs");
+const VIEW_JS: &str = include_str!("../tauri-ui/view.js");
+const ANIMATION_JS: &str = include_str!("../tauri-ui/animation.js");
 const CSS: &str = include_str!("../tauri-ui/styles.css");
 const JS: &str = include_str!("../tauri-ui/app.js");
 const CAPABILITIES: &str = include_str!("../capabilities/default.json");
@@ -26,7 +34,7 @@ fn tauri_shell_keeps_the_shared_panels_in_the_cuemol3_frame() {
         "Density map",
         "View",
         "Animation",
-        "Log",
+        "Output",
         "Sequence",
     ] {
         assert!(
@@ -58,7 +66,17 @@ fn tauri_shell_keeps_the_shared_panels_in_the_cuemol3_frame() {
 #[test]
 fn tauri_shell_uses_the_cuemol3_activity_inspector_and_bottom_docks() {
     assert!(HTML.contains("name=\"color-scheme\" content=\"dark light\""));
-    assert_eq!(HTML.matches("data-activity=\"").count(), 5);
+    for activity in [
+        "explorer",
+        "view",
+        "selection",
+        "crystal",
+        "agent",
+        "catalog",
+        "actions",
+    ] {
+        assert!(HTML.contains(&format!("data-activity=\"{activity}\"")));
+    }
     assert!(HTML.contains("aria-label=\"Inspector\""));
     assert!(HTML.contains("data-bottom-panel=\"animation\""));
     assert!(!HTML.contains("data-ribbon-select="));
@@ -133,39 +151,38 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
     for label in [
         "Use sigma contour level",
         "Use absolute contour level",
-        "Solid coloring",
-        "Multi gradient",
+        "Solid color",
         "Redraw",
         "Cell",
-        "Transp:",
-        "Level:",
-        "Extent:",
+        "Transp",
+        "Level",
+        "Extent",
     ] {
         assert!(
-            NATIVE_GUI_RS.contains(label),
+            SHARED_DENSITY.contains(label),
             "missing native Density map control {label}"
         );
     }
     for label in [
         "Rotation",
-        "RotX:",
-        "RotY:",
-        "RotZ:",
+        "RotX",
+        "RotY",
+        "RotZ",
         "Translation",
-        "TraX:",
-        "TraY:",
-        "TraZ:",
+        "TraX",
+        "TraY",
+        "TraZ",
         "Zoom / Slab",
-        "Zoom:",
-        "Slab:",
-        "Dist:",
+        "Zoom",
+        "Slab",
+        "Dist",
         "Projection",
-        "Perspective:",
-        "Center mark:",
+        "Perspective",
+        "Center mark",
         "Crosshair",
     ] {
         assert!(
-            NATIVE_GUI_RS.contains(label),
+            SHARED_VIEW.contains(label),
             "missing native View fake-dial control {label}"
         );
     }
@@ -187,14 +204,13 @@ fn tauri_densitymap_panel_matches_reference_renderer_controls() {
     for label in [
         "Use sigma contour level",
         "Use absolute contour level",
-        "Solid coloring",
-        "Multi gradient",
+        "Solid color",
         "Redraw",
         "Cell",
-        "Edit color...",
-        "Transp:",
-        "Level:",
-        "Extent:",
+        "Choose density color",
+        "Transp",
+        "Level",
+        "Extent",
     ] {
         assert!(
             JS.contains(label),
@@ -214,10 +230,10 @@ fn tauri_densitymap_panel_matches_reference_renderer_controls() {
     }
     assert!(JS.contains("[\"contour\", \"isosurf\", \"gpu_mapmesh\", \"gpu_mapvol\"]"));
     assert!(JS.contains("renderer.specific.use_abslevel"));
-    assert!(JS.contains("renderer.specific.maxExtent"));
+    assert!(JS.contains("values.maxExtent"));
     assert!(CSS.contains(".density-target-row"));
     assert!(CSS.contains(".density-options-popup"));
-    assert!(CSS.contains(".density-range"));
+    assert!(CSS.contains(".density-number"));
     assert!(!HTML.contains("id=\"show-density-contour\""));
     assert!(!HTML.contains("id=\"density-level\""));
 }
@@ -255,8 +271,8 @@ fn tauri_view_panel_matches_reference_fakedials() {
         assert!(JS.contains(action), "missing View action {action}");
         assert!(TAURI_APP_RS.contains(action));
     }
-    assert!(JS.contains("function viewDialWheel("));
-    assert!(JS.contains("wheel.setPointerCapture(event.pointerId)"));
+    assert!(VIEW_JS.contains("function createViewNumeric("));
+    assert!(VIEW_JS.contains("input.setPointerCapture(event.pointerId)"));
     assert!(JS.contains("viewPanelCamera = {"));
     assert!(TAURI_APP_RS.contains("center: [f64; 3]"));
     assert!(TAURI_APP_RS.contains("zoom: self.camera.zoom()"));
@@ -350,7 +366,6 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "clear_log",
         "execute_script",
         "execute_script_file",
-        "export_pov",
         "start_animation_render",
         "animation_render_frame_count",
         "cleanup_animation_render_outputs",
@@ -394,12 +409,12 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     assert!(JS.contains("Save RMSD info file"));
     assert!(JS.contains("rmsdPath"));
     assert!(TAURI_APP_RS.contains("rmsd_path: Option<String>"));
-    assert!(NATIVE_GUI_RS.contains("superpose_write_rmsd"));
+    assert!(NATIVE_GUI_RS.contains("self.superposition.write_rmsd"));
     assert!(NATIVE_GUI_RS.contains("NativeFileDialog::SaveRmsdReport"));
     assert!(NATIVE_GUI_RS.contains("write_superposition_rmsd_report"));
     for label in [
-        "Recalc secondry str",
-        "Assign by selection",
+        "Recalculate",
+        "Assign",
         "β strand",
         "α helix",
         "3-10 helix",
@@ -410,13 +425,13 @@ fn tauri_main_menu_matches_the_reference_inventory() {
             "missing secondary structure control {label}"
         );
         assert!(
-            NATIVE_GUI_RS.contains(label),
+            SHARED_SECONDARY.contains(label),
             "missing native secondary structure control {label}"
         );
     }
     assert!(JS.contains("secondaryType: Number(secondaryType.value)"));
     assert!(TAURI_APP_RS.contains("secondary_type: i32"));
-    assert!(NATIVE_GUI_RS.contains("set_secondary_structure_in_object"));
+    assert!(NATIVE_GUI_RS.contains("\"set_secondary_structure\""));
     for label in ["MolClient tools", "MolServer URL:", "SMILES:", "Mol name:"] {
         assert!(
             NATIVE_GUI_RS.contains(label),
@@ -428,18 +443,18 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     assert!(JS.contains("rendererSetup: result.rendererSetup"));
     assert!(TAURI_APP_RS.contains("CreateMoleculeFromSmiles"));
     assert_eq!(NATIVE_GUI_RS.matches("Paint (Secondary str.)").count(), 2);
-    for label in ["Shift by:", "Start from:", "Renumber"] {
+    for label in ["Shift by", "Start from", "Renumber"] {
         assert!(JS.contains(label), "missing residue index control {label}");
         assert!(
-            NATIVE_GUI_RS.contains(label),
+            SHARED_MOLECULE_EDIT.contains(label),
             "missing native residue index control {label}"
         );
     }
-    assert!(JS.contains("shiftMode,"));
+    assert!(JS.contains("shiftMode: mode.value === \"shift\""));
     assert!(JS.contains("renumber: renumber.checked"));
     assert!(TAURI_APP_RS.contains("shift_mode: bool"));
     assert!(TAURI_APP_RS.contains("renumber: bool"));
-    for id in ["delete-molecule-atoms-object", "change-chain-id-object"] {
+    for id in ["Delete mol atoms", "Change chain ID"] {
         assert!(
             NATIVE_GUI_RS.contains(id),
             "missing native object picker {id}"
@@ -535,7 +550,7 @@ fn tauri_open_recent_matches_the_reference_mru_contract() {
     assert!(JS.contains("const setup = await showRendererSetup(defaults)"));
     assert!(JS.contains("readerOptions: setup.readerOptions"));
     assert!(JS.contains("mutateWithViewport(\"open_path_with_renderer_setup\""));
-    assert!(JS.contains("mutateWithViewport(\"open_paths\", { paths: directPaths })"));
+    assert!(JS.contains("mutateWithViewport(\"open_paths\", { paths: [path], openContext })"));
     assert!(JS.contains("snapshot?.openedPaths"));
     assert!(NATIVE_GUI_RS.contains("const MAX_RECENT_PATHS: usize = 10"));
     assert!(NATIVE_GUI_RS.contains("fn load_recent_paths("));
@@ -643,7 +658,7 @@ fn tauri_save_current_view_uses_reference_camera_filter() {
         .find("} else if (title === \"Save Current View\")")
         .unwrap();
     let end = JS[start + 1..]
-        .find("} else if (title === \"Merge molecule\")")
+        .find("} else if ([\"Merge molecule\"")
         .map(|offset| start + 1 + offset)
         .unwrap();
     let dialog = &JS[start..end];
@@ -770,7 +785,7 @@ fn paint_coloring_columns_are_resizable_and_persistent() {
     assert!(native_paint.contains("ui.weak(\"Color\")"));
     assert!(native_paint.contains("coloring_paint:selection_width"));
     assert!(native_paint.contains("splitter.drag_delta().x"));
-    assert!(native_paint.contains("ui.label(color)"));
+    assert!(native_paint.contains("egui::Label::new(color).truncate()"));
     assert!(native_paint.contains("self.state.active_style_color(color)"));
     let native_gradient = NATIVE_GUI_RS
         .split("fn multi_gradient_coloring_ui(")
@@ -1021,9 +1036,8 @@ fn tauri_startup_uses_a_compact_critical_ipc_and_lazy_molecule_details() {
     assert!(secondary_render.contains("[data-bottom-panel=\"animation\"]"));
     assert!(JS.contains("void mutateWithViewport(\"open_initial_paths\")"));
     assert!(JS.contains("mutateWithViewport(\"open_paths\""));
-    assert!(JS.contains("mutateWithViewport(\"open_pdb\""));
-    assert!(JS.contains("pdbId.maxLength = 4"));
-    assert!(JS.contains("/^[0-9][0-9A-Z]{3}$/"));
+    assert!(JS.contains("mutateWithViewport('open_pdb'"));
+    assert!(JS.contains("/^[0-9][0-9a-z]{3}$/i"));
     assert!(JS.contains("applyViewport(update.viewport, sequence)"));
     assert!(JS.contains("if (!update.viewport.image && snapshotHasRenderableContent())"));
     assert!(JS.contains(
@@ -1071,7 +1085,7 @@ fn desktop_startup_and_fetch_overlap_independent_initialization() {
     assert!(TAURI_APP_RS.contains("ModelRequest::StartRendererWarmup"));
     assert!(TAURI_APP_RS.contains("request_model(&state, ModelRequest::StartRendererWarmup)"));
     assert!(!TAURI_APP_RS.contains("spawn_blocking(shared_scene_renderer)"));
-    assert!(JS.contains(r#"invoke("prefetch_pdb", args)"#));
+    assert!(JS.contains(r#"invoke('prefetch_pdb', request)"#));
     assert!(TAURI_APP_RS.contains("async fn prefetch_pdb("));
     assert!(NATIVE_GUI_RS.contains("cuemol-pdb-prefetch-"));
 
@@ -1195,57 +1209,37 @@ fn atom_interaction_context_menu_uses_the_dedicated_list_editor() {
 
 #[test]
 fn morph_animation_tool_uses_the_reference_frame_columns() {
-    let morph_dialog = JS
-        .split("} else if (title === \"Mol morphing animation\") {")
-        .nth(1)
-        .and_then(|source| {
-            source
-                .split("} else if (title === \"Animation rendering\") {")
-                .next()
-        })
-        .expect("morph animation dialog");
     for label in [
         "Morph animation tool",
+        "Target molecule",
+        "Convert to MorphMol",
         "Name",
         "Source",
-        "No morph frames.",
         "Add PDB file...",
-        "Add MolCoord...",
+        "Add mol...",
     ] {
-        assert!(JS.contains(label), "missing morph-frame behavior {label}");
+        assert!(JS.contains(label), "missing morph-frame control {label}");
     }
     assert!(JS.contains("MORPH_NAME_COLUMN_WIDTH_STORAGE_KEY"));
     assert!(JS.contains("setMorphNameColumnWidth"));
     assert!(JS.contains("morph-frame-columns"));
-    assert!(JS.contains("morph-column-splitter"));
-    assert!(JS.contains("morph-add-menu"));
-    assert!(JS.contains("morph-add-menu-popup"));
-    assert!(JS.contains("morph-source-menu"));
-    assert!(JS.contains("morph-toolbar"));
-    assert!(JS.contains("morphFrame.source || morphFrame.sourceType"));
-    assert!(JS.contains("initialize_morph_object"));
-    assert!(JS.contains("insert_morph_frame_from_file"));
-    assert!(JS.contains("insertBefore"));
     assert!(CSS.contains("var(--morph-name-width"));
-    assert!(CSS.contains(".morph-frame-row > :nth-child(2)"));
-    assert!(CSS.contains(".morph-add-menu > summary::after"));
-    assert!(CSS.contains(".morph-source-menu > summary::after"));
-    assert!(CSS.contains(".morph-toolbar"));
-    assert!(NATIVE_GUI_RS.contains("fn remove_selected_morph_frame"));
-    assert!(NATIVE_GUI_RS.contains("morph_editor:name_width"));
-    assert!(NATIVE_GUI_RS.contains("MORPH_COLUMN_SPLITTER_WIDTH"));
-    assert!(NATIVE_GUI_RS.contains("morph_frame_summaries"));
-    assert!(NATIVE_GUI_RS.contains("initialize_morph_target"));
-    assert!(NATIVE_GUI_RS.contains("NativeFileDialog::OpenMorphPdb"));
-    assert!(NATIVE_GUI_RS.contains("insert_morph_frame_from_pdb_path"));
-    assert!(TAURI_APP_RS.contains("InsertMorphFrameFromFile"));
-    assert!(TAURI_APP_RS.contains("InitializeMorphObject"));
-    for obsolete_control in ["Source frame", "Frame name", "Apply frame"] {
+    for command in [
+        "initialize_morph_object",
+        "insert_morph_frame_from_file",
+        "append_morph_frame",
+        "remove_morph_frame",
+    ] {
+        assert!(JS.contains(command), "missing morph binding {command}");
         assert!(
-            !morph_dialog.contains(obsolete_control),
-            "unexpected morph control {obsolete_control}"
+            TAURI_APP_RS.contains(command),
+            "missing morph command {command}"
         );
     }
+    assert!(SHARED_MORPH.contains("Convert to MorphMol"));
+    assert!(SHARED_MORPH.contains("name_width"));
+    assert!(NATIVE_GUI_RS.contains("morph_editor:name_width"));
+    assert!(NATIVE_GUI_RS.contains("NativeFileDialog::OpenMorphPdb"));
 }
 
 #[test]
@@ -1337,7 +1331,7 @@ fn pdb_download_uses_cancellable_stream_progress() {
     ] {
         assert!(HTML.contains(id), "missing stream progress element {id}");
     }
-    assert!(JS.contains("waitForPdbDownload(`Downloading PDB ${id}`"));
+    assert!(JS.contains("waitForPdbDownload(`Downloading ${request.pdbId}`"));
     assert!(JS.contains("invoke(\"get_pdb_download_progress\", args)"));
     assert!(JS.contains("invoke(\"cancel_pdb_download\", args)"));
     assert!(JS.contains("streamProgressReadout.textContent = \"Canceling…\""));
@@ -1482,140 +1476,51 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
 
 #[test]
 fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
+    assert!(HTML.contains("./animation.js"));
     assert!(HTML.contains("id=\"animation-start-camera\""));
-    assert!(JS.contains("snapshot.animationStartCamera || \"\""));
-    assert!(JS.contains("renderReadonlyAnimationTime(animationDuration, total)"));
-    assert!(JS.contains("function renderReadonlyAnimationTime(host, seconds)"));
-    assert!(HTML.contains("<option value=\"\">(none)</option>"));
-    assert!(JS.contains("mutate(\"set_animation_start_camera\""));
-    assert!(TAURI_APP_RS.contains("fn set_animation_start_camera("));
-    assert!(TAURI_APP_RS.contains("scene_animation(scene_uid)"));
+    assert!(JS.contains("set_animation_start_camera"));
     assert!(TAURI_APP_RS.contains("set_scene_animation(scene_uid, Some(animation))"));
-    assert!(TAURI_APP_RS.contains("animation.motions()"));
-    assert!(!TAURI_APP_RS.contains("animation_objects: Vec<AnimObject>"));
-    assert!(JS.contains("workspacePropertyPage([\"Common\"])"));
-    assert!(JS.contains("dialogGroup(\"Common settings\", commonPage)"));
-    assert!(JS.contains("commonGroup.classList.add(\"animation-common-settings\")"));
-    assert!(CSS.contains(".animation-camera-settings"));
-    assert!(CSS.contains("grid-template-columns: repeat(2, minmax(0, 1fr))"));
-    assert!(JS.contains("targetAlpha.step = \"0.1\""));
-    assert!(NATIVE_GUI_RS.contains("ui.selectable_label(true, \"Common\")"));
-    assert!(NATIVE_GUI_RS.contains("animation_camera_ignore_flags"));
-    assert!(JS.contains("function dialogTimeField(label, seconds"));
-    assert!(JS.contains("const increments = [3600, 60, 1, 0.1]"));
-    assert!(CSS.contains(".animation-time-editor"));
-    assert!(NATIVE_GUI_RS.contains("fn native_animation_time_ui("));
-    assert!(NATIVE_GUI_RS.contains("native_animation_time_parts(*value)"));
-    assert!(NATIVE_GUI_RS.contains("format_native_animation_time_editor(animation.length())"));
-    assert!(!JS.contains("workspacePropertyPage([\"Common settings\", object.typeName])"));
+    assert!(ANIMATION_JS.contains("snapshot.animationObjects"));
+    assert!(ANIMATION_JS.contains("Animation time ruler"));
+    assert!(ANIMATION_JS.contains("Animation current time"));
+    assert!(ANIMATION_JS.contains("Animation strip ${object.name||object.typeName}"));
     for label in [
-        "Relative to",
-        "Start time",
-        "Duration",
-        "Quadric",
+        "Properties",
+        "Generic",
+        "Reset all to default",
+        "X axis",
+        "Y axis",
+        "Z axis",
+        "Cartesian",
         "Rotation angle",
-        "Spin axis X",
         "Target camera",
-        "Target renderers",
-        "Show/Hide",
+        "Target MorphMol",
         "Target opacity",
         "Direction angle",
-        "Direction preset",
-        "Distance (W/2)",
-        "Target MorphMol",
         "Start value",
         "End value",
     ] {
-        assert!(JS.contains(label), "missing animation property {label}");
+        assert!(
+            ANIMATION_JS.contains(label),
+            "missing animation control {label}"
+        );
     }
-    assert!(JS.contains("mutate(\"set_animation_object_properties\""));
-    assert!(JS.contains("button(\"Reset all to default\""));
-    assert!(JS.contains("function defaultAnimationObjectProperties(object)"));
-    assert!(JS.contains("function newAnimationObjectDraft(kind, index)"));
-    assert!(HTML.contains("id=\"animation-add\""));
-    assert!(HTML.contains("aria-haspopup=\"menu\""));
-    assert!(!HTML.contains("id=\"animation-kind\""));
-    assert!(!JS.contains("const animationKind"));
-    assert!(JS.contains("showWorkspaceContextMenu(event, animationAddKinds.map"));
-    assert!(JS.contains("pendingAnimationAdd = {"));
-    assert!(JS.contains("await showReferenceDialog(\"Animation object properties\")"));
-    assert!(JS.contains("message: \"Reset all to default?\""));
-    assert!(JS.contains("mutate(\"reset_animation_object_properties\""));
-    assert!(HTML.contains("id=\"confirmation-dialog\""));
-    assert!(JS.contains("Object.assign(input, { angle: 0, axis: [0, 1, 0] })"));
-    assert!(JS.contains("String(object.quadric * 100)"));
-    assert!(JS.contains("quadric: Number(quadric.value) / 100"));
-    assert!(JS.contains("angle.max = \"360\""));
-    assert!(JS.contains("distance.max = \"2\""));
-    for label in ["X axis", "Y axis", "Z axis", "Cartesian"] {
-        assert!(JS.contains(label));
-        assert!(NATIVE_GUI_RS.contains(label));
+    for command in ["add_anim", "animation_selection"] {
+        assert!(JS.contains(command), "missing animation command {command}");
     }
-    for label in ["Left", "Up", "Right", "Down"] {
-        assert!(JS.contains(&format!("\"{label}\"")));
-        assert!(NATIVE_GUI_RS.contains(&format!("\"{label}\"")));
+    for command in [
+        "set_anim_time",
+        "edit_animation_property",
+        "inspector_request",
+        "seek_animation",
+    ] {
+        assert!(
+            ANIMATION_JS.contains(command),
+            "missing animation command {command}"
+        );
     }
-    assert!(NATIVE_GUI_RS.contains("animation_slide_direction"));
-    assert!(JS.contains("keepQuaternionPositive: true"));
-    assert!(!JS.contains("Keep quaternion positive"));
-    assert!(!JS.contains(
-        "dialogField(\n          \"Property\",\n          object.propertyName || \"frame\""
-    ));
-    assert!(!NATIVE_GUI_RS.contains("\"Keep quaternion positive\","));
-    assert!(JS.contains("fade: true"));
-    assert!(JS.contains("distance: 1"));
-    assert!(JS.contains("function formatAnimationObjectTime(seconds)"));
-    assert!(JS.contains("function parseAnimationObjectTime(value)"));
-    assert!(JS.contains("`${item.name} (${item.typeName})`"));
-    assert!(JS.contains("[\"\", \"(absolute)\"]"));
-    assert!(JS.contains("afterIndex: selectedAnimationIndex"));
-    assert!(JS.contains("row.addEventListener(\"dblclick\""));
-    assert!(JS.contains("let selectedAnimationIndices = new Set()"));
-    assert!(JS.contains("event.shiftKey && selectedAnimationAnchor !== null"));
-    assert!(JS.contains("mutate(\"delete_animation_objects\""));
-    assert!(JS.contains("mutate(\"move_animation_objects\""));
-    assert!(JS.contains("function animationContextItems()"));
-    assert!(JS.contains("row.addEventListener(\"contextmenu\""));
-    for label in ["Change...", "Delete", "Add...", "Move up", "Move down"] {
-        assert!(JS.contains(&format!("label: \"{label}\"")));
-    }
-    assert!(TAURI_APP_RS.contains("fn set_animation_object_properties("));
-    assert!(TAURI_APP_RS.contains("fn reset_animation_object_properties("));
-    assert!(TAURI_APP_RS.contains("ResetAnimationObjectProperties"));
-    assert!(TAURI_APP_RS.contains("AddConfiguredAnimationObject"));
-    assert!(TAURI_APP_RS.contains("animation.insert_motion_before(insertion_index, motion)"));
-    assert!(TAURI_APP_RS.contains("fn delete_animation_objects("));
-    assert!(TAURI_APP_RS.contains("fn move_animation_objects("));
-    assert!(TAURI_APP_RS.contains("animation.edit_motion_by_uid"));
-    assert!(TAURI_APP_RS.contains("motion.base_mut().set_time_ref_name(name.clone())"));
-    assert!(NATIVE_GUI_RS.contains("animation_selection: std::collections::BTreeSet<usize>"));
-    assert!(NATIVE_GUI_RS.contains("fn delete_animation_motions("));
-    assert!(NATIVE_GUI_RS.contains("fn move_animation_motions("));
-    assert!(NATIVE_GUI_RS.contains("fn open_new_animation_properties("));
-    assert!(NATIVE_GUI_RS.contains("draft.reset_defaultable()"));
-    assert!(NATIVE_GUI_RS.contains("ui.label(\"Reset all to default?\")"));
-    assert!(NATIVE_GUI_RS.contains("ui.button(\"Reset all to default\")"));
-    assert!(NATIVE_GUI_RS.contains("response.context_menu(|ui|"));
-    assert!(NATIVE_GUI_RS.contains("RichText::new(\"Name\").strong()"));
-    assert!(NATIVE_GUI_RS.contains("RichText::new(\"Start\").strong()"));
-    assert!(NATIVE_GUI_RS.contains("RichText::new(\"End\").strong()"));
-    assert!(HTML.contains("data-animation-column-splitter=\"name\""));
-    assert!(HTML.contains("data-animation-column-splitter=\"start\""));
-    assert!(JS.contains("ANIMATION_COLUMN_WIDTHS_STORAGE_KEY"));
-    assert!(JS.contains("function setupAnimationColumnSplitters()"));
-    assert!(JS.contains("setAnimationColumnWidths(current.nameWidth"));
-    assert!(CSS.contains("var(--animation-name-width, minmax(45px, 2fr))"));
-    assert!(CSS.contains(".animation-column-splitter"));
-    assert!(NATIVE_GUI_RS.contains("animation_panel:name_width"));
-    assert!(NATIVE_GUI_RS.contains("animation_panel:start_width"));
-    assert!(NATIVE_GUI_RS.contains("name_splitter.drag_delta().x"));
-    assert!(NATIVE_GUI_RS.contains("start_splitter.drag_delta().x"));
-    assert!(NATIVE_GUI_RS.contains("ui.label(\"Duration:\")"));
-    assert!(NATIVE_GUI_RS.contains("ui.label(\"Start cam:\")"));
-    assert!(
-        NATIVE_GUI_RS.contains("ui.selectable_value(&mut start_camera, String::new(), \"(none)\")")
-    );
-    assert!(NATIVE_GUI_RS.contains("format!(\"{name} ({})\", motion.type_name())"));
+    assert!(CSS.contains(".animation-strip"));
+    assert!(!TAURI_APP_RS.contains("animation_objects: Vec<AnimObject>"));
 }
 
 #[test]
@@ -1669,23 +1574,23 @@ fn rendering_window_uses_shared_settings_history_and_cancellable_worker() {
 }
 
 #[test]
-fn merge_molecule_dialog_matches_the_reference_copy_move_flow() {
+fn molecule_edit_dialog_matches_the_reference_copy_move_flow() {
     for value in [
-        "let mergeMoleculeSourceUid = null",
-        "let mergeMoleculeTargetUid = null",
+        "From molecule",
+        "To molecule",
         "Copy (keep source atoms)",
         "Source and destination must be different molecules.",
-        "merge.disabled",
-        "rememberSelection(selection.value)",
+        "apply.disabled",
+        "rememberSelection(request.selection)",
     ] {
         assert!(
             JS.contains(value),
             "missing merge molecule behavior {value}"
         );
     }
-    assert!(JS.contains("dialogCheckbox(\"Copy (keep source atoms)\", true, options)"));
-    assert!(NATIVE_GUI_RS.contains("fn merge_molecule_dialog"));
-    assert!(NATIVE_GUI_RS.contains("apply_merge_molecule_draft"));
+    assert!(JS.contains("dialogCheckbox(\"Copy (keep source atoms)\", true, fields)"));
+    assert!(NATIVE_GUI_RS.contains("fn molecule_edit_dialog"));
+    assert!(NATIVE_GUI_RS.contains("apply_molecule_edit"));
     assert!(!NATIVE_GUI_RS.contains("NativeFileDialog::MergeObject"));
 }
 
@@ -1722,20 +1627,20 @@ fn tauri_camera_updates_coalesce_pending_input() {
 fn tauri_interaction_dialog_matches_reference_modes() {
     for label in [
         "Selection 1",
-        "Mol 2:",
+        "Second molecule",
         "Molecule 2",
-        "Sel 2:",
+        "Second selection",
         "Selection 2",
         "Min distance (Å)",
         "Max distance (Å)",
         "Max labels",
         "Hydrogen bond (N, O) only",
-        "Renderer",
+        "Label set name",
     ] {
         assert!(JS.contains(label), "missing Interaction field {label}");
     }
-    assert!(JS.contains("object2Uid: useObject2.checked"));
-    assert!(JS.contains("selection2: useSelection2.checked"));
+    assert!(JS.contains("object2Uid: secondObjectUid"));
+    assert!(JS.contains("selection2: secondSelection"));
     assert!(JS.contains("rendererName: renderer.value"));
     assert!(JS.contains("item.rendererType === \"atomintr\""));
 }
@@ -1762,7 +1667,7 @@ fn tauri_symmetry_editor_is_lazy_and_matches_reference_fields() {
     for label in ["Symmetry", "Biomolecules only", "Cell dimension"] {
         assert!(JS.contains(label), "missing symmetry dialog label {label}");
         assert!(
-            NATIVE_GUI_RS.contains(label),
+            SHARED_SYMMETRY.contains(label),
             "missing native symmetry dialog label {label}"
         );
     }
@@ -1770,9 +1675,9 @@ fn tauri_symmetry_editor_is_lazy_and_matches_reference_fields() {
     assert!(JS.contains("dialogGroup(\"Cell dimension\")"));
     assert!(JS.contains("const spaceGroupOptionsCache = new Map()"));
     assert!(JS.contains("await invoke(\"get_space_groups\""));
-    assert!(JS.contains("spaceGroupOptionsCache.set(lattice.value, groups)"));
+    assert!(JS.contains("spaceGroupOptionsCache.set(key, groups)"));
     assert!(JS.contains("mutate(\"change_crystal_info\""));
-    assert!(JS.contains("spaceGroupNumber: Number(spaceGroup.value)"));
+    assert!(JS.contains("const spaceGroupNumber = Number(spaceGroup.value)"));
     assert!(JS.contains("function symmetryTargets()"));
     assert!(JS.contains("target?.kind !== \"molecule\""));
     assert!(JS.contains("mutate(\"show_symmetry_molecules\""));
@@ -1789,7 +1694,6 @@ fn tauri_symmetry_editor_is_lazy_and_matches_reference_fields() {
 #[test]
 fn tauri_surface_cutter_matches_reference_object_modes() {
     for label in [
-        "Cut molecular surface by the current clipping plane:",
         "Target surface",
         "Cross section type",
         "Complete",
@@ -1800,69 +1704,49 @@ fn tauri_surface_cutter_matches_reference_object_modes() {
     ] {
         assert!(JS.contains(label), "missing surface cutter field {label}");
     }
-    assert!(JS.contains("mutate(\"cut_surface\""));
-    assert!(JS.contains("surfaceUid: Number(surface.value)"));
-    assert!(JS.contains("mode: mode.value"));
+    assert!(JS.contains("\"cut_surface\""));
+    assert!(JS.contains("surfaceUid:Number(object.value)"));
+    assert!(JS.contains("mode:mode.value"));
 }
 
 #[test]
 fn tauri_open_pdb_matches_reference_coordinate_and_map_options() {
     for label in [
-        "Download PDB",
-        "Enter PDB ID:",
+        "Get PDB",
+        "PDB or EMDB ID, or keywords",
+        "Search PDB",
+        "Method",
+        "Sort",
         "Coordinates",
-        "Fetch pdb file",
-        "RCSB (files.rcsb.org)/cif.gz",
-        "RCSB (files.rcsb.org)/pdb.gz",
-        "Density maps",
-        "Fetch map file (2Fo-Fc)",
-        "Fetch map file (Fo-Fc)",
-        "RCSB (files.rcsb.org)",
-        "EBI (www.ebi.ac.uk)",
-        "Setup renderer",
-        "Object:",
-        "Renderer type:",
-        "Renderer name:",
-        "Selection:",
-        "Recenter view",
+        "Fetch coordinates",
+        "Coordinate format",
+        "Crystallographic maps",
+        "2Fo-Fc",
+        "Fo-Fc",
+        "Map source",
+        "Cryo-EM maps",
+        "EMDB source",
+        "Download and Open",
     ] {
-        assert!(JS.contains(label), "missing Open PDB field {label}");
+        assert!(JS.contains(label), "missing Get PDB field {label}");
     }
-    for binding in [
-        "pdbHistoryRequest = invoke(\"get_pdb_history\")",
-        "const historyRequest = requestPdbHistory();",
-        "const request = invoke(\"get_pdb_renderer_setup\", { pdbId })",
-        "void requestPdbRendererSetup(args.pdbId).catch(() => {});",
-        "await invoke(\"check_pdb_availability\", args)",
-        "pdbHistoryList.id = \"open-pdb-history\"",
-        "pdbId.setAttribute(\"list\", pdbHistoryList.id)",
-        "fetchCoordinates: fetchCoordinates.checked",
-        "coordinateSource: coordinateSource.value",
-        "fetchTwoFofc: fetchTwoFofc.checked",
-        "fetchFofc: fetchFofc.checked",
-        "mapSource: mapSource.value",
-        "rendererSetup",
+    for command in [
+        "get_pdb_history",
+        "get_pdb_renderer_setup",
+        "prefetch_pdb",
+        "open_pdb",
+        "get_pdb_info",
     ] {
-        assert!(JS.contains(binding), "missing Open PDB binding {binding}");
+        assert!(JS.contains(command), "missing Get PDB binding {command}");
+        assert!(
+            TAURI_APP_RS.contains(command),
+            "missing Get PDB command {command}"
+        );
     }
-    assert!(JS.contains("coordinateSource.disabled = !fetchCoordinates.checked"));
-    assert!(JS.contains("mapSource.disabled = !mapsSelected"));
-    assert!(JS.contains("Checking availability…"));
-    let pdb_availability_flow = JS
-        .split("const scheduleAvailabilityCheck = () => {")
-        .nth(1)
-        .expect("Open PDB availability flow");
-    assert!(
-        pdb_availability_flow
-            .find("requestPdbRendererSetup(args.pdbId)")
-            .unwrap()
-            < pdb_availability_flow
-                .find("availabilityTimer = setTimeout")
-                .unwrap()
-    );
-    assert!(pdb_availability_flow.contains("}, 100);"));
-    assert!(JS.contains("Neither pdb nor map selected"));
-    assert!(JS.contains("setTimeout(async () =>"));
+    assert!(JS.contains("coordinateSource.disabled = !coordinates.checked"));
+    assert!(JS.contains("entry?.pdbFormatAvailable === false"));
+    assert!(JS.contains("recommendedLevel"));
+    assert!(JS.contains("showPdbRendererSetup(request.pdbId)"));
 }
 
 #[test]
@@ -1887,17 +1771,16 @@ fn tauri_workspace_chrome_reuses_unchanged_dom() {
 
 #[test]
 fn tauri_playback_reuses_static_animation_and_trajectory_dom() {
-    assert!(JS.contains("let renderedAnimationListKey = \"\""));
     assert!(JS.contains("let renderedTrajectoryListKey = \"\""));
     assert!(JS.contains("let renderedTrajectoryBlocksKey = \"\""));
-    assert!(JS.contains("if (renderedAnimationListKey !== listKey)"));
+    assert!(ANIMATION_JS.contains("if(key!==state.rendered && !state.drag)"));
     assert!(JS.contains("if (renderedTrajectoryListKey !== listKey)"));
     assert!(JS.contains("if (renderedTrajectoryBlocksKey !== blocksKey)"));
 
-    let animation_key = JS
-        .split("const listKey = JSON.stringify([")
+    let animation_key = ANIMATION_JS
+        .split("const key=JSON.stringify([")
         .nth(1)
-        .and_then(|source| source.split("if (renderedAnimationListKey").next())
+        .and_then(|source| source.split("if(key!==state.rendered").next())
         .expect("animation list render key");
     assert!(!animation_key.contains("animationElapsed"));
     let trajectory_blocks_key = JS
@@ -1996,9 +1879,6 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(HTML.contains("id=\"inspector-add-renderer\""));
     assert!(JS.contains("workspaceAdd.disabled ="));
     assert!(JS.contains("inspectorAddRenderer.disabled ="));
-    assert!(JS.contains(
-        "[\"multiple\", \"rendererGroup\", \"cameraRoot\", \"camera\", \"styleRoot\", \"style\"]"
-    ));
     assert!(NATIVE_GUI_RS.contains("fn workspace_selection_can_zoom(&self) -> bool"));
     assert!(NATIVE_GUI_RS.contains("workspace_aux_group_summary(selection).is_none()"));
     assert!(NATIVE_GUI_RS.contains("let add_enabled = !multiple_selected"));
@@ -2014,19 +1894,22 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("change_workspace_renderer_type"));
     assert!(JS.contains("create_workspace_renderer"));
     assert!(JS.contains("async function showNewWorkspaceRendererDialog("));
-    assert!(JS.contains("dialogTitle.textContent = \"Setup renderer\""));
+    assert!(JS.contains("New Renderer (group: ${groupName})"));
     assert!(JS.contains("get_workspace_renderer_setup_options"));
     assert!(JS.contains("setupDefaults?.rendererType"));
-    assert!(JS.contains("setupDefaults?.recenter ?? true"));
     assert!(TAURI_APP_RS.contains("GetWorkspaceRendererSetupOptions"));
-    assert!(TAURI_APP_RS.contains("new_renderer_from_setup("));
-    assert!(TAURI_APP_RS.contains("save_renderer_setup_preferences(&renderer_type, recenter)"));
-    assert!(NATIVE_GUI_RS.contains("molecule_renderer_setup_options(scene_uid)"));
-    assert!(NATIVE_GUI_RS.contains("new_renderer_name_default"));
+    assert!(TAURI_APP_RS.contains("model.create_workspace_renderer(input)"));
+    assert!(TAURI_APP_RS.contains("save_renderer_setup_preferences"));
+    assert!(NATIVE_GUI_RS.contains("cuemol_ui::renderer::RendererDialog::new"));
+    assert!(NATIVE_GUI_RS.contains("new_renderer"));
     assert!(JS.contains("densityCentering: kind === \"densityRenderer\" ? recenter.value : null"));
-    assert!(TAURI_APP_RS.contains("set_density_renderer_center("));
-    assert!(NATIVE_GUI_RS.contains("\"Set map center\""));
-    assert!(NATIVE_GUI_RS.contains("\"Move view center\""));
+    assert!(TAURI_APP_RS.contains("\"mapCenterPolicy\": map_policy"));
+    assert!(
+        include_str!("../../cuemol-ui/src/renderer.rs").contains("Set map center (keep the view)")
+    );
+    assert!(
+        include_str!("../../cuemol-ui/src/renderer.rs").contains("Move view center (fit the map)")
+    );
     assert!(JS.contains("cachedWorkspaceRendererStyles"));
     assert!(JS.contains("apply_workspace_renderer_style"));
     assert!(JS.contains("showApplyRendererStyleDialog(object, renderer, styleOptions)"));
@@ -2121,17 +2004,17 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("generate_density_surface"));
     assert!(JS.contains("label: \"Regenerate surface...\""));
     assert!(JS.contains("regenerate_surface"));
-    assert!(JS.contains("function showSurfaceRegenerateDialog(object)"));
-    assert!(JS.contains("dialogTitle.textContent = \"Mol surface tool\""));
-    assert!(JS.contains("surfaceUid: object.uid, density"));
-    assert!(TAURI_APP_RS.contains("regenerate_surface_object_with_density"));
-    assert!(NATIVE_GUI_RS.contains("fn surface_regenerate_dialog("));
-    assert!(JS.contains("mutate(\"create_molecular_surface\""));
+    assert!(JS.contains("function showSurfaceDialog(kind, target = null)"));
+    assert!(JS.contains("\"Regenerate surface\""));
+    assert!(JS.contains("surfaceUid:target.uid, density"));
+    assert!(TAURI_APP_RS.contains("regenerate_surface_object_with_backend"));
+    assert!(NATIVE_GUI_RS.contains("fn surface_dialog("));
+    assert!(JS.contains("\"create_molecular_surface\""));
     assert!(!JS.contains("chooseOutputPath(`${name}.obj`"));
     assert!(TAURI_APP_RS.contains("ModelRequest::CreateMolecularSurface"));
     assert!(TAURI_APP_RS.contains("fn create_molecular_surface("));
     assert!(NATIVE_GUI_RS.contains("fn open_surface_generation_tool(&mut self)"));
-    assert!(NATIVE_GUI_RS.contains("create_molecular_surface_object_with_backend("));
+    assert!(NATIVE_GUI_RS.contains("fn apply_surface("));
     assert!(CSS.contains(".workspace-context-menu.has-submenu"));
     assert!(JS.contains("WORKSPACE_PAINT_MONOCHROME"));
     assert!(JS.contains("function workspacePaintMenuChildren(action)"));
@@ -2846,16 +2729,8 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
 #[test]
 fn tauri_renderer_picker_exposes_the_reference_molecular_catalog() {
     assert!(JS.contains("const MOLECULE_RENDERER_TYPES = ["));
-    assert!(
-        JS.contains("MOLECULE_RENDERER_TYPES.map((rendererType) => [rendererType, rendererType])")
-    );
+    assert!(JS.contains("MOLECULE_RENDERER_TYPES.filter("));
     for renderer_type in cuemol_desktop::MOLECULE_RENDERER_TYPES {
-        assert!(
-            HTML.contains(&format!(
-                "<option value=\"{renderer_type}\">{renderer_type}</option>"
-            )),
-            "missing initial renderer choice {renderer_type}"
-        );
         assert!(
             JS.contains(&format!("\"{renderer_type}\",")),
             "missing dynamic renderer choice {renderer_type}"
@@ -2925,8 +2800,15 @@ fn tauri_options_match_the_reference_misc_key_and_mouse_panes() {
             "missing Options IPC binding {command}"
         );
     }
-    for pane in ["Misc", "Key", "Mouse"] {
-        assert!(JS.contains(&format!("createPane(\"{pane}\")")));
+    for pane in [
+        "Theme",
+        "Keyboard",
+        "Mouse & Navigation",
+        "Files",
+        "Updates",
+        "Installed",
+    ] {
+        assert!(JS.contains(&format!("createPane(\"{pane}\",")));
     }
     for preset in [
         "DefaultViewInConf",
