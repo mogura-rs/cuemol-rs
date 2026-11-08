@@ -10,6 +10,7 @@ pub mod mmcif;
 pub mod mol2;
 pub mod mol_undo;
 pub mod molecule;
+mod neighbor_grid;
 pub mod pdb;
 pub mod prot2ndry;
 pub mod qdf_mol;

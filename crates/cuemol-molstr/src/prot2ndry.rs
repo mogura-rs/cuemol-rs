@@ -199,26 +199,14 @@ fn no_chain_brk(chains: &[Backbone], i: i32, j: i32) -> bool {
 
 fn calc_hbon(chains: &mut [Backbone], hb_high: f64) {
     const CADIST: f64 = 9.0;
-    let coordinates = chains
-        .iter()
-        .map(|bb| [bb.ca.x, bb.ca.y, bb.ca.z].map(|v| (v / CADIST).floor() as i64))
-        .collect::<Vec<_>>();
-    let mut cells: HashMap<[i64; 3], Vec<usize>> = HashMap::new();
-    for (i, &cell) in coordinates.iter().enumerate() {
-        cells.entry(cell).or_default().push(i);
+    let mut grid = crate::neighbor_grid::NeighborGrid::new(CADIST).unwrap();
+    for (i, backbone) in chains.iter().enumerate() {
+        grid.insert(backbone.ca, i);
     }
     let mut candidates = Vec::new();
-    for (i, &[x, y, z]) in coordinates.iter().enumerate() {
-        candidates.clear();
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    if let Some(indices) = cells.get(&[x + dx, y + dy, z + dz]) {
-                        candidates.extend(indices.iter().copied().filter(|&j| j > i));
-                    }
-                }
-            }
-        }
+    for i in 0..chains.len() {
+        grid.nearby(chains[i].ca, &mut candidates);
+        candidates.retain(|&j| j > i);
         candidates.sort_unstable();
         for &j in &candidates {
             if chains[i].ca.sub(chains[j].ca).length() >= CADIST {
@@ -235,7 +223,7 @@ fn calc_hbon(chains: &mut [Backbone], hb_high: f64) {
 /// Register the bond i(N-H) -> j(C=O) if its energy clears the threshold.
 fn check_hbon_pair(chains: &mut [Backbone], i: usize, j: usize, hb_high: f64) {
     let energy = calc_hbon_energy(chains, i, j);
-    if energy >= hb_high {
+    if !energy.is_finite() || energy >= hb_high {
         return;
     }
     let acceptors = &mut chains[i].acceptors;
@@ -262,6 +250,13 @@ fn calc_hbon_energy(chains: &[Backbone], i: usize, j: usize) -> f64 {
     let dhc = with.h.sub(chains[j].c).length();
     let dnc = with.n.sub(chains[j].c).length();
     let dno = with.n.sub(chains[j].o).length();
+
+    if [dho, dhc, dnc, dno]
+        .iter()
+        .any(|distance| !distance.is_finite())
+    {
+        return f64::INFINITY;
+    }
 
     let hbe = if dho < DIST || dhc < DIST || dnc < DIST || dno < DIST {
         HBLOW
@@ -945,6 +940,37 @@ mod tests {
         for name in ["PRO", "Pro", "pro"] {
             residues[0].resn = name.into();
             assert_eq!(calc_hbon_energy(&residues, 0, 1), 0.0);
+        }
+    }
+
+    #[test]
+    fn hydrogen_bond_grid_accepts_large_finite_input_coordinates() {
+        for x in [1.0e30, -1.0e30] {
+            let mut pdb = String::new();
+            for (index, name) in ["N", "CA", "C", "O"].into_iter().enumerate() {
+                pdb.push_str(&format!(
+                    "ATOM  {:5} {:>4} ALA A   1    {:8.1e}{:8.3}{:8.3}  1.00 10.00           C\n",
+                    index + 1,
+                    name,
+                    x,
+                    index as f64,
+                    0.
+                ));
+            }
+            let mut molecule = crate::read_pdb_str(&pdb).unwrap();
+            molecule.calc_prot_2ndry(-500., false);
+            assert_eq!(molecule.atom_count(), 4);
+            assert_eq!(molecule.atoms()[0].position.x, x);
+        }
+    }
+
+    #[test]
+    fn hydrogen_bonds_ignore_nonfinite_donor_geometry() {
+        for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut residues = vec![backbone(0), backbone(1)];
+            residues[0].h.x = x;
+            check_hbon_pair(&mut residues, 0, 1, -500.);
+            assert!(residues[0].acceptors.is_empty());
         }
     }
 

@@ -12,10 +12,10 @@ requests remain outside tests under the repository instructions.
 
 | Area | Required checks | Current evidence |
 | --- | --- | --- |
-| Large molecules | Load, topology, secondary structure, base pairs, edits, serialization and unchanged snapshots | Indexed topology, residue-property lookup and unchanged-edit snapshots pass the comparisons below; large nucleic-acid pairing remains open. |
+| Large molecules | Load, topology, secondary structure, base pairs, edits, serialization and unchanged snapshots | Indexed topology, residue-property lookup, unchanged-edit snapshots and large DNA pairing pass the comparisons below. Frontend integration remains part of the combined-operation checks. |
 | Long trajectories | Indexed reads, random seek, averaging, selection, append, playback, Undo/Redo and bounded retention | Open. |
 | Maps and surfaces | Large grids, repeated replacement, cancellation, failed inputs, geometry and memory retention | Open. |
-| Input boundaries | Truncated, malformed and non-finite inputs; failed loads preserve the existing scene | Open. |
+| Input boundaries | Truncated, malformed and non-finite inputs; failed loads preserve the existing scene | Extreme-coordinate overflow and invalid hydrogen-bond geometry are reproduced and fixed below. Broader reader and transactional-load checks remain open. |
 | Combined scene edits | Multiple scenes, selection, cameras, animation, Undo/Redo and save/reload | Open. |
 | Rendering jobs | Repeated still/movie output, concurrent edits, cancellation/failure and worker/output cleanup | Open. |
 | Application lifecycle | Repeated opens/closes, settings/restart, CLI/MCP/Python and frontend resource retention | Open. |
@@ -103,3 +103,44 @@ oracle limits described above. The raw comparison is
 `.cache/deep-audit/noop-edits/paired.json`; the portable probe is built with
 `cargo build --release --locked -p cuemol-molstr --example molecular_edit_bench`
 and accepts an input PDB and a positive snapshot count.
+
+## Nucleic-acid neighbors and coordinate boundaries
+
+Base-pair search now builds a temporary sparse index of eligible edge atoms and
+checks nearby cells before applying the unchanged distance and plane rules.
+Candidate ordering preserves the previous nearest-atom and partner tie rules.
+Atom-name comparisons no longer allocate uppercase strings. Infinite cutoffs
+retain the exhaustive fallback. The index omits non-finite positions and uses
+checked cell arithmetic at extreme finite coordinates.
+
+The fixture generator tiles the public 1BNA model into independent copies while
+preserving atom fields and unique residue indices. Three fresh processes per
+version, with two reads/recalculations per process, give these medians:
+
+| Input | Atoms | Repeated read, before/after (ms) | Base pairs, before/after (ms) | Peak RSS, before/after (MiB) |
+| --- | --- | --- | --- | --- |
+| 1BNA | 566 | 1.12 / 0.699 | 0.497 / 0.155 | 4.48 / 4.31 |
+| 32 copies | 18,112 | 426 / 21.4 | 447 / 5.61 | 31.09 / 30.83 |
+| 64 copies | 36,224 | 1,675 / 47.5 | 1,650 / 13.2 | 58.95 / 59.11 |
+
+All QDF bytes and final hashes match the preceding exhaustive implementation.
+The installed C++ CueMol 3.0.0.554 also exports identical residue-to-partner
+assignments: 12 pairs for the original model and 768 for the 64-copy model.
+The C++ export is read back through the QDF reader before comparison. The
+reference test covers those unambiguous structures; seeded differential checks
+separately cover equal-distance partners, insertion codes, case/whitespace,
+zero/infinite cutoffs, tilt boundaries and non-finite edge coordinates.
+
+Two additional regressions failed before repair. A valid PDB coordinate of
+positive or negative `1e30` overflowed a signed grid-cell addition during DSSP
+in debug builds. A non-finite donor position was also converted into the
+strongest possible hydrogen bond by the energy clamp. DSSP now uses the checked
+neighbor index and rejects non-finite bond distances. All 273 molecular checks
+pass, and final decoded/serialized results still match all five public molecular
+fixtures. This does not claim that every reader rejects non-finite input.
+
+Evidence is under `.cache/deep-audit/basepair-index`. The portable helpers are
+`scripts/make-molecular-benchmark-fixture.py`,
+`scripts/export-reference-base-pairs.mjs` and the `base_pair_check` example.
+The reference export runs with the reference application's Node runtime and
+does not modify its installation or source checkout.

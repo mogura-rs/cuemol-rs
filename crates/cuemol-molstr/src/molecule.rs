@@ -1528,6 +1528,10 @@ impl MolCoord {
     }
 
     pub fn calc_base_pair(&mut self, cutoff: f64, tilt: f64) -> usize {
+        self.calc_base_pair_with_index(cutoff, tilt, true)
+    }
+
+    fn calc_base_pair_with_index(&mut self, cutoff: f64, tilt: f64, indexed: bool) -> usize {
         let cutoff = cutoff.max(0.0);
         let tilt_cos = (90.0_f64 - tilt.clamp(0.0, 90.0)).to_radians().cos();
         let nucleotide_residues = self
@@ -1582,7 +1586,7 @@ impl MolCoord {
                 let p2 = atom_position(normal_names[1])?;
                 let p3 = atom_position(normal_names[2])?;
                 let normal = (p2 - p1).cross(p3 - p1).normalize3d().ok()?;
-                Some((summary.key, summary.atom_indices.clone(), normal))
+                Some((summary.key, summary.atom_indices, normal))
             })
             .collect::<Vec<_>>();
 
@@ -1597,6 +1601,27 @@ impl MolCoord {
         }
 
         const EDGE_NAMES: [&str; 8] = ["N1", "N2", "O6", "N6", "N3", "N4", "O2", "O4"];
+        let mut edge_atoms = Vec::new();
+        for (residue, (_, indices, _)) in residues.iter().enumerate() {
+            for &index in indices {
+                if EDGE_NAMES
+                    .iter()
+                    .any(|name| self.atoms[index].matches_name_case_insensitive(name))
+                {
+                    edge_atoms.push((residue, index));
+                }
+            }
+        }
+        let grid = indexed
+            .then(|| crate::neighbor_grid::NeighborGrid::new(cutoff))
+            .flatten()
+            .map(|mut grid| {
+                for &(residue, index) in &edge_atoms {
+                    grid.insert(self.atoms[index].position, (residue, index));
+                }
+                grid
+            });
+        let mut neighbors = Vec::new();
         let mut paired = BTreeSet::new();
         let mut pairs: Vec<(usize, usize)> = Vec::new();
         for i in 0..residues.len() {
@@ -1613,29 +1638,35 @@ impl MolCoord {
                     continue;
                 }
                 let mut nearest: Option<(usize, f64)> = None;
-                for (j, residue) in residues.iter().enumerate() {
+                if let Some(grid) = &grid {
+                    grid.nearby(atom.position, &mut neighbors);
+                    neighbors.sort_unstable();
+                } else {
+                    neighbors.clear();
+                    neighbors.extend_from_slice(&edge_atoms);
+                }
+                for &(j, other_index) in &neighbors {
                     if i == j || paired.contains(&j) {
                         continue;
                     }
-                    for &other_index in &residue.1 {
-                        let other = &self.atoms[other_index];
-                        if !is_wc_hbond_pair(&atom.name, &other.name) {
-                            continue;
-                        }
-                        let delta = atom.position - other.position;
-                        let distance = delta.length3d();
-                        if distance <= 1.0e-12 || distance > cutoff {
-                            continue;
-                        }
-                        let plane_ok =
-                            |normal: Vector4| (normal.dot3d(delta) / distance).abs() <= tilt_cos;
-                        if !plane_ok(residues[i].2) || !plane_ok(residue.2) {
-                            continue;
-                        }
-                        let distance_sq = delta.sqlen3d();
-                        if nearest.is_none_or(|(_, best)| distance_sq < best) {
-                            nearest = Some((j, distance_sq));
-                        }
+                    let residue = &residues[j];
+                    let other = &self.atoms[other_index];
+                    if !is_wc_hbond_pair(&atom.name, &other.name) {
+                        continue;
+                    }
+                    let delta = atom.position - other.position;
+                    let distance = delta.length3d();
+                    if distance <= 1.0e-12 || distance > cutoff {
+                        continue;
+                    }
+                    let plane_ok =
+                        |normal: Vector4| (normal.dot3d(delta) / distance).abs() <= tilt_cos;
+                    if !plane_ok(residues[i].2) || !plane_ok(residue.2) {
+                        continue;
+                    }
+                    let distance_sq = delta.sqlen3d();
+                    if nearest.is_none_or(|(_, best)| distance_sq < best) {
+                        nearest = Some((j, distance_sq));
                     }
                 }
                 if let Some((j, _)) = nearest {
@@ -2254,9 +2285,12 @@ pub(crate) fn atom_key(atom: &Atom) -> AtomKey {
 }
 
 fn is_wc_hbond_pair(lhs: &str, rhs: &str) -> bool {
-    let lhs = lhs.trim().to_ascii_uppercase();
-    let rhs = rhs.trim().to_ascii_uppercase();
-    let pair = |a: &str, b: &str| (lhs == a && rhs == b) || (lhs == b && rhs == a);
+    let lhs = lhs.trim();
+    let rhs = rhs.trim();
+    let pair = |a: &str, b: &str| {
+        (lhs.eq_ignore_ascii_case(a) && rhs.eq_ignore_ascii_case(b))
+            || (lhs.eq_ignore_ascii_case(b) && rhs.eq_ignore_ascii_case(a))
+    };
     pair("N4", "O6")
         || pair("N3", "N1")
         || pair("O2", "N2")
@@ -2823,6 +2857,54 @@ mod tests {
             mol.get_residue_prop_str("A", "1", "basepair").unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn indexed_base_pairs_match_exhaustive_search_with_ties_and_boundary_geometry() {
+        let mut molecule = MolCoord::new();
+        let mut random = 71_u64;
+        for residue in 0..60 {
+            let is_purine = residue % 3 == 0;
+            let names = if is_purine {
+                ["C4", "C5", "C8", "N6", "N1"]
+            } else {
+                ["C2", "C4", "C6", "O4", "N3"]
+            };
+            let origin = (residue / 3) as f64 * 9. + if is_purine { 0. } else { 3. };
+            for (index, name) in names.into_iter().enumerate() {
+                random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let mut value = atom(molecule.atom_count() as i32 + 1, "A", residue, name, origin);
+                value.res_name = if is_purine { "A" } else { "T" }.into();
+                value.position.x += if index == 1 { 1. } else { 0. };
+                value.position.y = if index == 2 || index == 4 { 1. } else { 0. };
+                if residue >= 30 {
+                    value.position.z = (random >> 32) as u32 as f64 / u32::MAX as f64;
+                }
+                if residue % 5 == 0 {
+                    value.name = format!(" {} ", value.name.to_ascii_lowercase());
+                    value.ins_code = Some('B');
+                }
+                molecule.push_atom(value);
+            }
+        }
+        let mut invalid = atom(301, "A", 1, "N1", f64::NAN);
+        invalid.res_name = "T".into();
+        molecule.push_atom(invalid);
+        for cutoff in [0., 0.5, 3., 3.7, 9., f64::INFINITY] {
+            for tilt in [0., 30., 90.] {
+                let mut indexed = molecule.clone();
+                let mut exhaustive = molecule.clone();
+                assert_eq!(
+                    indexed.calc_base_pair_with_index(cutoff, tilt, true),
+                    exhaustive.calc_base_pair_with_index(cutoff, tilt, false),
+                    "cutoff={cutoff} tilt={tilt}"
+                );
+                assert_eq!(
+                    crate::write_qdf_mol_bytes(&indexed),
+                    crate::write_qdf_mol_bytes(&exhaustive)
+                );
+            }
+        }
     }
 
     #[test]
