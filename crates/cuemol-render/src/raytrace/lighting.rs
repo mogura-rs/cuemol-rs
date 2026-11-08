@@ -214,25 +214,43 @@ pub(super) fn occlusion(
         },
     }
 }
-fn environment(direction: Vector4, camera: &Camera, p: &UmbreonRenderParams) -> [f64; 3] {
-    let (intensity, ambient, _) = balance(p);
-    let energy = intensity * ambient * p.gi_env_intensity.max(0.);
-    if !p.gi_sky_gradient {
-        return [energy; 3];
-    }
-    let up = transform_direction(
-        camera
-            .rotation()
-            .inv()
-            .unwrap_or(cuemol_core::Quat::IDENTITY)
-            .to_matrix(),
-        Vector4::new3(0., 1., 0.),
-    );
-    let w = (0.5 * (direction.dot3d(up) + 1.)).clamp(0., 1.);
-    let ground = p.gi_ground_color;
-    let lum = ground[0] * 0.2126 + ground[1] * 0.7152 + ground[2] * 0.0722;
-    ground.map(|g| energy * (g + (1. - g) * w) * 2. / (1. + lum))
+struct Environment {
+    energy: f64,
+    up: Option<Vector4>,
+    ground: [f64; 3],
+    luminance: f64,
 }
+impl Environment {
+    fn new(camera: &Camera, p: &UmbreonRenderParams) -> Self {
+        let (intensity, ambient, _) = balance(p);
+        let ground = p.gi_ground_color;
+        Self {
+            energy: intensity * ambient * p.gi_env_intensity.max(0.),
+            up: p.gi_sky_gradient.then(|| {
+                transform_direction(
+                    camera
+                        .rotation()
+                        .inv()
+                        .unwrap_or(cuemol_core::Quat::IDENTITY)
+                        .to_matrix(),
+                    Vector4::new3(0., 1., 0.),
+                )
+            }),
+            ground,
+            luminance: ground[0] * 0.2126 + ground[1] * 0.7152 + ground[2] * 0.0722,
+        }
+    }
+
+    fn radiance(&self, direction: Vector4) -> [f64; 3] {
+        let Some(up) = self.up else {
+            return [self.energy; 3];
+        };
+        let w = (0.5 * (direction.dot3d(up) + 1.)).clamp(0., 1.);
+        self.ground
+            .map(|g| self.energy * (g + (1. - g) * w) * 2. / (1. + self.luminance))
+    }
+}
+
 fn material(snapshot: &RenderSceneSnapshot, hit: Hit) -> MaterialPreset {
     named_material(
         hit.transparency_group
@@ -285,7 +303,7 @@ pub(super) fn reflected_radiance(
     params: &UmbreonRenderParams,
     group: Option<usize>,
 ) -> [f64; 3] {
-    let sky = environment(direction, camera, params);
+    let sky = Environment::new(camera, params).radiance(direction);
     let ray = Ray {
         origin: hit.position + hit.normal * epsilon(hit),
         direction,
@@ -361,6 +379,10 @@ fn indirect_samples(
     let mut result = [0.; 3];
     let rng = seed(hit);
     let geometric_normal = geometric_horizon.then(|| index.geometric_normal(hit));
+    let lights = lights(camera, p);
+    let environment = Environment::new(camera, p);
+    let origin = hit.position + hit.normal * epsilon(hit);
+    let bounces = p.gi_bounces.clamp(1, 8);
     for i in 0..count {
         let direction = sampler.as_ref().map_or_else(
             || sample(hit.normal, i, count, rng, true),
@@ -369,14 +391,11 @@ fn indirect_samples(
         if geometric_normal.is_some_and(|normal| direction.dot3d(normal) <= 0.) {
             continue;
         }
-        let mut ray = Ray {
-            origin: hit.position + hit.normal * epsilon(hit),
-            direction,
-        };
+        let mut ray = Ray { origin, direction };
         let mut throughput = [1.; 3];
-        for bounce in 0..p.gi_bounces.clamp(1, 8) {
+        for bounce in 0..bounces {
             let Some(mut h) = index.nearest(ray, f64::INFINITY, group) else {
-                let env = environment(ray.direction, camera, p);
+                let env = environment.radiance(ray.direction);
                 for c in 0..3 {
                     result[c] += throughput[c] * env[c];
                 }
@@ -390,7 +409,7 @@ fn indirect_samples(
             }
             let kd = diffuse_weight(material(snapshot, h));
             let mut direct = 0.;
-            for light in lights(camera, p) {
+            for light in lights {
                 direct += light.energy
                     * h.normal.dot3d(light.direction).max(0.)
                     * shadow(index, h, light, p, group);
@@ -399,7 +418,7 @@ fn indirect_samples(
                 throughput[c] *= kd * h.color[c];
                 result[c] += throughput[c] * direct;
             }
-            if throughput.iter().copied().fold(0., f64::max) < 1e-5 {
+            if bounce + 1 == bounces || throughput.iter().copied().fold(0., f64::max) < 1e-5 {
                 break;
             }
             ray = Ray {
@@ -459,20 +478,20 @@ pub(super) fn shade(
     };
     let mut color = [0.; 3];
     let diffuse_ao = 1. - p.ao_diffuse_factor.clamp(0., 1.) * (1. - ao.open);
-    let up = transform_direction(
-        camera
-            .rotation()
-            .inv()
-            .unwrap_or(cuemol_core::Quat::IDENTITY)
-            .to_matrix(),
-        Vector4::new3(0., 1., 0.),
-    );
     let amb_tint = if p.ao_bent_normal && p.ao_samples > 0 {
+        let up = transform_direction(
+            camera
+                .rotation()
+                .inv()
+                .unwrap_or(cuemol_core::Quat::IDENTITY)
+                .to_matrix(),
+            Vector4::new3(0., 1., 0.),
+        );
         0.7 + 0.3 * ao.bent.dot3d(up)
     } else {
         1.
     };
-    let amb = if p.use_gi && p.gi_intensity > 0. && !toon {
+    let amb = if p.use_gi && !toon {
         0.
     } else {
         ambient * (1. - p.ao_intensity.clamp(0., 1.) * (1. - ao.open)) * amb_tint

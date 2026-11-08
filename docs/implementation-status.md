@@ -61,6 +61,11 @@ Tauri and WebGL/WebGPU checks. The current operation inventory is complete; newl
 
 ## Outstanding boundaries
 
+The continuation scope explicitly defers physical macOS screen/input permission
+checks and hardware quad-buffer presentation. Those two items remain recorded
+below but do not block the remaining implementation and distribution work.
+GitHub push is authorized; current source is being validated through Actions.
+
 - Current native distribution evidence covers Linux x86-64, Apple silicon and
   Intel macOS under Rosetta. Linux OS input and macOS menu lifecycle checks pass.
   macOS physical input still requires the screen/accessibility grants, and real
@@ -72,10 +77,11 @@ Tauri and WebGL/WebGPU checks. The current operation inventory is complete; newl
   legacy Windows capability detection remains. A compatible OS/GPU/display is
   still required for any implementation and integration validation. Software
   stereo has separate passing checks.
-- The earlier paired rendering comparison records residual GI/OIDN pixel
-  differences and workload-dependent performance. It does not prove exact image
-  equivalence, and those measurements have not been repeated against every
-  current reference scene. Toolkit-specific controls also preclude claiming
+- The current CueMol 3.0.0.554 comparison covers direct light, GI and OIDN on
+  two molecular scenes. GI lighting reuse preserves six fixture hashes, and
+  the denoising path now preserves completely dark surfaces. The comparison
+  records residual GI/OIDN pixel differences and workload-dependent performance;
+  it does not establish exact equivalence across all scenes. Toolkit-specific controls also preclude claiming
   unmeasured pixel-for-pixel equivalence of every dialog.
 - Browser execution requires native tools for APBS, POV-Ray and the raw MOV,
   WMV2 and GIF encoders. The browser presents those limits explicitly; native
@@ -83,8 +89,10 @@ Tauri and WebGL/WebGPU checks. The current operation inventory is complete; newl
 - Live third-party AI calls are not part of the test plan. Loopback providers
   cover adapters and key handling without paid requests, as required by the
   repository instructions.
-- Current source changes and validation archives remain unpublished. Local
-  installer fixtures do not establish a new public release or Pages deployment.
+- Source is pushed to GitHub, while current native release-matrix verification
+  and Pages delivery still require terminal Actions results. Local installer
+  fixtures do not establish a new public release; no version tag is published
+  by the validation-only Release workflow.
 
 ## Current interface inventory
 

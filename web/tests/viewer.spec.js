@@ -514,6 +514,11 @@ test('OIDN uses bundled WebGPU weights and preserves transparent output',async({
   expect(b.width).toBe(48);expect(b.height).toBe(48);
   for(let i=3;i<a.data.length;i+=4)expect(b.data[i]).toBe(a.data[i]);
   expect(await page.evaluate(()=>performance.getEntriesByType('resource').some(e=>e.name.includes('rt_hdr_calb_cnrm.tza')))).toBe(true);
+  await call(page,'set_render_settings',{settings:'umbreon.lightIntensity=0'});
+  const dark=JSON.parse((await call(page,'get_screenshot',{width:48,height:48})).message)._image;
+  const darkPixels=PNG.sync.read(Buffer.from(dark,'base64')).data;
+  expect(Array.from(darkPixels).filter((_,i)=>i%4!==3).every(value=>value<=1)).toBe(true);
+  expect(Array.from(darkPixels).filter((_,i)=>i%4===3).some(value=>value>0)).toBe(true);
 });
 
 test('browser rendering yields to mouse input and can be cancelled',async({page})=>{

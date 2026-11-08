@@ -592,6 +592,35 @@ impl DenoiseGuides {
 mod tests {
     use super::*;
     #[test]
+    fn gi_denoise_does_not_reintroduce_constant_ambient() {
+        let mut snapshot = RenderSceneSnapshot::empty();
+        snapshot
+            .atoms
+            .push(crate::RenderAtom::new(Vector4::ZERO, 1., None));
+        let mut camera = Camera::new();
+        camera.set_zoom(4.);
+        camera.set_cam_dist(10.);
+        camera.set_slab_depth(100.);
+        let params = UmbreonRenderParams {
+            width: 16,
+            height: 16,
+            supersample: 1,
+            use_gi: true,
+            light_intensity: 0.,
+            gi_env_intensity: 0.,
+            show_edge_lines: false,
+            ..Default::default()
+        };
+        let raw = render_float(&snapshot, &camera, [0.; 4], &params, None, None).unwrap();
+        let expected = raw.pixels.clone();
+        assert!(expected.iter().all(|v| *v == 0.));
+        let prepared = prepare(&snapshot, &camera, [0.; 4], &params, raw, None, None).unwrap();
+        let unchanged = prepared.color.clone();
+        let frame = prepared.finish(unchanged).unwrap();
+        assert!(frame.pixels.iter().all(|v| *v == 0));
+    }
+
+    #[test]
     fn uncovered_samples_do_not_poison_indirect_denoise_input() {
         let frame = |pixels| FloatFrame {
             width: 2,

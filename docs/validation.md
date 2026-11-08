@@ -1,5 +1,71 @@
 # Validation evidence
 
+## GI lighting reuse and dark-image denoising
+
+The GI gather now prepares its lights, environment transform and ray origin once
+per receiving hit, and skips construction of an unused ray after the final
+bounce. Bent-normal camera transforms are computed only when used. Six fixed
+scenes cover 1CRN/4HHB ribbons with direct lighting, uniform GI and sky-gradient
+GI at 640 x 480 with 3 x 3 supersampling and the default one-bounce path. Three
+fresh processes per variant rendered each scene twice, alternating variant
+order. All 72 decoded RGBA hashes match the pre-change `e21ae44` binary. A final
+build including the denoising correction below also preserves those six hashes.
+
+The isolated optimization reduced the 4HHB sky-gradient GI median first/repeated
+export from 1,196/1,210 ms to 1,146/1,171 ms; uniform GI changed from
+1,160/1,165 ms to 1,127/1,130 ms. Peak RSS stayed around 60.4-60.7 MiB. Changes on
+the smaller fixture and direct-lighting cases were small or mixed; this is not
+evidence of a general application speedup.
+
+A separate regression found that the OIDN decomposition rendered its direct
+baseline with `giIntensity=0`, which incorrectly restored the material's
+constant ambient term. Clamping the resulting negative indirect component then
+brightened unlit surfaces. The reference `shading/hit_shader.hpp` suppresses
+constant ambient whenever GI is enabled, independently of GI intensity. Rust
+now uses the same condition. A completely unilluminated sphere failed the
+identity-filter round-trip before the fix and remains black after it. A real
+native OIDN export of a dark molecular scene has maximum RGB 1/255; the
+browser check enforces the same bound while retaining coverage alpha. All 97
+render tests pass, including the real native OIDN and stereo tests. Five focused
+Chromium checks pass after rebuilding WASM: lighting, adaptive AO, OIDN dark
+output and alpha, cancellation during model loading, and responsive rendering.
+
+### Current reference comparison
+
+The installed CueMol 3.0.0.554 application and the final Rust build rendered the
+same embedded scenes on one Apple-silicon macOS host. Each condition used three
+fresh processes with two exports per process. Times below are median
+first/repeated exports in milliseconds, including preparation and PNG output;
+RSS is the range of process peaks, including scene loading and the runtime.
+Each engine used its normal worker allocation. The harness verifies object
+identities, atom/bond counts and image dimensions before comparing pixels.
+
+| Scene and lighting | Reference time | Rust time | Reference RSS, MiB | Rust RSS, MiB | RGBA mean absolute error, 0-255 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1CRN direct | 42 / 41 | 44 / 41 | 138.7 | 20.9-21.3 | 0.000056 |
+| 4HHB direct | 79 / 78 | 106 / 104 | 178.9-180.5 | 60.5-60.6 | 0.000039 |
+| 1CRN GI | 216 / 217 | 272 / 269 | 486.9 | 27.2-27.3 | 0.004363 |
+| 4HHB GI | 638 / 630 | 1,107 / 1,126 | 532.2 | 60.4-60.6 | 0.035935 |
+| 1CRN GI + OIDN | 529 / 527 | 493 / 465 | 685.3-685.4 | 286.4 | 0.306681 |
+| 4HHB GI + OIDN | 964 / 955 | 1,447 / 1,454 | 731.2-731.3 | 328.5-328.6 | 0.611144 |
+
+The direct/GI screenshots were inspected. GI remains slower in these cases,
+while Rust uses less memory. Loading is also workload-dependent: 1CRN takes
+about 2.3 ms in Rust versus 7.3-7.5 ms in the reference; 4HHB takes 63-67 ms
+versus 18 ms. These timings do not establish a whole-application speedup.
+
+OIDN image equivalence remains unclaimed. The reference filters the gathered
+irradiance before supersample composition, whereas the current port separates
+indirect light from the composed image. Correcting the dark-image invariant
+slightly increases this benchmark's aggregate OIDN error from 0.284/0.565 to
+0.307/0.611 for 1CRN/4HHB; the fix is not presented as an overall pixel-match
+improvement. Maximum channel differences are 93/83 after OIDN and 24/7 for
+unfiltered GI. The small image-wide means include background pixels.
+
+Generated scenes, per-process logs, hashes, before/after records and screenshots
+are retained under `.cache/gi-current`; test logs are in `.cache/current-audit`.
+No absolute machine path or generated benchmark artifact is tracked.
+
 ## Intel macOS distribution through Rosetta
 
 The clean application revision `f7f5829` now also builds for
