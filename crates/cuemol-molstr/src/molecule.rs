@@ -222,11 +222,14 @@ fn insert_residue_pivot(pivots: &mut ResiduePivots, key: &ResidueKey, name: Arc<
         .insert((key.res_id, key.ins_code), name);
 }
 
+type ResidueLookup = HashMap<String, HashSet<(i32, Option<char>)>>;
+
 #[derive(Debug, Clone)]
 pub struct MolCoord {
     atoms: Arc<Vec<Atom>>,
     next_atom_serial: i64,
     residue_count: OnceLock<usize>,
+    residue_lookup: OnceLock<Arc<ResidueLookup>>,
     bonds: Arc<Vec<Bond>>,
     residue_props: Arc<BTreeMap<ResidueKey, BTreeMap<String, String>>>,
     residue_pivots: Arc<ResiduePivots>,
@@ -370,7 +373,7 @@ impl MolCoord {
             );
         }
         if !Arc::ptr_eq(&from.atoms, &to.atoms) && from.atoms != to.atoms {
-            self.residue_count.take();
+            self.invalidate_residue_cache();
             cuemol_core::snapshot::apply_sequence_changes(
                 Arc::make_mut(&mut self.atoms),
                 &from.atoms,
@@ -423,6 +426,7 @@ impl MolCoord {
             atoms: Arc::default(),
             next_atom_serial: 1,
             residue_count: OnceLock::new(),
+            residue_lookup: OnceLock::new(),
             bonds: Arc::default(),
             residue_props: Arc::default(),
             residue_pivots: Arc::default(),
@@ -446,6 +450,7 @@ impl MolCoord {
                 .unwrap_or(1),
             atoms: Arc::new(atoms),
             residue_count: OnceLock::new(),
+            residue_lookup: OnceLock::new(),
             bonds: Arc::default(),
             residue_props: Arc::default(),
             residue_pivots: Arc::default(),
@@ -560,7 +565,7 @@ impl MolCoord {
     }
 
     pub fn atom_mut_by_serial(&mut self, serial: i32) -> Option<&mut Atom> {
-        self.residue_count.take();
+        self.invalidate_residue_cache();
         Arc::make_mut(&mut self.atoms)
             .iter_mut()
             .find(|atom| atom.serial == serial)
@@ -768,7 +773,7 @@ impl MolCoord {
 
     pub fn push_atom(&mut self, atom: Atom) {
         self.next_atom_serial = self.next_atom_serial.max(i64::from(atom.serial) + 1);
-        self.residue_count.take();
+        self.invalidate_residue_cache();
         Arc::make_mut(&mut self.atoms).push(atom);
     }
 
@@ -830,7 +835,7 @@ impl MolCoord {
     }
 
     pub fn atoms_mut(&mut self) -> &mut [Atom] {
-        self.residue_count.take();
+        self.invalidate_residue_cache();
         Arc::make_mut(&mut self.atoms).as_mut_slice()
     }
 
@@ -923,6 +928,16 @@ impl MolCoord {
         let before = self.bonds.len();
         Arc::make_mut(&mut self.bonds).retain(|bond| bond.persist);
         before - self.bonds.len()
+    }
+
+    pub(crate) fn take_topology_bonds(&mut self) -> Vec<Bond> {
+        let mut bonds = Arc::unwrap_or_clone(std::mem::take(&mut self.bonds));
+        bonds.retain(|bond| bond.persist);
+        bonds
+    }
+
+    pub(crate) fn replace_topology_bonds(&mut self, bonds: Vec<Bond>) {
+        self.bonds = Arc::new(bonds);
     }
 
     pub fn bonds(&self) -> &[Bond] {
@@ -1053,6 +1068,31 @@ impl MolCoord {
         selector.indices_in_molecule(self)
     }
 
+    fn invalidate_residue_cache(&mut self) {
+        self.residue_count.take();
+        self.residue_lookup.take();
+    }
+
+    fn contains_residue(&self, chain: &str, res_id: i32, ins_code: Option<char>) -> bool {
+        self.residue_lookup
+            .get_or_init(|| {
+                let mut lookup = ResidueLookup::new();
+                for atom in self.atoms.iter() {
+                    if let Some(residues) = lookup.get_mut(atom.chain_id.as_str()) {
+                        residues.insert((atom.res_id, atom.ins_code));
+                    } else {
+                        lookup.insert(
+                            atom.chain_id.clone(),
+                            HashSet::from([(atom.res_id, atom.ins_code)]),
+                        );
+                    }
+                }
+                Arc::new(lookup)
+            })
+            .get(chain)
+            .is_some_and(|residues| residues.contains(&(res_id, ins_code)))
+    }
+
     pub fn set_residue_prop_str(
         &mut self,
         chain: &str,
@@ -1062,7 +1102,7 @@ impl MolCoord {
     ) -> Result<()> {
         let (res_id, ins_code) = parse_residue_index(sindex)?;
         let key = ResidueKey::new(chain, res_id, ins_code);
-        if !self.atoms.iter().any(|atom| residue_key(atom) == key) {
+        if !self.contains_residue(chain, res_id, ins_code) {
             return Err(CueMolError::NotFound(format!(
                 "residue {} {}",
                 chain, sindex
@@ -1182,7 +1222,7 @@ impl MolCoord {
             })
             .collect();
         // Apply atom mutations.
-        self.residue_count.take();
+        self.invalidate_residue_cache();
         for (atom, new_key) in Arc::make_mut(&mut self.atoms).iter_mut().zip(&dests) {
             atom.chain_id = new_key.chain_id.clone();
             atom.res_id = new_key.res_id;
@@ -1659,7 +1699,7 @@ impl MolCoord {
             })
             .collect();
 
-        self.residue_count.take();
+        self.invalidate_residue_cache();
         self.atoms = Arc::new(atoms);
         self.bonds = Arc::new(bonds);
         let live_residues = self.atoms.iter().map(residue_key).collect::<BTreeSet<_>>();
@@ -1714,7 +1754,7 @@ impl MolCoord {
         if old_key != new_key && self.atoms.iter().any(|atom| residue_key(atom) == new_key) {
             return Ok(false);
         }
-        self.residue_count.take();
+        self.invalidate_residue_cache();
         for atom in Arc::make_mut(&mut self.atoms) {
             if residue_key(atom) == old_key {
                 atom.chain_id = new_chain.to_string();
@@ -1747,7 +1787,7 @@ impl MolCoord {
         if old_key != new_key && self.atoms.iter().any(|atom| residue_key(atom) == new_key) {
             return Ok(false);
         }
-        self.residue_count.take();
+        self.invalidate_residue_cache();
         for atom in Arc::make_mut(&mut self.atoms) {
             if residue_key(atom) == old_key {
                 atom.res_id = new_res_id;
@@ -1807,7 +1847,7 @@ impl MolCoord {
             .filter(|value| *value <= i64::from(i32::MAX) + 1)
             .ok_or_else(|| CueMolError::invalid_argument("atom ID space is exhausted"))?;
         self.next_atom_serial = next_serial;
-        self.residue_count.take();
+        self.invalidate_residue_cache();
         let mut remap = BTreeMap::new();
         for (offset, index) in selected.iter().enumerate() {
             let new_index = self.atoms.len();
@@ -2542,6 +2582,70 @@ mod tests {
     }
 
     #[test]
+    fn residue_property_targets_follow_edits_and_snapshot_restoration() {
+        fn check(molecule: &mut MolCoord) {
+            let keys = molecule
+                .atoms()
+                .iter()
+                .map(residue_key)
+                .collect::<BTreeSet<_>>();
+            let mut candidates = keys.clone();
+            for chain in ["A", "B", "C", "Z", "missing"] {
+                for index in [-2, 1, 2, 3, 5] {
+                    for insertion in [None, Some('A')] {
+                        candidates.insert(ResidueKey::new(chain, index, insertion));
+                    }
+                }
+            }
+            for key in candidates {
+                let result = molecule.set_residue_prop_str(
+                    &key.chain_id,
+                    &key.script_index(),
+                    "probe",
+                    "value",
+                );
+                assert_eq!(result.is_ok(), keys.contains(&key), "{key:?}");
+            }
+        }
+
+        let mut molecule =
+            MolCoord::with_atoms(vec![atom(1, "A", 1, "CA", 0.), atom(2, "B", 2, "CA", 10.)]);
+        check(&mut molecule);
+        let mut original = molecule.clone();
+        molecule.push_atom(atom(3, "C", 3, "CA", 20.));
+        check(&mut molecule);
+        molecule.atoms_mut()[0].chain_id = "Z".into();
+        check(&mut molecule);
+        molecule.atom_mut_by_serial(2).unwrap().ins_code = Some('A');
+        check(&mut molecule);
+        assert!(molecule.change_chain_name("Z", "1", "A").unwrap());
+        check(&mut molecule);
+        assert!(molecule.change_res_index("A", "1", "-2A").unwrap());
+        check(&mut molecule);
+        assert!(molecule.relabel_residue_keys(|atom| {
+            (atom.serial == 3).then(|| ResidueKey::new("Z", 5, None))
+        }));
+        check(&mut molecule);
+        let saved = SavedAtoms::capture(&molecule, &BTreeSet::from([0])).unwrap();
+        molecule.delete_atom_indices(&BTreeSet::from([0]));
+        check(&mut molecule);
+        assert!(saved.restore(&mut molecule));
+        check(&mut molecule);
+        let mut copy = MolCoord::new();
+        check(&mut copy);
+        copy.copy_selected_atoms_from(&molecule, &Selector::All)
+            .unwrap();
+        check(&mut copy);
+        check(&mut copy.transfer_data().into_molecule().unwrap());
+        let changed = molecule.clone();
+        molecule.apply_undo_changes(&changed, &original);
+        check(&mut molecule);
+        assert_eq!(molecule.atoms(), original.atoms());
+        check(&mut original);
+        assert_eq!(original.atom_count(), 2);
+    }
+
+    #[test]
     fn molcoord_selection_evaluates_distance_and_unary_ops() {
         let mut mol = MolCoord::new();
         mol.push_atom(atom(1, "A", 1, "N", 0.0));
@@ -2604,6 +2708,34 @@ mod tests {
         assert_eq!(mol.bond_count(), 1);
         assert_eq!(mol.bonds()[0].atom1, 0);
         assert_eq!(mol.bonds()[0].atom2, 1);
+    }
+
+    #[test]
+    fn rebuilding_topology_preserves_persistent_bond_payload_and_snapshots() {
+        let mut molecule = MolCoord::with_atoms(
+            ["N", "CA", "C", "O"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| atom(index as i32 + 1, "A", 1, name, index as f64))
+                .collect(),
+        );
+        molecule.add_bond_stereo(1, 0, BondOrder::Triple, 6);
+        assert!(molecule.mark_bond_persistent(0, 1));
+        molecule.add_bond_stereo(0, 3, BondOrder::Aromatic, 1);
+        let original = molecule.clone();
+        molecule.apply_topology();
+        let expected = molecule.bonds().to_vec();
+        assert_eq!(expected[0], original.bonds()[0]);
+        assert_eq!(expected.len(), 3);
+        assert_eq!(original.bond_count(), 2);
+        assert_eq!(original.bonds()[1].order, BondOrder::Aromatic);
+        assert_eq!(original.bonds()[1].stereo, 1);
+        for _ in 0..3 {
+            let snapshot = molecule.clone();
+            molecule.apply_topology();
+            assert_eq!(molecule.bonds(), expected);
+            assert_eq!(snapshot.bonds(), expected);
+        }
     }
 
     #[test]

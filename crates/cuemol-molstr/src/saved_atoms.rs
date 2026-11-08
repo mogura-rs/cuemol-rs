@@ -185,7 +185,7 @@ impl SavedAtoms {
                 .max()
                 .unwrap_or(1),
         );
-        molecule.residue_count.take();
+        molecule.invalidate_residue_cache();
         molecule.atoms = Arc::new(atoms);
         molecule.bonds = Arc::new(bonds);
         for (key, properties) in &self.residue_props {

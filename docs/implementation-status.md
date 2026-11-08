@@ -6,6 +6,10 @@ separate states. A row remains open until its behavior and applicable frontends
 have been checked. Generated fixtures, profiles and screenshots belong in the
 ignored `.cache` directory.
 
+The follow-up [repeated-operation audit](deep-audit.md) tracks larger workloads,
+combined edits and resource retention beyond the completed delivery checks.
+Its open rows must be resolved before that new audit is described as complete.
+
 The current reference is the sibling CueMol checkout at `794fe4ac` (3.0.0.554).
 Earlier comparisons in [parity-audit.md](parity-audit.md) used 2.4.1.547.
 The newer reference adds a ChimeraX console, selection simplification, combined

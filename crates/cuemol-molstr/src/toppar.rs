@@ -15,10 +15,10 @@
 //! into a [`TopoDB`], and exposes [`build_topology_bonds`] which is what
 //! `MolCoord::apply_topology` now drives.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use crate::molecule::{Atom, BondOrder, MolCoord};
+use crate::molecule::{Atom, Bond, BondOrder, MolCoord};
 
 const PROT_TOP: &str = include_str!("../data/prot_top.xml");
 const NUCL_TOP: &str = include_str!("../data/nucl_top.xml");
@@ -1995,6 +1995,35 @@ const LINK_ESD_TOLERANCE: f64 = 10.0;
 /// (more than one when alternate conformations are present).
 type NameMap = HashMap<String, Vec<usize>>;
 
+struct TopologyBonds {
+    bonds: Vec<Bond>,
+    pairs: HashSet<(usize, usize)>,
+}
+
+impl TopologyBonds {
+    fn new(bonds: Vec<Bond>) -> Self {
+        let pairs = bonds
+            .iter()
+            .map(|bond| (bond.atom1.min(bond.atom2), bond.atom1.max(bond.atom2)))
+            .collect();
+        Self { bonds, pairs }
+    }
+
+    fn add(&mut self, atom1: usize, atom2: usize, order: BondOrder) -> bool {
+        if atom1 == atom2 || !self.pairs.insert((atom1.min(atom2), atom1.max(atom2))) {
+            return false;
+        }
+        self.bonds.push(Bond {
+            atom1,
+            atom2,
+            order,
+            stereo: 0,
+            persist: false,
+        });
+        true
+    }
+}
+
 fn build_name_map(mol: &MolCoord, indices: &[usize]) -> NameMap {
     let mut map: NameMap = HashMap::new();
     for &i in indices {
@@ -2016,14 +2045,12 @@ fn distance(mol: &MolCoord, i: usize, j: usize) -> f64 {
 
 /// Add bonds between every alt-conf-compatible atom pair named `(a1, a2)` drawn
 /// from `map1`/`map2`.  `gate` optionally restricts the bond length to `[lo, hi]`.
-/// Returns the atom-index pairs actually bonded (`add_bond` dedups, so an
-/// already-present bond is not reported).
+/// Returns only newly added atom-index pairs.
 fn bond_named(
-    mol: &mut MolCoord,
-    map1: &NameMap,
-    a1: &str,
-    map2: &NameMap,
-    a2: &str,
+    mol: &MolCoord,
+    bonds: &mut TopologyBonds,
+    (map1, a1): (&NameMap, &str),
+    (map2, a2): (&NameMap, &str),
     order: BondOrder,
     gate: Option<(f64, f64)>,
 ) -> Vec<(usize, usize)> {
@@ -2047,9 +2074,7 @@ fn bond_named(
                     continue;
                 }
             }
-            let before = mol.bond_count();
-            mol.add_bond(i, j, order);
-            if mol.bond_count() > before {
+            if bonds.add(i, j, order) {
                 added.push((i, j));
             }
         }
@@ -2101,7 +2126,8 @@ fn chk_bond_dist(mol: &MolCoord, i: usize, j: usize) -> bool {
 /// a residue with no template, `templated` is empty, so this becomes the full
 /// per-residue distance autogeneration.
 fn bond_unbonded_atoms(
-    mol: &mut MolCoord,
+    mol: &MolCoord,
+    bonds: &mut TopologyBonds,
     indices: &[usize],
     templated: &std::collections::HashSet<usize>,
 ) {
@@ -2114,7 +2140,7 @@ fn bond_unbonded_atoms(
                 continue;
             }
             if chk_bond_dist(mol, i, j) {
-                mol.add_bond(i, j, BondOrder::Single);
+                bonds.add(i, j, BondOrder::Single);
             }
         }
     }
@@ -2229,7 +2255,7 @@ pub fn build_topology_bonds_with_db(mol: &mut MolCoord, db: &TopoDB) {
 }
 
 pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, auto_generate: bool) {
-    mol.remove_nonpersistent_bonds();
+    let mut bonds = TopologyBonds::new(mol.take_topology_bonds());
     let summaries = mol.residue_summaries();
 
     // Phase 1 — intra-residue bonds: apply the residue template (correct bond
@@ -2285,9 +2311,16 @@ pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, aut
         let generated_bonds = (!has_topology && auto_generate)
             .then(|| generated.get(&summary.res_name))
             .flatten();
-        if let Some(bonds) = generated_bonds {
-            for (a, b) in bonds.iter() {
-                for (i, j) in bond_named(mol, &map, a, &map, b, BondOrder::Single, None) {
+        if let Some(template_bonds) = generated_bonds {
+            for (a, b) in template_bonds.iter() {
+                for (i, j) in bond_named(
+                    mol,
+                    &mut bonds,
+                    (&map, a),
+                    (&map, b),
+                    BondOrder::Single,
+                    None,
+                ) {
                     templated.insert(i);
                     templated.insert(j);
                 }
@@ -2302,8 +2335,14 @@ pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, aut
                     mol.set_topology_pivot(&summary.key, name.clone());
                 }
                 for bond in &top.bonds {
-                    for (i, j) in bond_named(mol, &map, &bond.a1, &map, &bond.a2, bond.order, None)
-                    {
+                    for (i, j) in bond_named(
+                        mol,
+                        &mut bonds,
+                        (&map, &bond.a1),
+                        (&map, &bond.a2),
+                        bond.order,
+                        None,
+                    ) {
                         templated.insert(i);
                         templated.insert(j);
                     }
@@ -2324,7 +2363,7 @@ pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, aut
             None => String::new(),
         };
         if has_topology || generated_bonds.is_some() {
-            bond_unbonded_atoms(mol, &summary.atom_indices, &templated);
+            bond_unbonded_atoms(mol, &mut bonds, &summary.atom_indices, &templated);
         }
         contexts.push(ResidueCtx {
             res_name: summary.res_name.clone(),
@@ -2350,13 +2389,11 @@ pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, aut
         if let Some(link) = best_link(db, mol, prev, cur, true) {
             polymer_links.push((summaries[w - 1].key.clone(), summaries[w].key.clone()));
             for bond in &link.bonds {
-                let (m1, m2) = (prev.map.clone(), cur.map.clone());
                 bond_named(
                     mol,
-                    &m1,
-                    &bond.a1,
-                    &m2,
-                    &bond.a2,
+                    &mut bonds,
+                    (&prev.map, &bond.a1),
+                    (&cur.map, &bond.a2),
                     bond.order,
                     Some((0.0, link_bond_upper_bound(bond))),
                 );
@@ -2410,19 +2447,18 @@ pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, aut
                 continue;
             };
             for bond in &link.bonds {
-                let (m1, m2) = (contexts[i].map.clone(), contexts[j].map.clone());
                 bond_named(
                     mol,
-                    &m1,
-                    &bond.a1,
-                    &m2,
-                    &bond.a2,
+                    &mut bonds,
+                    (&contexts[i].map, &bond.a1),
+                    (&contexts[j].map, &bond.a2),
                     bond.order,
                     Some((0.0, link_bond_upper_bound(bond))),
                 );
             }
         }
     }
+    mol.replace_topology_bonds(bonds.bonds);
 }
 
 #[cfg(test)]
