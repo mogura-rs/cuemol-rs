@@ -14,3 +14,6 @@ jobs:
     uses: ./.github/workflows/test.yml
   web:
     uses: ./.github/workflows/web.yml
+  browser:
+    needs: web
+    uses: ./.github/workflows/browser.yml

@@ -302,9 +302,10 @@ def main():
             if startup_deferred:
                 initial_x, initial_y, initial_width, initial_height = wait_for(lambda: window_bounds(process.pid, content=True))
                 time.sleep(0.3)
-                if args.file_options_only or args.renderer_history_only:
-                    ImageGrab.grab(bbox=(initial_x, initial_y, initial_x + initial_width, initial_y + initial_height)).save(work / 'file-options-startup.png')
-                pyautogui.moveTo(initial_x + 387, initial_y + 339 - menu_inset)
+                ImageGrab.grab(bbox=(initial_x, initial_y, initial_x + initial_width, initial_y + initial_height)).save(work / 'file-options-startup.png')
+                # Egui constrains the initial dialog area before measuring its contents.
+                setup_offset_x = max(0, 966 - initial_width)
+                pyautogui.moveTo(initial_x + 387 - setup_offset_x, initial_y + 339 - menu_inset)
                 time.sleep(0.12)
                 pyautogui.click()
             state = wait_for(loaded, timeout=90)
@@ -372,11 +373,11 @@ def main():
                 if len(call('get_scene_state')['objects']) != 1:
                     raise RuntimeError('Dropped files were loaded before accepting options')
                 capture('file-options-drop.png')
-                click_at(x + 387, y + 339)
+                click_at(x + 387 - setup_offset_x, y + 339)
                 wait_for(lambda: len(call('get_scene_state')['objects']) == 2)
                 time.sleep(0.3)
                 capture('file-options-second.png')
-                click_at(x + 428, y + 339)
+                click_at(x + 428 - setup_offset_x, y + 339)
                 time.sleep(0.3)
                 if len(call('get_scene_state')['objects']) != 2:
                     raise RuntimeError('Cancelling the second file changed the accepted objects')
@@ -1655,7 +1656,11 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             try:
                 capture('failure.png')
             except Exception:
-                pass
+                try:
+                    failed_x, failed_y, failed_width, failed_height = window_bounds(process.pid, content=True)
+                    ImageGrab.grab(bbox=(failed_x, failed_y, failed_x + failed_width, failed_y + failed_height)).save(work / 'failure.png')
+                except Exception:
+                    pass
             raise
         finally:
             (work / 'result.json').write_text(json.dumps(report, indent=2) + '\n')

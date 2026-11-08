@@ -36,6 +36,9 @@ jobs:
   web:
     needs: validate
     uses: ./.github/workflows/web.yml
+  browser:
+    needs: web
+    uses: ./.github/workflows/browser.yml
   build:
     needs: [test, web]
     strategy:
@@ -188,7 +191,7 @@ jobs:
           retention-days: 7
   publish:
     if: startsWith(github.ref, 'refs/tags/') && (github.event_name == 'push' || inputs.publish)
-    needs: build
+    needs: [build, browser]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

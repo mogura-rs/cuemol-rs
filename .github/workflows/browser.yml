@@ -1,0 +1,52 @@
+name: Browser tests
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-assets
+          path: web/
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-test-server
+          path: target/debug/
+      - name: Prepare prebuilt server
+        run: chmod +x target/debug/cuemol
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --prefix web
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: chromium-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+      - name: Prepare Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: Test browser application
+        working-directory: web
+        env:
+          CUEMOL_WEB_TEST_PREBUILT: '1'
+          SHARD: ${{ matrix.shard }}
+        run: npm test -- --shard="$SHARD/4" --reporter=list
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: browser-test-results-${{ matrix.shard }}
+          path: web/test-results/
+          retention-days: 7

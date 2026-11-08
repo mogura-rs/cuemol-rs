@@ -171,7 +171,6 @@ fn animated_renderer_properties_and_visibility_do_not_leak_to_live_objects() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-#[ignore = "Requires an available rendering adapter"]
 fn movie_job_writes_bounded_frames_with_shared_settings_and_preserves_live_edits() {
     use cuemol_command::movie::{MovieEvent, MovieJob, MovieOptions};
     use std::{
