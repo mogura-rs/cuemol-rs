@@ -15,9 +15,9 @@ correctness for every input or platform combination.
 | --- | --- | --- |
 | Indexed browser trajectories | Reject malformed lengths/counts, stop cancelled reads, preserve later operations and history, and clarify direct-file averaging behavior | Complete; direct asynchronous averaging is implemented and checked |
 | Shared trajectory readers | Bound work and allocations for malformed headers and preserve valid coordinate/cell results | Complete; 447 shared checks and 10 focused browser checks passed |
-| Imported surface rendering | Measure repeated parsing and retained binary/text storage; preserve geometry, edits and scene round trips after any change | Pending |
+| Imported surface rendering | Measure repeated parsing and retained binary/text storage; preserve geometry, edits and scene round trips after any change | Complete; exact mesh hashes and 717 shared checks pass |
 | Concurrent frontend work | Check superseded frames, scene changes, failure recovery and ownership of busy state | Complete for the identified cases; cancellation, queued imports, Console and Agent checks pass |
-| Documentation and requirements | Reconcile current implementation, historical evidence and remaining platform limits | Pending |
+| Documentation and requirements | Reconcile current implementation, historical evidence and remaining platform limits | Complete; historical delivery and current changes are separated, with platform limits retained |
 | Final delivery | Complete affected local checks, terminal CI, applicable native packages and the deployed WASM artifact | Pending |
 
 ## Browser trajectory boundaries
@@ -148,3 +148,65 @@ File block. Cancellation after the second read prevents all later reads; tests
 also cover a malformed neighboring frame, retry, Console Stop, preserved prior
 undo and the Agent's grouped undo. New imports are serialized behind a pending
 frame and retain their busy state while their own read is pending.
+
+## Imported surface preparation and storage
+
+Every render snapshot previously parsed the same imported OBJ, PLY or QDF
+payload again. A per-application cache now retains decoded geometry for active
+sources, with limits of 32 MiB of allocated mesh buffers and 16 entries.
+Source identity uses weak references, so the cache does not keep source bytes
+alive. Replacing or mutating source storage invalidates the entry. Style,
+transform and visibility changes still apply when preparing each snapshot.
+Application clones used by Undo and render jobs start with an empty cache;
+changing or clearing the active scene releases entries at the next snapshot.
+Oversized individual meshes are decoded without being retained in the cache.
+
+Valid OBJ text and its original bytes now share one allocation. Malformed
+UTF-8 still retains the original bytes for export and the same lossy text for
+parsing. Binary PLY and QDF no longer retain a lossy text copy, including after
+QSC restoration, surface generation and geometry edits.
+
+The following results compare the unchanged surface path at `b738a39` with
+the final candidate. Each input uses three fresh processes per build,
+alternating build order, with eight snapshots after initial preparation.
+All vertex positions, normals, colors and triangle-index hashes match.
+Times measure CPU mesh preparation, excluding hashing and GPU drawing; RSS is
+the whole-process peak and includes allocator retention from repeated work.
+
+| Input | Repeated preparation before → after (ms) | Peak RSS before → after (MiB) |
+| --- | ---: | ---: |
+| OBJ, 65,536 vertices | 14.14 → 0.91 | 33.67 → 30.00 |
+| OBJ, 147,456 vertices | 33.08 → 2.12 | 227.83 → 66.13 |
+| QDF, 147,456 vertices | 5.96 → 2.09 | 189.06 → 50.97 |
+
+The QDF retains 7.30 MiB of source bytes and previously held another 11.00 MiB
+of unused text. Its initial load falls from 17.17 to 4.67 ms. Initial geometry
+preparation remains necessary; for the large OBJ it measures 34.00 versus
+32.67 ms. The cache can retain additional decoded geometry for smaller or
+infrequently rendered inputs, so these results do not imply lower memory use
+for every scene. The limits bound that tradeoff.
+
+Regressions cover geometry replacement, copy-on-write mutation, Undo/Redo,
+style changes, QSC save/reload, binary byte preservation, invalid UTF-8 and
+cache eviction. All 717 molecule, surface and shared-core tests pass with the
+available reference fixtures. Raw measurements and binary/input hashes are
+in `.cache/final-sweep/surfaces`; the reusable probe is
+`surface_render_bench` with `scripts/benchmark-scene-snapshots.py --workload surfaces`.
+
+## Documentation reconciliation
+
+Two stale descriptions were corrected. A QSC reader comment called QDF an
+ASCII envelope stored in a text map, although the reader already supports
+binary payloads in a byte map. The implementation-status page also described
+`74d1825` and 394 browser cases as current, despite the completed deep-audit
+delivery at `1dcd2e1`, with 397 passing CI cases and a separately checked ICC
+case. The page now identifies the recorded delivery and links this follow-up
+for later changes and validation.
+
+The reference catalog was rechecked without executing scene operations: all
+129 reference registrations, 127 MCP operations, 444 parameters and 159 console
+names/aliases are covered by the local 151-operation catalog. These are
+reference coverage counts, not totals for every local extension. In particular,
+`set_frame.averageRadius` is an additional local parameter. Existing physical
+Mac, hardware-stereo, browser native-tool and GI/OIDN comparison limits remain
+explicit; finite checks do not establish universal behavior or pixel equality.

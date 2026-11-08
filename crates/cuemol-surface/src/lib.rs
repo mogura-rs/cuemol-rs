@@ -584,6 +584,18 @@ impl SurfaceMesh {
         Self::default()
     }
 
+    /// Bytes reserved by the vertex and triangle buffers, excluding the struct.
+    pub fn allocated_bytes(&self) -> usize {
+        self.vertices
+            .capacity()
+            .saturating_mul(std::mem::size_of::<SurfaceVertex>())
+            .saturating_add(
+                self.triangles
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<[u32; 3]>()),
+            )
+    }
+
     pub fn clear(&mut self) {
         self.vertices.clear();
         self.triangles.clear();

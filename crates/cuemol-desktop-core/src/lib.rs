@@ -134,6 +134,7 @@ pub use prepared_io::PreparedFile;
 pub mod image_export;
 #[cfg(feature = "offscreen")]
 pub mod offscreen;
+mod surface_cache;
 mod trajectory_io;
 #[cfg(feature = "offscreen")]
 pub mod viewport;
@@ -734,6 +735,7 @@ pub struct DesktopAppState {
     /// contour/isosurface features never pick it up. See
     /// [`build_surface_potential_mesh`](DesktopAppState::build_surface_potential_mesh).
     surface_potential: Option<DensityMap>,
+    surface_mesh_cache: surface_cache::SurfaceCache,
     /// The ± half-width (in potential units) mapping to full red/blue for the SCAPOT
     /// surface (the C++ `m_dParLow/High` span around the neutral mid). `None` = the
     /// robust auto default (2·rmsd), which — unlike the field min/max — is not washed
@@ -2043,6 +2045,7 @@ impl Default for DesktopAppState {
             trajectories: BTreeMap::new(),
             next_trajectory_block_uid: 5_000_000_000,
             surface_potential: None,
+            surface_mesh_cache: Default::default(),
             potential_scale: None,
             script_styles: default_desktop_style_manager(),
             script_style_bindings: BTreeMap::new(),
@@ -3032,6 +3035,7 @@ impl DesktopAppState {
     /// already included in the shared render snapshot.
     pub fn active_scene_surface_meshes(&self) -> Vec<cuemol_render::RenderMesh> {
         let Some(scene_uid) = self.active_scene else {
+            self.surface_mesh_cache.retain(&[]);
             return Vec::new();
         };
         self.scene_surface_meshes(scene_uid)
@@ -3041,6 +3045,7 @@ impl DesktopAppState {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return Vec::new();
         };
+        self.surface_mesh_cache.retain(scene.loaded_surfaces());
         self.loaded_surface_meshes(scene, scene.loaded_surfaces(), false)
     }
 
@@ -3049,6 +3054,7 @@ impl DesktopAppState {
             return;
         };
         let styles = self.scene_styles(scene);
+        self.surface_mesh_cache.retain(scene.loaded_surfaces());
         for surface in scene.loaded_surfaces() {
             let meshes = self.loaded_surface_meshes(scene, std::slice::from_ref(surface), false);
             let renderer_nodes = surface
@@ -3170,14 +3176,7 @@ impl DesktopAppState {
                     .filter(|value| !value.is_empty())
                     .and_then(|value| Matrix4::from_script_string(&value).ok())
                     .unwrap_or(Matrix4::IDENTITY);
-                let mesh = match surface.srctype.as_str() {
-                    "ply" => cuemol_surface::read_ply_bytes(&surface.raw_data),
-                    "qdfsurf" => cuemol_surface::qdf::read_qdf_surface_bytes(&surface.raw_data)
-                        .map(|surface| surface.mesh().clone()),
-                    "obj" => cuemol_surface::read_obj_str(&surface.data),
-                    _ => return Vec::new(),
-                };
-                let Ok(mesh) = mesh else {
+                let Some(mesh) = self.surface_mesh_cache.mesh(surface) else {
                     return Vec::new();
                 };
                 renderer_nodes
@@ -6728,7 +6727,7 @@ impl DesktopAppState {
             name: object_name,
             object_type: "MolSurfObj".to_string(),
             srctype: "qdfsurf".to_string(),
-            data: String::from_utf8_lossy(&raw_data).into_owned().into(),
+            data: "".into(),
             raw_data: raw_data.into(),
             qsc_node: Some(object_node),
         }))
@@ -6896,7 +6895,7 @@ impl DesktopAppState {
             name: name.to_string(),
             object_type: "MolSurfObj".to_string(),
             srctype: "qdfsurf".to_string(),
-            data: String::from_utf8_lossy(&raw_data).into_owned().into(),
+            data: "".into(),
             raw_data: raw_data.into(),
             qsc_node: Some(object_node),
         }))
@@ -6996,7 +6995,7 @@ impl DesktopAppState {
             .and_then(|scene| scene.loaded_surface_mut(surface_uid))
             .expect("surface was checked above");
         target.srctype = "qdfsurf".to_string();
-        target.data = String::from_utf8_lossy(&raw_data).into_owned().into();
+        target.data = "".into();
         target.raw_data = raw_data.into();
         let node = ensure_surface_qsc_node(target);
         node.set_str_attr("srctype", "qdfsurf");
@@ -14464,13 +14463,14 @@ impl DesktopAppState {
             .scene_manager_mut()
             .scene_mut(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let (data, raw_data) = LoadedSurface::source_payload(srctype, raw_data);
         Ok(scene.add_loaded_surface(LoadedSurface {
             uid: Uid::new(0),
             name: object_name,
             object_type: "MolSurfObj".to_string(),
             srctype: srctype.to_string(),
-            data: String::from_utf8_lossy(&raw_data).into_owned().into(),
-            raw_data: raw_data.into(),
+            data,
+            raw_data,
             qsc_node,
         }))
     }
@@ -15908,6 +15908,9 @@ impl DesktopAppState {
     }
 
     pub fn active_render_snapshot(&self, selection_text: &str) -> Result<RenderSceneSnapshot> {
+        if self.active_scene.is_none() {
+            self.surface_mesh_cache.retain(&[]);
+        }
         let scene_uid = self
             .active_scene
             .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
@@ -51790,7 +51793,7 @@ fn loaded_surface_object(surface: &LoadedSurface) -> Option<MolSurfObj> {
 fn sync_loaded_surface_geometry(surface: &mut LoadedSurface, object: &MolSurfObj) {
     let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(object);
     surface.srctype = "qdfsurf".to_string();
-    surface.data = String::from_utf8_lossy(&raw_data).into_owned().into();
+    surface.data = "".into();
     surface.raw_data = raw_data.into();
     let name = surface.name.clone();
     let node = ensure_surface_qsc_node(surface);
@@ -52061,8 +52064,8 @@ fn sync_script_surface(
         if state.surface_mesh_modified {
             let data = object.mesh().to_obj_string(&state.name);
             surface.srctype = "obj".to_string();
-            surface.data = data.clone().into();
-            surface.raw_data = data.into_bytes().into();
+            surface.data = data.into();
+            surface.raw_data = surface.data.clone().into();
             node.set_str_attr("srctype", "obj");
             node.set_str_attr("src", "datachunk:");
         }
@@ -55077,7 +55080,7 @@ fn pse_surface_object(
         name: format!("{molecule_name}_surf"),
         object_type: "MolSurfObj".to_string(),
         srctype: "qdfsurf".to_string(),
-        data: String::from_utf8_lossy(&raw_data).into_owned().into(),
+        data: "".into(),
         raw_data: raw_data.into(),
         qsc_node: Some(object_node),
     })

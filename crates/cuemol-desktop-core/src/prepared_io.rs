@@ -592,18 +592,14 @@ impl DesktopAppState {
             }
             PreparedContents::Surface { format, source } => {
                 let scene_uid = self.ensure_active_scene();
+                let (data, raw_data) = LoadedSurface::source_payload(&format, source);
                 let mut surface = LoadedSurface {
                     uid: Uid::new(0),
                     name,
                     object_type: "MolSurfObj".into(),
-                    data: (if format == "obj" {
-                        String::from_utf8_lossy(&source).into_owned()
-                    } else {
-                        String::new()
-                    })
-                    .into(),
+                    data,
                     srctype: format,
-                    raw_data: source.into(),
+                    raw_data,
                     qsc_node: None,
                 };
                 ensure_surface_qsc_node(&mut surface);

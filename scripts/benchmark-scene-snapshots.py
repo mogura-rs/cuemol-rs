@@ -55,13 +55,14 @@ def measure(binary, source, edits, timeout):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Measure scene snapshots and retained Undo/Redo changes.')
+    parser = argparse.ArgumentParser(description='Measure scene snapshots, Undo/Redo retention, or surface mesh preparation.')
     parser.add_argument('--before', required=True, type=Path)
     parser.add_argument('--after', type=Path)
     parser.add_argument('--input', nargs='*', type=Path, default=[])
     parser.add_argument('--generate-obj', nargs='*', type=int, default=[])
     parser.add_argument('--samples', type=int, default=3)
-    parser.add_argument('--edits', type=int, default=8)
+    parser.add_argument('--edits', '--iterations', type=int, default=8)
+    parser.add_argument('--workload', choices=['snapshots', 'surfaces'], default='snapshots')
     parser.add_argument('--timeout', type=float, default=180)
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
@@ -70,6 +71,8 @@ def main():
             or not (args.input or args.generate_obj)):
         parser.error('positive counts and at least one input or generated grid are required')
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    metrics = (['load_ms', 'first_ms', 'repeated_ms', 'ms_per_snapshot', 'text_bytes', 'raw_bytes', 'peak_mib']
+               if args.workload == 'surfaces' else ['load_ms', 'edits_ms', 'undo_redo_with_hash_ms', 'peak_mib'])
     sources = list(args.input)
     for size in args.generate_obj:
         source = args.output.parent / f'surface-{size}.obj'
@@ -95,7 +98,7 @@ def main():
             results.append(dict(input=source.name, input_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
                                 version=label, samples=rows,
                                 medians={key: statistics.median(row[key] for row in rows) if rows[0][key] is not None else None
-                                         for key in ['load_ms', 'edits_ms', 'undo_redo_with_hash_ms', 'peak_mib']}))
+                                         for key in metrics}))
     args.output.write_text(json.dumps(dict(
         binaries={label: hashlib.sha256(binary.read_bytes()).hexdigest() for label, binary in variants},
         results=results), indent=2) + '\n')

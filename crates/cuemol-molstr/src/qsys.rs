@@ -1773,9 +1773,36 @@ pub struct LoadedSurface {
     pub name: String,
     pub object_type: String,
     pub srctype: String,
+    /// OBJ text; PLY and QDF are decoded directly from `raw_data`.
     pub data: std::sync::Arc<str>,
     pub raw_data: std::sync::Arc<[u8]>,
     pub qsc_node: Option<LDom2Node>,
+}
+
+impl LoadedSurface {
+    /// Share valid OBJ text with its original bytes; retain malformed bytes verbatim.
+    pub fn source_payload(
+        srctype: &str,
+        bytes: Vec<u8>,
+    ) -> (std::sync::Arc<str>, std::sync::Arc<[u8]>) {
+        if srctype != "obj" {
+            return ("".into(), bytes.into());
+        }
+        match String::from_utf8(bytes) {
+            Ok(text) => {
+                let text: std::sync::Arc<str> = text.into();
+                let bytes = text.clone().into();
+                (text, bytes)
+            }
+            Err(error) => {
+                let bytes = error.into_bytes();
+                (
+                    String::from_utf8_lossy(&bytes).into_owned().into(),
+                    bytes.into(),
+                )
+            }
+        }
+    }
 }
 
 /// A native density-map object captured from a `.qsc` QDF data chunk. Parsing
@@ -2713,8 +2740,7 @@ impl MolScene {
             object_type.as_str(),
             "MolCoord" | "AnimMol" | "MorphMol" | "Trajectory"
         ) {
-            // Capture every supported surface representation. QDF1 is an ASCII
-            // envelope, so it remains safe in the text datachunk map.
+            // Keep binary surface payloads intact in the byte-oriented chunk map.
             let srctype = attr_value(object_line, "srctype").unwrap_or_default();
             if matches!(object_type.as_str(), "MolSurf" | "MolSurfObj")
                 && matches!(srctype.as_str(), "obj" | "ply" | "qdfsurf")
@@ -2725,13 +2751,14 @@ impl MolScene {
                     base_path,
                     reader_options,
                 ) {
+                    let (data, raw_data) = LoadedSurface::source_payload(&srctype, data);
                     self.add_loaded_surface(LoadedSurface {
                         uid: Uid::new(0),
                         name: object_name.clone(),
                         object_type: object_type.clone(),
                         srctype,
-                        data: String::from_utf8_lossy(&data).into_owned().into(),
-                        raw_data: data.into(),
+                        data,
+                        raw_data,
                         qsc_node: Some(object_node.clone()),
                     });
                     return Ok(());
