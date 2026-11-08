@@ -413,9 +413,11 @@ The full local Chromium run initially passes 393 of 398 cases, skips the
 optional CMYK reference and fails four timing/input cases. The failures are
 reproduced individually. The inspector test now fixes the pointing device to
 mouse, since macOS's automatic trackpad detection correctly changes subsequent
-wheel events to panning. Style double-clicks allow a rendered frame between
-synthetic button transitions and verify the editor opened before the next
-command. The sequence test polls an atomic DOM measurement while selection
+wheel events to panning. On macOS, style double-clicks allow a rendered frame between synthetic
+button transitions; other platforms retain immediate synthetic clicks. The
+editor must open before the next command. Applying the macOS delay to Linux
+software rendering caused three CI style tests to fail opening the editor,
+so that delay is limited to the platform requiring it. The sequence test polls an atomic DOM measurement while selection
 refreshes replace its virtualized rows. No application behavior is weakened.
 All four then pass, including three consecutive repetitions (12 checks).
 The CMYK check now accepts `CUEMOL2_REF_DIR`; with the supplied reference profile

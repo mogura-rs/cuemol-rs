@@ -15,7 +15,7 @@ async function click(page, key, options={}) {
   const [x,y,w,h]=(await status(page)).ui.rects[key];
   await page.mouse.move(x+w/2,y+h/2);
   await present(page);
-  await page.mouse.click(x+w/2,y+h/2,{delay:options.clickCount > 1 ? 50 : 0,...options});
+  await page.mouse.click(x+w/2,y+h/2,{delay:process.platform === 'darwin' && options.clickCount > 1 ? 50 : 0,...options});
   await present(page);
 }
 async function fill(page, key, text) {
