@@ -444,9 +444,9 @@ pub fn read_xplor_map_with_header_str(input: &str) -> Result<XplorMap> {
         .ok_or_else(|| CueMolError::parse("missing Xplor ZYX axis line"))?;
 
     let counts = [
-        valid_xplor_count(section.end[0] - section.start[0] + 1)?,
-        valid_xplor_count(section.end[1] - section.start[1] + 1)?,
-        valid_xplor_count(section.end[2] - section.start[2] + 1)?,
+        xplor_extent(section.start[0], section.end[0])?,
+        xplor_extent(section.start[1], section.end[1])?,
+        xplor_extent(section.start[2], section.end[2])?,
     ];
     let grid_intervals = [
         valid_xplor_count(section.grid_intervals[0])?,
@@ -457,7 +457,15 @@ pub fn read_xplor_map_with_header_str(input: &str) -> Result<XplorMap> {
         .into_iter()
         .try_fold(1_usize, |acc, value| acc.checked_mul(value))
         .ok_or_else(|| CueMolError::parse("Xplor map size overflow"))?;
-    let mut values = Vec::with_capacity(value_count);
+    if value_count > input.len() {
+        return Err(CueMolError::parse(
+            "Xplor data is shorter than header count",
+        ));
+    }
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(value_count)
+        .map_err(|_| CueMolError::parse("Xplor map allocation failed"))?;
     let section_size = counts[0] * counts[1];
     for section_index in 0..counts[2] {
         let section_number = read_next_xplor_section_number(&lines, &mut index)?;
@@ -529,11 +537,22 @@ pub fn read_brix_map_with_header_bytes(bytes: &[u8]) -> Result<BrixMap> {
     let data_len = block_count
         .checked_mul(512)
         .ok_or_else(|| CueMolError::parse("BRIX data length overflow"))?;
-    if bytes.len() < 512 + data_len {
+    let data_end = 512_usize
+        .checked_add(data_len)
+        .ok_or_else(|| CueMolError::parse("BRIX data length overflow"))?;
+    if bytes.len() < data_end {
         return Err(CueMolError::parse("BRIX data is shorter than header count"));
     }
 
-    let mut values = vec![0.0; header.counts[0] * header.counts[1] * header.counts[2]];
+    let value_count = header.counts.into_iter().try_fold(1_usize, |size, count| {
+        size.checked_mul(count)
+            .ok_or_else(|| CueMolError::parse("BRIX map size overflow"))
+    })?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(value_count)
+        .map_err(|_| CueMolError::parse("BRIX map allocation failed"))?;
+    values.resize(value_count, 0.0);
     let mut offset = 512;
     for ibz in 0..zbri {
         for iby in 0..ybri {
@@ -586,10 +605,24 @@ pub fn read_opendx_str(input: &str) -> Result<GridMap> {
     let mut origin = None;
     let mut deltas = Vec::new();
     let mut expected_items = None;
-    let mut values = Vec::new();
+    let mut data_ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut continuing_data = false;
+    let mut offset = 0;
     let mut reading_data = false;
 
-    for line in input.lines() {
+    for line in input.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        if opendx_data_line(line, &mut reading_data).is_some() {
+            if continuing_data {
+                data_ranges.last_mut().unwrap().end = offset;
+            } else {
+                data_ranges.push(start..offset);
+            }
+            continuing_data = true;
+            continue;
+        }
+        continuing_data = false;
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
@@ -612,24 +645,11 @@ pub fn read_opendx_str(input: &str) -> Result<GridMap> {
         if trimmed.starts_with("object 3 class array") {
             let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
             if let Some(index) = tokens.iter().position(|token| *token == "items") {
-                expected_items = tokens.get(index + 1).and_then(|value| value.parse().ok());
-            }
-            reading_data = trimmed.contains("data follows");
-            continue;
-        }
-        if reading_data {
-            if trimmed.starts_with("attribute ")
-                || trimmed.starts_with("object ")
-                || trimmed.starts_with("component ")
-            {
-                reading_data = false;
-                continue;
-            }
-            for token in trimmed.split_whitespace() {
-                values.push(
-                    token
-                        .parse::<f64>()
-                        .map_err(|_| CueMolError::parse("invalid OpenDX data value"))?,
+                expected_items = Some(
+                    tokens
+                        .get(index + 1)
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .ok_or_else(|| CueMolError::parse("invalid OpenDX item count"))?,
                 );
             }
         }
@@ -640,23 +660,45 @@ pub fn read_opendx_str(input: &str) -> Result<GridMap> {
     if deltas.len() != 3 {
         return Err(CueMolError::parse("missing OpenDX delta vectors"));
     }
-    let expected_items = expected_items.unwrap_or(counts[0] * counts[1] * counts[2]);
-    if values.len() != expected_items {
+    let value_count = counts.into_iter().try_fold(1_usize, |size, count| {
+        if count == 0 {
+            return Err(CueMolError::parse("invalid OpenDX grid count"));
+        }
+        size.checked_mul(count)
+            .ok_or_else(|| CueMolError::parse("OpenDX map size overflow"))
+    })?;
+    if expected_items.is_some_and(|items| items != value_count) {
         return Err(CueMolError::parse("OpenDX data count mismatch"));
     }
-    // OpenDX stores values Z-fastest (the last grid axis varies fastest), but the
-    // GridMap/DensityMap convention is COL(X)-fastest (`flat = col + (row +
-    // sec*ny)*nx`), which every other reader produces (CCP4 `rotate_values`, Brix,
-    // XPLOR). Transpose into col-fastest so an OpenDX map is not loaded with X and
-    // Z swapped — the same reorder C++ `OpenDXPotReader` does on read (reads
-    // Z-innermost, stores `ix + (iy + iz*ny)*nx`, OpenDXPotReader.cpp:245-254).
+    let data_items = data_ranges.iter().try_fold(0_usize, |count, range| {
+        count
+            .checked_add(opendx_data_count(&input[range.clone()]))
+            .ok_or_else(|| CueMolError::parse("OpenDX data count overflow"))
+    })?;
+    if data_items != value_count {
+        return Err(CueMolError::parse("OpenDX data count mismatch"));
+    }
+    // Decode Z-fastest input directly into the shared X-fastest grid convention.
     let [nx, ny, nz] = counts;
-    let mut ordered = vec![0.0; nx * ny * nz];
-    let mut src = values.into_iter();
-    for ix in 0..nx {
-        for iy in 0..ny {
-            for iz in 0..nz {
-                ordered[ix + (iy + iz * ny) * nx] = src.next().expect("count checked above");
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(value_count)
+        .map_err(|_| CueMolError::parse("OpenDX map allocation failed"))?;
+    values.resize(value_count, 0.0);
+    let [mut ix, mut iy, mut iz] = [0; 3];
+    for range in data_ranges {
+        for token in input[range].split_whitespace() {
+            values[ix + (iy + iz * ny) * nx] = token
+                .parse::<f64>()
+                .map_err(|_| CueMolError::parse("invalid OpenDX data value"))?;
+            iz += 1;
+            if iz == nz {
+                iz = 0;
+                iy += 1;
+                if iy == ny {
+                    iy = 0;
+                    ix += 1;
+                }
             }
         }
     }
@@ -664,8 +706,48 @@ pub fn read_opendx_str(input: &str) -> Result<GridMap> {
         counts,
         origin,
         delta: [deltas[0], deltas[1], deltas[2]],
-        values: ordered,
+        values,
     })
+}
+
+fn opendx_data_line<'a>(line: &'a str, reading_data: &mut bool) -> Option<&'a str> {
+    let line = line.trim();
+    if *reading_data
+        && matches!(
+            line.as_bytes().first(),
+            Some(b'0'..=b'9' | b'-' | b'+' | b'.')
+        )
+    {
+        return Some(line);
+    }
+    if line.is_empty()
+        || line.starts_with('#')
+        || line.starts_with("object 1 class gridpositions counts")
+        || line.starts_with("origin")
+        || line.starts_with("delta")
+    {
+        return None;
+    }
+    if line.starts_with("object 3 class array") {
+        *reading_data = line.contains("data follows");
+    } else if line.starts_with("attribute ")
+        || line.starts_with("object ")
+        || line.starts_with("component ")
+    {
+        *reading_data = false;
+    } else if *reading_data {
+        return Some(line);
+    }
+    None
+}
+
+fn opendx_data_count(data: &str) -> usize {
+    // ASCII splitting excludes vertical tabs, unlike Unicode whitespace splitting.
+    if data.is_ascii() && !data.as_bytes().contains(&b'\x0b') {
+        data.split_ascii_whitespace().count()
+    } else {
+        data.split_whitespace().count()
+    }
 }
 
 pub fn read_mmcif_map_file(path: impl AsRef<Path>) -> Result<MmcifMapStatus> {
@@ -749,9 +831,9 @@ fn parse_brix_header(bytes: &[u8]) -> Result<BrixHeader> {
         counts,
         start,
         end: [
-            start[0] + counts_i32[0],
-            start[1] + counts_i32[1],
-            start[2] + counts_i32[2],
+            brix_end(start[0], counts_i32[0])?,
+            brix_end(start[1], counts_i32[1])?,
+            brix_end(start[2], counts_i32[2])?,
         ],
         grid_intervals: [
             valid_xplor_count(grid_i32[0])?,
@@ -1061,6 +1143,20 @@ fn fixed_prefix(line: &str, width: usize) -> &str {
     std::str::from_utf8(&line.as_bytes()[..width]).unwrap_or(line)
 }
 
+fn brix_end(start: i32, count: i32) -> Result<i32> {
+    start
+        .checked_add(count)
+        .ok_or_else(|| CueMolError::parse("BRIX extent overflow"))
+}
+
+fn xplor_extent(start: i32, end: i32) -> Result<usize> {
+    let count = end
+        .checked_sub(start)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| CueMolError::parse("Xplor extent overflow"))?;
+    valid_xplor_count(count)
+}
+
 fn valid_xplor_count(value: i32) -> Result<usize> {
     if value <= 0 {
         Err(CueMolError::parse("invalid Xplor map count"))
@@ -1265,6 +1361,59 @@ fn parse_f64_values(input: &str, count: usize) -> Result<Vec<f64>> {
 mod tests {
     use super::*;
 
+    fn opendx_fixture(counts: &str, items: &str, values: &str) -> String {
+        format!("object 1 class gridpositions counts {counts}\norigin 0 0 0\ndelta 1 0 0\ndelta 0 1 0\ndelta 0 0 1\nobject 3 class array type double rank 0 items {items} data follows\n{values}\n")
+    }
+
+    #[test]
+    fn malformed_opendx_array_counts_are_rejected() {
+        for (items, values) in [
+            ("7", "0 1 2 3 4 5 6"),
+            ("9", "0 1 2 3 4 5 6 7 8"),
+            ("invalid", "0 1 2 3 4 5 6 7"),
+        ] {
+            assert!(read_opendx_str(&opendx_fixture("2 2 2", items, values)).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_opendx_grid_dimensions_are_rejected() {
+        for counts in [format!("{} 2 2", usize::MAX), "0 2 2".into()] {
+            assert!(read_opendx_str(&opendx_fixture(&counts, "0", "")).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_xplor_extents_are_rejected() {
+        let input = format!(
+            "0\n1 {} {} 1 0 0 1 0 0\n1 1 1 90 90 90\nZYX\n",
+            i32::MIN,
+            i32::MAX
+        );
+        assert!(read_xplor_map_str(&input).is_err());
+    }
+
+    #[test]
+    fn malformed_xplor_counts_do_not_allocate_the_declared_grid() {
+        let input = format!(
+            "0\n{0} 0 {1} {0} 0 {1} 1 0 0\n1 1 1 90 90 90\nZYX\n",
+            i32::MAX,
+            i32::MAX - 1
+        );
+        assert!(read_xplor_map_str(&input).is_err());
+    }
+
+    #[test]
+    fn malformed_brix_extents_are_rejected() {
+        let header = format!(
+            ":-) origin {} 0 0 extent 1 1 1 grid 1 1 1 cell 1 1 1 90 90 90 prod 1 plus 0 sigma 1",
+            i32::MAX
+        );
+        let mut bytes = header.into_bytes();
+        bytes.resize(512, b' ');
+        assert!(read_brix_map_bytes(&bytes).is_err());
+    }
+
     #[test]
     fn reads_small_opendx_grid() {
         let dx = "\
@@ -1282,6 +1431,69 @@ attribute \"dep\" string \"positions\"
         assert_eq!(map.counts, [1, 1, 2]);
         assert_eq!(map.value_count(), 2);
         assert_eq!(map.values, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn opendx_keeps_bits_and_axis_order_across_asymmetric_grids() {
+        for [nx, ny, nz] in [[1, 3, 4], [4, 1, 3], [3, 4, 1], [2, 3, 5]] {
+            let values = (0..nx * ny * nz)
+                .map(|index| {
+                    if index == 0 {
+                        -0.0
+                    } else {
+                        (index as f64 - 7.) / 16.
+                    }
+                })
+                .collect::<Vec<_>>();
+            let body = values
+                .iter()
+                .map(|value| format!("{value}\n# data comment\n"))
+                .collect::<String>();
+            let source =
+                opendx_fixture(&format!("{nx} {ny} {nz}"), &values.len().to_string(), &body);
+            for source in [
+                source.clone(),
+                source.replace(&format!("items {} ", values.len()), ""),
+            ] {
+                let map = read_opendx_str(&source).unwrap();
+                for ix in 0..nx {
+                    for iy in 0..ny {
+                        for iz in 0..nz {
+                            assert_eq!(
+                                map.values[ix + (iy + iz * ny) * nx].to_bits(),
+                                values[iz + (iy + ix * ny) * nz].to_bits()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opendx_metadata_order_and_data_terminators_are_preserved() {
+        let source = "object 3 class array type double rank 0 items 2 data follows\n-0\norigin 1 2 3\nobject 1 class gridpositions counts 1 1 2\ndelta 1 0 0\ndelta 0 1 0\ndelta 0 0 1\n2.5\n";
+        for terminator in [
+            "attribute dep string positions",
+            "object 4 class field",
+            "component positions value 1",
+        ] {
+            let map = read_opendx_str(&format!("{source}{terminator}\nnot scalar data\n")).unwrap();
+            assert_eq!(map.origin, Vector4::new3(1., 2., 3.));
+            assert_eq!(map.values[0].to_bits(), (-0.0_f64).to_bits());
+            assert_eq!(map.values[1], 2.5);
+        }
+        assert!(read_opendx_str(&source.replace("2.5", "invalid")).is_err());
+    }
+
+    #[test]
+    fn opendx_preserves_ascii_and_unicode_data_whitespace() {
+        for whitespace in [' ', '\t', '\r', '\x0b', '\x0c', '\u{00a0}', '\u{2009}'] {
+            let source = opendx_fixture("1 1 2", "2", &format!("-0{whitespace}2.5"));
+            let map = read_opendx_str(&source).unwrap();
+            assert_eq!(map.values[0].to_bits(), (-0.0_f64).to_bits());
+            assert_eq!(map.values[1], 2.5);
+        }
     }
 
     #[test]

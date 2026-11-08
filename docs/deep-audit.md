@@ -14,8 +14,8 @@ requests remain outside tests under the repository instructions.
 | --- | --- | --- |
 | Large molecules | Load, topology, secondary structure, base pairs, edits, serialization and unchanged snapshots | Indexed topology, residue-property lookup, unchanged-edit snapshots and large DNA pairing pass the comparisons below. Frontend integration remains part of the combined-operation checks. |
 | Long trajectories | Indexed reads, random seek, averaging, selection, append, playback, Undo/Redo and bounded retention | Averaging and selection pass exact-coordinate, cell and failure checks across storage/block types. The 2,000-frame indexed run below visits every frame. Frontend repetition and final broad checks remain open. |
-| Maps and surfaces | Large grids, repeated replacement, cancellation, failed inputs, geometry and memory retention | Open. |
-| Input boundaries | Truncated, malformed and non-finite inputs; failed loads preserve the existing scene | Extreme-coordinate overflow and invalid hydrogen-bond geometry are reproduced and fixed below. Broader reader and transactional-load checks remain open. |
+| Maps and surfaces | Large grids, repeated replacement, cancellation, failed inputs, geometry and memory retention | Large OpenDX grids and XPLOR/BRIX reader boundaries pass the checks below. Surface retention and frontend repetition remain open. |
+| Input boundaries | Truncated, malformed and non-finite inputs; failed loads preserve the existing scene | Extreme-coordinate overflow, invalid hydrogen-bond geometry and five malformed-map failures are reproduced and fixed below. Shared application loads preserve existing scenes on these map errors. Broader frontend checks remain open. |
 | Combined scene edits | Multiple scenes, selection, cameras, animation, Undo/Redo and save/reload | Open. |
 | Rendering jobs | Repeated still/movie output, concurrent edits, cancellation/failure and worker/output cleanup | Open. |
 | Application lifecycle | Repeated opens/closes, settings/restart, CLI/MCP/Python and frontend resource retention | Open. |
@@ -189,3 +189,62 @@ append/reorder/remove and Undo. Raw measurements are retained in
 storage modes; averaging requires building the example with `scripting`.
 The full desktop-core suite with scripting and the MD-tools suite pass 440
 checks across 31 groups, with zero failures or ignored cases.
+
+## Map dimensions, data validation and OpenDX memory
+
+Five regressions first failed with panics: mismatched OpenDX array/grid counts,
+overflowing OpenDX dimensions, overflowing XPLOR extents, an oversized XPLOR
+allocation requested by a short input, and overflowing BRIX extents. Readers
+now use checked extents/products, reject inconsistent data counts and return
+allocation errors. XPLOR rejects a declared voxel count greater than the entire
+text's byte count before allocating. OpenDX counts actual data tokens before
+allocating its output. Zero dimensions and malformed explicit item counts are
+also rejected. Repeated failed loads through both `PreparedFile` and
+`DesktopAppState` leave the existing scene, active scene and Undo state intact.
+
+OpenDX previously retained its input-order double array while creating another
+double array in the application's X-fastest order. It now identifies contiguous
+data spans and decodes directly into the final array. This preserves comments,
+metadata order, data terminators, ASCII/Unicode whitespace, signed zero and
+floating-point bits. Asymmetric grids test every output position independently.
+
+Three fresh processes per version alternate order, with two parses per process.
+Time measures parsing an already loaded string and excludes coordinate hashing;
+peak RSS includes the input string and the complete process. All values, origin,
+spacing and dimension hashes match the previous implementation.
+
+| Input | Values | Repeated parse, before/after (ms) | Peak RSS, before/after (MiB) |
+| --- | --- | --- | --- |
+| OpenDX 64 cubed | 262,144 | 6.74 / 8.85 | 8.05 / 5.94 |
+| OpenDX 128 cubed | 2,097,152 | 49.73 / 46.01 | 70.11 / 35.95 |
+| OpenDX 256 cubed | 16,777,216 | 410.52 / 357.97 | 534.17 / 276.02 |
+| XPLOR 128 cubed | 2,097,152 | 84.13 / 82.19 | 54.95 / 54.95 |
+
+The small OpenDX timing varied across runs. A separate five-process comparison,
+with five parses per process, measures 5.97/5.73 ms and 8.08/5.94 MiB. It does not
+establish a consistent small-input speedup. The first implementation reduced
+memory but slowed the largest input; grouping consecutive data lines removed
+that regression before the final comparison. Diagnostic runs remain distinct
+from `maps/paired.json`, `small-paired.json` and `xplor-paired.json`.
+
+The installed C++ 3.0.0.554 exports identical single-precision values for all
+250,047 voxels of the 63-cubed input, including origin and spacing. Its 64-cubed
+export differs at exactly the final voxel: the input and Rust contain -155.9375,
+while C++ returns the preceding value, -158.25. The reference reader fills a
+three-value line buffer but indexes its last partial line from the wrong slot
+(`OpenDXPotReader::readDensity`). The Rust reader preserves the correct input;
+the reference checkout is unchanged. This is a reference limitation, not an
+assertion of complete native-reader equivalence.
+
+The molecular, surface, crystallography and desktop-core suites with scripting
+pass 792 checks in 57 groups. A subsequently added partial-block BRIX case also
+passes with its existing companion case. The first broad run accidentally used
+an incomplete sibling fixture directory and failed two unrelated file lookups;
+the passing run explicitly sets `CUEMOL2_REF_DIR` to the copied complete fixture
+tree. Optional external-oracle wrappers retain the earlier stated limits.
+
+Portable helpers are `map_reader_bench`, `potential_check`,
+`scripts/benchmark-map-readers.py` and `scripts/export-reference-potential.mjs`.
+The benchmark script can generate deterministic OpenDX and XPLOR inputs. Raw
+measurements, before/after failure logs and native QDF exports are retained under
+`.cache/deep-audit/maps`.

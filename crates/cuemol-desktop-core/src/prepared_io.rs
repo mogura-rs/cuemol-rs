@@ -992,4 +992,40 @@ mod tests {
         );
         assert!(state.same_undo_state(&before));
     }
+
+    #[test]
+    fn malformed_maps_preserve_existing_scenes_and_undo_state() {
+        let dx = b"object 1 class gridpositions counts 2 2 2\norigin 0 0 0\ndelta 1 0 0\ndelta 0 1 0\ndelta 0 0 1\nobject 3 class array type double rank 0 items 7 data follows\n0 1 2 3 4 5 6\n".to_vec();
+        let xplor = format!(
+            "0\n1 {} {} 1 0 0 1 0 0\n1 1 1 90 90 90\nZYX\n",
+            i32::MIN,
+            i32::MAX
+        )
+        .into_bytes();
+        let mut brix = format!(
+            ":-) origin {} 0 0 extent 1 1 1 grid 1 1 1 cell 1 1 1 90 90 90 prod 1 plus 0 sigma 1",
+            i32::MAX
+        )
+        .into_bytes();
+        brix.resize(512, b' ');
+        let mut state = DesktopAppState::new();
+        state.open_bytes("existing.pdb", PDB).unwrap();
+        let before = state.clone();
+        for (name, bytes) in [
+            ("broken.dx", dx),
+            ("broken.xplor", xplor),
+            ("broken.brix", brix),
+        ] {
+            for _ in 0..3 {
+                assert!(PreparedFile::parse(name, &bytes).is_err(), "{name}");
+                assert!(state.open_bytes(name, &bytes).is_err(), "{name}");
+                assert_eq!(state.active_scene(), before.active_scene());
+                assert_eq!(
+                    state.scene_manager().scenes(),
+                    before.scene_manager().scenes()
+                );
+                assert!(state.same_undo_state(&before));
+            }
+        }
+    }
 }
