@@ -18,7 +18,7 @@ correctness for every input or platform combination.
 | Imported surface rendering | Measure repeated parsing and retained binary/text storage; preserve geometry, edits and scene round trips after any change | Complete; exact mesh hashes and 717 shared checks pass |
 | Concurrent frontend work | Check superseded frames, scene changes, failure recovery and ownership of busy state | Complete for the identified cases; cancellation, queued imports, Console and Agent checks pass |
 | Documentation and requirements | Reconcile current implementation, historical evidence and remaining platform limits | Complete; historical delivery and current changes are separated, with platform limits retained |
-| Final delivery | Complete affected local checks, terminal CI, applicable native packages and the deployed WASM artifact | Pending |
+| Final delivery | Complete affected local checks, terminal CI, applicable native packages and the deployed WASM artifact | Complete at `cdb883a`; five native targets, eight archives, 45 deployed assets and 25 production checks verified |
 
 ## Browser trajectory boundaries
 
@@ -220,3 +220,70 @@ reference coverage counts, not totals for every local extension. In particular,
 `set_frame.averageRadius` is an additional local parameter. Existing physical
 Mac, hardware-stereo, browser native-tool and GI/OIDN comparison limits remain
 explicit; finite checks do not establish universal behavior or pixel equality.
+
+## Final local checks
+
+The complete Mac Chromium run passed 416 cases at `affa7bf`, including the
+reference ICC check. After the stored-cursor correction at `cdb883a`, all 20
+affected trajectory and Agent cases passed again on rebuilt WASM. The later
+CI run validates the complete suite at the delivered source revision.
+Native egui, shared UI and shell contracts passed 388 checks. Tauri passed
+214 model checks, 68 shell contracts and all six optional GPU/movie checks.
+The shell contracts are included in both frontend runs and are not additional
+unique cases. The Tauri GPU run uses the 147,456-vertex QDF surface for 15
+rotated frames and verifies that decoding each PNG reproduces its RGBA bytes.
+All four optional shared-command checks passed with real POV-Ray, all seven
+FFmpeg formats and public structure-metadata services. These checks do not
+use paid AI providers or establish the deferred physical Mac input permission.
+
+At `cdb883a`, both browser backends also passed the larger workloads: 98,986
+atoms, a 128³ OpenDX map, a 147,456-vertex OBJ, and a 20,000-atom trajectory
+containing 2,000 frames. Each scene underwent eight edits and complete
+Undo/Redo. All 11 nonsequential trajectory seeks and four radius-four averages
+matched their expected coordinates, including clipped windows at both ends.
+Viewport captures are centered on the displayed coordinates and contain the
+expected geometry.
+
+A separate browser run alternated that large OBJ and QDF for six open/edit/
+Undo/Redo/close cycles per backend. Closed-scene WASM capacity stayed at
+129.13 MiB on WebGL and 110.94 MiB on WebGPU throughout all six cycles.
+This measures retained linear-memory capacity, not live allocation, RSS or
+proof that all leaks are absent. The combined larger workload has a higher
+capacity of 1,027.25/864.75 MiB because it first loads the large molecule.
+The probes reuse fixtures from `.cache/deep-audit`. Results and screenshots are
+retained in `.cache/final-sweep/browser-workloads`, with source and WASM hashes
+in `.cache/final-sweep/local-validation.json`.
+
+## Completed delivery
+
+The implementation at `cdb883a` passed the complete
+[CI run](https://github.com/mogura-rs/cuemol-rs/actions/runs/42483287883):
+1,881 shared tests, 388 native/UI tests and 415 browser cases. Four optional
+shared checks were ignored in CI and passed locally with their actual tools
+and services. The one skipped browser case requires a reference ICC profile;
+it passed separately against the deployed build with that profile present.
+The browser suite includes WebGL, WebGPU and 95 Tauri DOM cases.
+
+The [Release validation](https://github.com/mogura-rs/cuemol-rs/actions/runs/42483309300)
+also completed successfully at that revision. All five native targets passed
+packaged-window interaction, Python/console, clipboard, Inspector, selection,
+bundled-tool and installer checks. Captures from Linux x86-64/ARM64, Windows
+x86-64 and both macOS architectures were inspected. The preparation gate
+verified all eight archives: five CLI packages, two macOS applications and
+the browser package. Binary hashes, clean build metadata, the matching macOS
+CLI/application executables and the embedded browser manifests all passed.
+These are validation artifacts; no new tag or public native release was created.
+
+[Pages](https://github.com/mogura-rs/cuemol-rs/actions/runs/42485407596)
+deployed the tested CI artifact. All 45 public files match its recorded hashes,
+and the public build metadata is byte-identical to the CI artifact. Twenty-five
+production browser checks passed, covering the trajectory boundary regressions,
+averaging and Agent cancellation, together with history, lighting, OIDN dark
+output/alpha and the reference CMYK check.
+
+Raw results, workflow metadata, archive checksums and delivery identities are
+retained under `.cache/final-sweep`. The native package identity remains
+`cdb883a` after documentation-only commits. Each subsequent CI/Pages delivery
+records its own exact revision in `delivery-<revision>/delivery.json`; it must
+not relabel the already verified native binaries. The explicit physical Mac
+and hardware-stereo deferrals and the finite comparison limits above remain.
