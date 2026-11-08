@@ -21,6 +21,11 @@ requests remain outside tests under the repository instructions.
 | Application lifecycle | Repeated opens/closes, settings/restart, CLI/MCP/Python and frontend resource retention | Open. |
 | Delivery | Affected local checks, complete CI, five native packages and deployed WASM at the final product revision | Open for this audit's changes. |
 
+The current shared run passes 1,867 checks, with four opt-in cases then passing
+against real FFmpeg, POV-Ray and public metadata services. Native egui/UI tests
+pass 388 checks. The browser integration and final distribution checks below
+are additional requirements, rather than being inferred from these counts.
+
 ## Molecular lookup and topology
 
 Previously each residue-property assignment scanned all atoms and constructed
@@ -295,3 +300,52 @@ surface or lightweight QDF for paired runs. Raw evidence is retained in
 `.cache/deep-audit/scene-payloads/paired.json`. The old `LoadedSurface` comment
 described textual QDF1/PLY only, although readers also accept binary QDF/PLY;
 the comment now matches the implementation.
+
+## Tauri measurement overlays
+
+Running the Tauri suite with the complete reference fixture tree exposed a
+duplicate measurement-line path. Simple AtomIntr lines were present in the
+depth-tested GPU snapshot, but viewport metadata also sent them to the SVG
+overlay. SVG then displayed a second line without the scene's depth test.
+The metadata no longer includes these duplicate lines. The reproducer retains
+both GPU lines and returns zero SVG lines after the fix.
+
+The existing regression silently skipped without an optional reference QSC.
+It now creates two positional measurements locally, so it runs in an ordinary
+checkout. The self-contained version first fails before the runtime change.
+After the change, 214 Tauri model checks pass. Five opt-in cases also pass with
+real GPU rendering and FFmpeg: animated PNG frames, movie re-encoding, hover
+geometry reuse, empty-scene center marks/HiDPI and volume-only rendering. A
+separate GPU pixel test confirms that a line behind opaque geometry remains
+occluded. These checks exercise the Tauri model and rendering paths without
+claiming a physical Mac window/input check. Raw logs are retained as
+`tauri-lines-before.log`, `tauri-model-final.log`, `tauri-gpu-movie-tests.log`
+and `measurement-depth-gpu.log` under the audit cache.
+
+## Browser combined-operation checks
+
+The malformed-map worker test reads invalid OpenDX, XPLOR and BRIX files in
+sequence. Each error leaves the original scene and Redo entry intact, releases
+the worker, and allows a subsequent valid molecular load. All 15 loading checks
+pass, including queued input, cancellation, concurrent rendering and delayed
+network replies.
+
+The repeated-scene test performs twelve cycles on each of WebGL and WebGPU.
+Each cycle loads 512 atoms, a 128-frame DCD, a 32-cubed potential and a surface
+with 2,304 vertices. It seeks beginning/middle/end frames, edits selections and
+names, changes the camera and repeats Undo/Redo three times. Two cycles also
+save and reload an embedded QSC and check exact averaged coordinates. Closing
+the temporary scenes restores the empty base scene and releases the parser
+worker. The test records WASM allocation capacity and JS heap observations;
+these are distinct from process RSS and live allocation counts.
+
+Browser file trajectories use asynchronous indexed `File.slice` reads.
+`set_frame` is tested on that path; synchronous script averaging is tested on
+the core trajectory restored from embedded QSC. The test does not claim script
+averaging support for the browser's separate indexed-file representation.
+
+On this macOS host, Chromium 156 Headless Shell processed commands but sometimes
+left the captured canvas blank or on its startup image. The same six focused
+WebGPU checks pass with Chromium's full binary in headless mode. Playwright now
+selects that binary on macOS; other platforms retain their existing selection.
+The failed diagnostic run is kept separate from the final full-browser run.

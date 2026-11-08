@@ -143,6 +143,36 @@ test('failed worker input preserves edits and redo history', async ({page}) => {
   expect(state.scene.objects[0].name).toBe('renamed');
 });
 
+test('malformed map dimensions preserve redo and release the parser worker', async ({page}) => {
+  await ready(page);
+  await load(page, 'original.pdb', Buffer.from(pdb));
+  await loaded(page, 'original.pdb');
+  const original = await call(page, 'clear_undo');
+  await call(page, 'set_node_prop', {nodeType: 'object', nodeId: original.scene.objects[0].id, prop: 'name', value: 'renamed'});
+  await call(page, 'undo');
+  const brix = Buffer.alloc(512, ' ');
+  brix.write(':-) origin 2147483647 0 0 extent 1 1 1 grid 1 1 1 cell 1 1 1 90 90 90 prod 1 plus 0 sigma 1');
+  const inputs = [
+    ['broken.dx', Buffer.from('object 1 class gridpositions counts 2 2 2\norigin 0 0 0\ndelta 1 0 0\ndelta 0 1 0\ndelta 0 0 1\nobject 3 class array type double rank 0 items 7 data follows\n0 1 2 3 4 5 6\n'), 'OpenDX data count mismatch'],
+    ['broken.xplor', Buffer.from('0\n1 -2147483648 2147483647 1 0 0 1 0 0\n1 1 1 90 90 90\nZYX\n'), 'Xplor extent overflow'],
+    ['broken.brix', brix, 'BRIX extent overflow'],
+  ];
+  for (const [name, buffer, error] of inputs) {
+    await load(page, name, buffer);
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toContain(error);
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().busy)).toBe(false);
+    await expect.poll(() => page.workers().filter(worker => worker.url().endsWith('/loader-worker.js')).length).toBe(0);
+    const state = await call(page, 'redo');
+    expect(state.scene.sceneId).toBe(original.scene.sceneId);
+    expect(state.scene.objects.map(object => object.name)).toEqual(['renamed']);
+    await call(page, 'undo');
+  }
+  await load(page, 'recovered.pdb', Buffer.from(pdb));
+  await loaded(page, 'recovered.pdb');
+  const state = await call(page, 'undo');
+  expect(state.scene.objects.map(object => object.name)).toEqual(['original.pdb']);
+});
+
 test('queued files load in order and an invalid file does not block the queue', async ({page}) => {
   await ready(page);
   await page.locator('#files').setInputFiles([

@@ -6406,25 +6406,7 @@ impl AppModel {
             slab: self.camera.slab_depth(),
             perspective: self.camera.is_perspective(),
             center_mark: center_mark_name(self.camera.center_mark()).to_string(),
-            lines: cuemol_desktop_core::stereo::annotation_lines(
-                &self.desktop,
-                &self.camera,
-                [width as f32, height as f32],
-                self.swap_stereo_eyes,
-            )
-            .into_iter()
-            .map(|line| ViewportLineDto {
-                x1: line.x1,
-                y1: line.y1,
-                x2: line.x2,
-                y2: line.y2,
-                width: line.width * self.view_pixel_ratio,
-                color: line.color,
-                end_color: None,
-                stipple: line.stipple,
-                point: false,
-            })
-            .collect(),
+            lines: Vec::new(),
             labels: labels
                 .into_iter()
                 .map(|label| ViewportLabelDto {
@@ -19870,15 +19852,25 @@ mod tests {
 
     #[test]
     fn simple_atom_intr_lines_stay_in_the_depth_tested_snapshot() {
-        let root = option_env!("CUEMOL2_REF_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
-        let fixture = root.join("tests/test_data/number_chain_atomintr1.qsc");
-        if !fixture.exists() {
-            return;
+        let (mut model, object_uid, _) = model_with_renderer();
+        let object = model
+            .desktop
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap();
+        let renderer_uid = object.add_atom_intr_renderer_defs("measure", &[]).unwrap();
+        let renderer = object.renderer_mut(renderer_uid).unwrap();
+        renderer.set_qsc_attr("mode", "simple");
+        renderer.set_qsc_attr("width", "1");
+        renderer.set_qsc_attr("stipple0", "0.5");
+        for y in [-1.0, 1.0] {
+            renderer
+                .append_atom_intr_line(cuemol_molstr::AtomIntrLine::from_positions(
+                    cuemol_molstr::AtomIntrKind::Distance,
+                    vec![Vector4::new3(-1.0, y, 0.0), Vector4::new3(1.0, y, 0.0)],
+                ))
+                .unwrap();
         }
-        let mut model = model_without_gpu();
-        model.desktop.load_qsc_file(&fixture).unwrap();
         model.rebuild_snapshot(true).unwrap();
 
         let snapshot = model.render_snapshot.as_ref().unwrap();

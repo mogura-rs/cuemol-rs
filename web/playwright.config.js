@@ -7,6 +7,7 @@ export default defineConfig({
   testDir: './tests', timeout: 60000, workers: 1, fullyParallel: true,
   webServer: process.env.CUEMOL_WEB_TEST_URL ? undefined : {command: `${server} web serve --dir web --port 8097 --no-open`, cwd: '..', url: 'http://127.0.0.1:8097', timeout: 120000, reuseExistingServer: !process.env.CI},
   use: {baseURL: process.env.CUEMOL_WEB_TEST_URL || 'http://127.0.0.1:8097', viewport: {width:1280,height:900}, screenshot: 'only-on-failure', trace: 'retain-on-failure',
+    channel: process.platform === 'darwin' ? 'chromium' : undefined,
     launchOptions: {args:browserLaunchArgs},
   },
 });
