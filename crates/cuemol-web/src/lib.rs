@@ -88,9 +88,14 @@ enum Event {
     Prepared(u64, String, cuemol_desktop_core::PreparedFile),
     Profile(u64, String, Vec<u8>),
     Data(String, Vec<u8>),
-    Error(String),
+    ActionImportError(String),
     Trajectory(u64, Uid, BrowserTrajectory, cuemol_mdtools::TrajectoryFrame),
-    Frame(Uid, usize, cuemol_mdtools::TrajectoryFrame, u64),
+    Frame(
+        Uid,
+        usize,
+        Result<cuemol_mdtools::TrajectoryFrame, String>,
+        u64,
+    ),
     Command(u32, String, Value),
     Rendered(cuemol_core::Result<Value>, Option<String>, bool),
     PngExported(cuemol_core::Result<Vec<u8>>, String),
@@ -111,7 +116,7 @@ pub fn open_file(file: web_sys::File) {
     recent::register(&file);
     if file.name().to_ascii_lowercase().ends_with(".qax") {
         if file.size() > 8_388_608. {
-            enqueue(Event::Error(
+            enqueue(Event::ActionImportError(
                 "Action files must be smaller than 8 MiB.".into(),
             ));
             return;
@@ -122,7 +127,7 @@ pub fn open_file(file: web_sys::File) {
                     file.name(),
                     text.as_string().unwrap_or_default(),
                 )),
-                Err(error) => enqueue(Event::Error(js_error(error))),
+                Err(error) => enqueue(Event::ActionImportError(js_error(error))),
             }
         });
         return;
@@ -1108,10 +1113,8 @@ impl App {
                     }
                 }
                 Event::Data(name, bytes) => self.queue_bytes(&name, &bytes),
-                Event::Error(error) => {
+                Event::ActionImportError(error) => {
                     self.message = error;
-                    self.busy = false;
-                    self.playing = false;
                 }
                 Event::Trajectory(generation, id, trajectory, first_frame) => {
                     if !self.current_source(generation) {
@@ -1156,15 +1159,19 @@ impl App {
                     self.remember_source();
                     self.message = format!("Indexed {added} frames; {} frames across all blocks. Coordinates are read one frame at a time.", previous.0 + added);
                 }
-                Event::Frame(id, index, frame, revision) => {
+                Event::Frame(id, index, result, revision) => {
                     if revision != self.revision {
                         self.busy = false;
                         continue;
                     }
-                    self.revision = self.revision.wrapping_add(1);
                     self.busy = false;
-                    match self.state.apply_coordinate_frame(id, &frame) {
+                    match result.and_then(|frame| {
+                        self.state
+                            .apply_coordinate_frame(id, &frame)
+                            .map_err(|error| error.to_string())
+                    }) {
                         Ok(()) => {
+                            self.revision = self.revision.wrapping_add(1);
                             self.set_trajectory_frame_index(id, index);
                             self.message =
                                 json!({"objectId": id.get(), "frame": index}).to_string();
@@ -1324,10 +1331,12 @@ impl App {
         self.busy = true;
         let revision = self.revision;
         spawn_local(async move {
-            match source.frame(local_index).await {
-                Ok(frame) => enqueue(Event::Frame(id, index, frame, revision)),
-                Err(error) => enqueue(Event::Error(js_error(error))),
-            }
+            enqueue(Event::Frame(
+                id,
+                index,
+                source.frame(local_index).await.map_err(js_error),
+                revision,
+            ));
         });
     }
     fn rebuild(&mut self) {

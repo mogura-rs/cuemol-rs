@@ -1,7 +1,7 @@
 use cuemol_mdtools::{netcdf::NetcdfFileLayout, TrajectoryFrame};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::File;
+use web_sys::{AbortSignal, File};
 
 #[derive(Clone, Default)]
 pub struct BrowserTrajectoryGroup {
@@ -40,13 +40,28 @@ impl BrowserTrajectoryGroup {
 fn error(value: impl ToString) -> JsValue {
     JsValue::from_str(&value.to_string())
 }
-async fn slice(file: &File, offset: u64, len: u64) -> Result<Vec<u8>, JsValue> {
+fn check_cancelled(signal: Option<&AbortSignal>) -> Result<(), JsValue> {
+    if signal.is_some_and(AbortSignal::aborted) {
+        return Err(error("Trajectory reading cancelled"));
+    }
+    Ok(())
+}
+
+async fn slice(
+    file: &File,
+    offset: u64,
+    len: u64,
+    signal: Option<&AbortSignal>,
+) -> Result<Vec<u8>, JsValue> {
+    check_cancelled(signal)?;
     let end = offset
         .checked_add(len)
         .filter(|end| *end <= file.size() as u64)
         .ok_or_else(|| error("Truncated trajectory"))?;
     let blob = file.slice_with_f64_and_f64(offset as f64, end as f64)?;
-    Ok(js_sys::Uint8Array::new(&JsFuture::from(blob.array_buffer()).await?).to_vec())
+    let bytes = JsFuture::from(blob.array_buffer()).await?;
+    check_cancelled(signal)?;
+    Ok(js_sys::Uint8Array::new(&bytes).to_vec())
 }
 fn word(data: &[u8], offset: usize, little: bool) -> Result<u32, JsValue> {
     let bytes = data
@@ -82,9 +97,13 @@ pub struct BrowserTrajectory {
     pub frames: usize,
 }
 impl BrowserTrajectory {
-    pub async fn open(file: File, expected: Option<usize>) -> Result<Self, JsValue> {
+    pub async fn open(
+        file: File,
+        expected: Option<usize>,
+        signal: Option<&AbortSignal>,
+    ) -> Result<Self, JsValue> {
         let len = file.size() as u64;
-        let header = slice(&file, 0, len.min(4096)).await?;
+        let header = slice(&file, 0, len.min(4096), signal).await?;
         let magic = word(&header, 0, false)?;
         let name = file.name().to_ascii_lowercase();
         if name.ends_with(".mdcrd") || name.ends_with(".crd") {
@@ -93,7 +112,7 @@ impl BrowserTrajectory {
                 cuemol_mdtools::mdcrd_index::MdcrdIndexer::new(atoms, 1, None).map_err(error)?;
             let mut offset = 0;
             while offset < len {
-                let bytes = slice(&file, offset, (len - offset).min(262144)).await?;
+                let bytes = slice(&file, offset, (len - offset).min(262144), signal).await?;
                 index.push(&bytes).map_err(error)?;
                 offset += bytes.len() as u64;
             }
@@ -117,10 +136,13 @@ impl BrowserTrajectory {
                     Err(e) if bytes.len() as u64 == len || bytes.len() >= 16 * 1024 * 1024 => {
                         return Err(error(e))
                     }
-                    Err(_) => bytes = slice(&file, 0, len.min(bytes.len() as u64 * 2)).await?,
+                    Err(_) => {
+                        bytes = slice(&file, 0, len.min(bytes.len() as u64 * 2), signal).await?
+                    }
                 }
             };
             let atoms = layout.atom_count();
+            validate_atoms(atoms, expected)?;
             let frames = layout.frame_count();
             if frames == 0 {
                 return Err(error("Trajectory has no frames"));
@@ -143,14 +165,14 @@ impl BrowserTrajectory {
             }
             let frames = word(&header, 8, little)? as usize;
             let title = word(&header, 92, little)? as u64;
-            let n = slice(&file, 96 + title, 16).await?;
+            let n = slice(&file, 96 + title, 16, signal).await?;
             if word(&n, 0, little)? as u64 != title
                 || word(&n, 4, little)? != 4
                 || word(&n, 12, little)? != 4
             {
                 return Err(error("Invalid DCD record markers"));
             }
-            let atoms = word(&n, 8, little)? as usize;
+            let atoms = signed_atoms(word(&n, 8, little)?, expected)?;
             let start = 112 + title;
             let size = atoms as u64 * 12
                 + 24
@@ -159,7 +181,10 @@ impl BrowserTrajectory {
                 } else {
                     0
                 };
-            if frames == 0 || atoms == 0 || frames as u64 > len.saturating_sub(start) / size {
+            if frames == 0
+                || frames > i32::MAX as usize
+                || frames as u64 > len.saturating_sub(start) / size
+            {
                 return Err(error("Truncated or empty DCD trajectory"));
             }
             let mut prefix = header[..92].to_vec();
@@ -201,7 +226,7 @@ impl BrowserTrajectory {
         while offset < len {
             if offset < cache_start || offset + 256 > cache_start + cache.len() as u64 {
                 cache_start = offset;
-                cache = slice(&file, offset, (len - offset).min(65536)).await?;
+                cache = slice(&file, offset, (len - offset).min(65536), signal).await?;
             }
             let data = &cache[(offset - cache_start) as usize..];
             let m = word(data, 0, false)?;
@@ -209,7 +234,7 @@ impl BrowserTrajectory {
                 if !matches!(m, 1995 | 2023) {
                     return Err(error("Invalid XTC magic"));
                 }
-                let n = word(data, 4, false)? as usize;
+                let n = signed_atoms(word(data, 4, false)?, expected)?;
                 if word(data, 52, false)? as usize != n {
                     return Err(error("XTC atom count mismatch"));
                 }
@@ -221,7 +246,13 @@ impl BrowserTrajectory {
                     } else {
                         word(data, 88, false)? as u64
                     };
-                    (if m == 2023 { 96 } else { 92 }) + ((length + 3) & !3)
+                    let padded = length
+                        .checked_add(3)
+                        .ok_or_else(|| error("XTC frame length overflow"))?
+                        & !3;
+                    padded
+                        .checked_add(if m == 2023 { 96 } else { 92 })
+                        .ok_or_else(|| error("XTC frame length overflow"))?
                 };
                 (n, size, true)
             } else {
@@ -237,7 +268,7 @@ impl BrowserTrajectory {
                 let sizes = (0..10)
                     .map(|i| word(data, p + i * 4, false).map(u64::from))
                     .collect::<Result<Vec<_>, _>>()?;
-                let n = word(data, p + 40, false)? as usize;
+                let n = signed_atoms(word(data, p + 40, false)?, expected)?;
                 let scalar = if sizes[2] > 0 {
                     sizes[2] / 9
                 } else {
@@ -291,6 +322,14 @@ impl BrowserTrajectory {
     }
 
     pub async fn frame(&self, index: usize) -> Result<TrajectoryFrame, JsValue> {
+        self.frame_with_signal(index, None).await
+    }
+
+    pub async fn frame_with_signal(
+        &self,
+        index: usize,
+        signal: Option<&AbortSignal>,
+    ) -> Result<TrajectoryFrame, JsValue> {
         if index >= self.frames {
             return Err(error("Frame out of range"));
         }
@@ -302,7 +341,7 @@ impl BrowserTrajectory {
             }
             _ => self.spans[index],
         };
-        let mut bytes = slice(&self.file, offset, len).await?;
+        let mut bytes = slice(&self.file, offset, len, signal).await?;
         if let Format::Netcdf(layout) = &self.format {
             return layout.decode_frame(&bytes).map_err(error);
         }
@@ -329,4 +368,23 @@ impl BrowserTrajectory {
             cell,
         })
     }
+}
+
+fn validate_atoms(atoms: usize, expected: Option<usize>) -> Result<(), JsValue> {
+    if atoms == 0 {
+        return Err(error("Invalid trajectory atom count"));
+    }
+    if let Some(expected) = expected.filter(|expected| *expected != atoms) {
+        return Err(error(format!(
+            "Trajectory atom count {atoms} does not match selected topology ({expected})"
+        )));
+    }
+    Ok(())
+}
+
+fn signed_atoms(value: u32, expected: Option<usize>) -> Result<usize, JsValue> {
+    let atoms =
+        usize::try_from(value as i32).map_err(|_| error("Invalid trajectory atom count"))?;
+    validate_atoms(atoms, expected)?;
+    Ok(atoms)
 }

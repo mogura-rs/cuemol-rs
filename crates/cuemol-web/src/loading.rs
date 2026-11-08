@@ -247,11 +247,21 @@ impl App {
                 .scene_manager()
                 .object(id)
                 .map(|object| object.mol().atom_count());
+            let abort = match web_sys::AbortController::new() {
+                Ok(abort) => abort,
+                Err(error) => {
+                    enqueue(Event::SourceError(generation, js_error(error)));
+                    enqueue(Event::SourceFinished(generation));
+                    return;
+                }
+            };
+            let signal = abort.signal();
+            self.source_abort = Some(abort);
             self.message = "Indexing trajectory…".into();
             spawn_local(async move {
                 let result = async {
-                    let trajectory = BrowserTrajectory::open(file, atoms).await?;
-                    let first = trajectory.frame(0).await?;
+                    let trajectory = BrowserTrajectory::open(file, atoms, Some(&signal)).await?;
+                    let first = trajectory.frame_with_signal(0, Some(&signal)).await?;
                     Ok::<_, JsValue>((trajectory, first))
                 }
                 .await;

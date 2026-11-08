@@ -9,6 +9,8 @@ ignored `.cache` directory.
 The follow-up [repeated-operation audit](deep-audit.md) tracks larger workloads,
 combined edits and resource retention beyond the completed delivery checks.
 Its open rows must be resolved before that new audit is described as complete.
+The subsequent [completion audit](completion-audit.md) tracks newly reproduced
+boundary failures and the remaining checks after that delivery.
 
 The current reference is the sibling CueMol checkout at `794fe4ac` (3.0.0.554).
 Earlier comparisons in [parity-audit.md](parity-audit.md) used 2.4.1.547.
