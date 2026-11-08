@@ -12,18 +12,20 @@ requests remain outside tests under the repository instructions.
 
 | Area | Required checks | Current evidence |
 | --- | --- | --- |
-| Large molecules | Load, topology, secondary structure, base pairs, edits, serialization and unchanged snapshots | Indexed topology, residue-property lookup, unchanged-edit snapshots and large DNA pairing pass the comparisons below. Frontend integration remains part of the combined-operation checks. |
-| Long trajectories | Indexed reads, random seek, averaging, selection, append, playback, Undo/Redo and bounded retention | Averaging and selection pass exact-coordinate, cell and failure checks across storage/block types. The 2,000-frame indexed run below visits every frame. Frontend repetition and final broad checks remain open. |
-| Maps and surfaces | Large grids, repeated replacement, cancellation, failed inputs, geometry and memory retention | Large OpenDX grids, XPLOR/BRIX reader boundaries and shared surface/LW payload retention pass the checks below. Frontend repetition remains open. |
-| Input boundaries | Truncated, malformed and non-finite inputs; failed loads preserve the existing scene | Extreme-coordinate overflow, invalid hydrogen-bond geometry and five malformed-map failures are reproduced and fixed below. Shared application loads preserve existing scenes on these map errors. Broader frontend checks remain open. |
-| Combined scene edits | Multiple scenes, selection, cameras, animation, Undo/Redo and save/reload | Open. |
-| Rendering jobs | Repeated still/movie output, concurrent edits, cancellation/failure and worker/output cleanup | Open. |
-| Application lifecycle | Repeated opens/closes, settings/restart, CLI/MCP/Python and frontend resource retention | Open. |
-| Delivery | Affected local checks, complete CI, five native packages and deployed WASM at the final product revision | Open for this audit's changes. |
+| Large molecules | Load, topology, secondary structure, base pairs, edits, serialization and unchanged snapshots | Indexed topology, residue-property lookup, unchanged-edit snapshots and large DNA pairing pass the comparisons below. The large browser probe displays 5XNL and restores all eight rename edits through Undo/Redo on both backends. |
+| Long trajectories | Indexed reads, random seek, averaging, selection, append, playback, Undo/Redo and bounded retention | Averaging and selection pass exact-coordinate, cell and failure checks across storage/block types. The 2,000-frame indexed run below visits every frame. Both browser backends also index the 480 MB file, check eleven nonsequential seeks and pass the repeated-scene checks below. |
+| Maps and surfaces | Large grids, repeated replacement, cancellation, failed inputs, geometry and memory retention | Large OpenDX grids, XPLOR/BRIX reader boundaries and shared surface/LW payload retention pass the checks below. Both backends display a 128-cubed grid and a 147,456-vertex surface, then restore eight edits through Undo/Redo. |
+| Input boundaries | Truncated, malformed and non-finite inputs; failed loads preserve the existing scene | Extreme-coordinate overflow, invalid hydrogen-bond geometry and five malformed-map failures are reproduced and fixed below. Shared application loads preserve existing scenes on these map errors. The browser failure regression also preserves redo, releases its parser worker and accepts a later valid input. |
+| Combined scene edits | Multiple scenes, selection, cameras, animation, Undo/Redo and save/reload | Both browser backends pass twelve combined cycles, embedded saves, exact averaged coordinates and the broader animation/history checks. |
+| Rendering jobs | Repeated still/movie output, concurrent edits, cancellation/failure and worker/output cleanup | Browser still/movie, cancellation and concurrent-edit checks pass. Real native GPU, FFmpeg and POV-Ray output checks also pass; see below. |
+| Application lifecycle | Repeated opens/closes, settings/restart, CLI/MCP/Python and frontend resource retention | Forty MCP cycles, Python state, configuration restarts, twelve small-scene cycles per browser backend and six large-molecule cycles per backend pass. |
+| Delivery | Affected local checks, complete CI, five native packages and deployed WASM at the final product revision | Product revision `f6c4154` passes complete CI, all five native build/package/OS-input jobs and public WASM checks. See the delivery evidence below. |
 
-The current shared run passes 1,867 checks, with four opt-in cases then passing
+The shared run passes 1,867 checks, with four opt-in cases then passing
 against real FFmpeg, POV-Ray and public metadata services. Native egui/UI tests
-pass 388 checks. The browser integration and final distribution checks below
+pass 388 checks. Tauri model checks pass 214 cases, and all six opt-in GPU/movie
+cases pass separately. Clippy completes for the affected molecule, trajectory
+and shared-core targets with the existing style warnings. The browser integration and final distribution checks below
 are additional requirements, rather than being inferred from these counts.
 
 ## Molecular lookup and topology
@@ -338,6 +340,11 @@ save and reload an embedded QSC and check exact averaged coordinates. Closing
 the temporary scenes restores the empty base scene and releases the parser
 worker. The test records WASM allocation capacity and JS heap observations;
 these are distinct from process RSS and live allocation counts.
+In the final full-Chromium run, WASM capacity spans 41.875-49.5 MiB on WebGL
+and 39.5-47.125 MiB on WebGPU. Each backend's final capacity is 3.8125 MiB
+above its fourth-cycle sample. Observed JS heap maxima are 40.56/42.13 MiB,
+with final samples of 20.11/22.65 MiB. These twelve-cycle observations bound
+the tested workload; they do not establish a leak-free lifetime for every scene.
 
 Browser file trajectories use asynchronous indexed `File.slice` reads.
 `set_frame` is tested on that path; synchronous script averaging is tested on
@@ -349,3 +356,121 @@ left the captured canvas blank or on its startup image. The same six focused
 WebGPU checks pass with Chromium's full binary in headless mode. Playwright now
 selects that binary on macOS; other platforms retain their existing selection.
 The failed diagnostic run is kept separate from the final full-browser run.
+
+## CLI, MCP and Python lifecycle
+
+Two fresh MCP processes each perform twenty cycles with 4HHB (4,779 atoms).
+Every cycle creates a scene, loads the molecule, edits its name, undoes the
+edit, rejects a malformed OpenDX input without changing the scene, redoes the
+name edit and closes the scene. Each close returns to the sole empty base
+scene. A Python counter persists through all twenty cycles within each
+process. All 646 JSON-RPC requests pass, and both processes exit successfully.
+The helper/Python selected-atom export check also passes on the rebuilt CLI.
+
+Separate CLI invocations save `view_input:gpu-pick` as false and then true.
+For each value, both the next CLI read and a newly started MCP process's
+`ViewInputConfig.gpu_pick` report the saved value. The probe uses an isolated
+configuration directory. Evidence is retained in `mcp-lifecycle.json`,
+`config-restart.json` and `python-mcp.log` under the audit cache.
+
+
+## Large browser workloads and measurement limits
+
+Both WebGL and WebGPU display 5XNL (98,986 atoms), a smooth 128-cubed OpenDX
+potential and an OBJ surface with 147,456 vertices and 293,378 triangles.
+Each object receives eight name edits, eight Undo operations and eight Redo
+operations before its temporary scene is closed. Every restored name matches.
+The potential uses a full-region cyan isosurface at absolute level 0.25 and an
+explicit centered view; the initial default-level image was empty and is kept
+as a diagnostic. Final captures are inspected and count colored geometry
+outside the tool palette, so UI controls cannot satisfy the pixel check.
+
+The 20,000-atom trajectory contains 2,000 frames and occupies 480,048,116 bytes.
+Both backends retain the file and index it in 62/65 ms, then seek eleven times
+across the start, middle, end and reverse order. The first and last atom
+coordinates match exactly at every checked frame. Loading the source topology
+and rendering are separate from indexing. The observed seek times of 210-218 ms
+include browser command polling and redraw, so they are not decoder benchmarks.
+The separate core benchmark above visits every frame.
+
+A second probe repeats loading 5XNL, three edits, Undo/Redo and closing the
+scene six times on each backend. WASM capacity reaches 1,059.5 MiB on WebGL
+and 865.06 MiB on WebGPU. Capacity stops increasing after the third and first
+cycles respectively; growth from cycle three through six is zero. The large
+geometry remains expensive, and WASM capacity does not shrink when allocations
+are freed. These observations establish reuse for these cycles, not process
+RSS, live retained bytes, or a universally small memory footprint. The twelve
+smaller combined cycles above exercise a different workload.
+
+The probe code, timings and captures are retained in
+`.cache/deep-audit/browser-workloads`. Local WASM was rebuilt from `b283c68`;
+`f6c4154` changes native Tauri metadata and browser tests without changing WASM
+runtime sources. Release and public-web checks use the clean `f6c4154` artifact.
+
+## Broad browser and rendering checks
+
+The full local Chromium run initially passes 393 of 398 cases, skips the
+optional CMYK reference and fails four timing/input cases. The failures are
+reproduced individually. The inspector test now fixes the pointing device to
+mouse, since macOS's automatic trackpad detection correctly changes subsequent
+wheel events to panning. Style double-clicks allow a rendered frame between
+synthetic button transitions and verify the editor opened before the next
+command. The sequence test polls an atomic DOM measurement while selection
+refreshes replace its virtualized rows. No application behavior is weakened.
+All four then pass, including three consecutive repetitions (12 checks).
+The CMYK check now accepts `CUEMOL2_REF_DIR`; with the supplied reference profile
+it passes as well. Thus all 398 distinct local cases are exercised successfully
+across the full run and focused reruns, rather than claiming the initial full
+run was green.
+
+The broad tests cover multi-scene history, camera drafts, animation timing and
+references, embedded scene saves, live selection, malformed/cancelled loads,
+still-image history, movie encoding, Stop during concurrent edits, stale async
+results, output locks and cleanup of completed versus active sessions. Native
+Tauri adds real GPU volume/hover/center-mark checks, PNG animation frames and
+FFmpeg re-encoding. The separate command cases exercise seven FFmpeg formats,
+POV-Ray paths containing spaces and actual output files. The measured-depth
+GPU regression also verifies that occluded measurement pixels remain hidden.
+
+The opt-in Tauri profile rotates 5XNL through fifteen 1,280-by-720 frames and
+round-trips every encoded PNG back to its exact RGBA bytes. All frames pass.
+This unoptimized test build measures median render/PNG times of 432/46.6 ms;
+it is a correctness and workload observation, not a release-speed claim.
+
+
+## Product delivery evidence
+
+The final runtime changes are in `f6c4154`. Its
+[CI run](https://github.com/mogura-rs/cuemol-rs/actions/runs/42468589990)
+passes all jobs. The four browser shards report 100, 100, 99 and 98 passing
+cases; their one optional CMYK skip is covered by the successful local and
+public checks with the reference profile. Later changes only adjust tests
+and this audit document.
+
+The [distribution validation run](https://github.com/mogura-rs/cuemol-rs/actions/runs/42468589993)
+passes native x86-64/ARM64 Linux, Intel/Apple-silicon macOS and x86-64 Windows.
+Each job checks CLI/Python entry points, APBS/PDB2PQR, FFmpeg, POV-Ray, OIDN,
+installer/self-upgrade behavior and the packaged executable. Its actual window
+probe verifies pixels, OS input, camera navigation, clipboard/history,
+multiline Python/console use, inspector drafts and derived properties.
+All five result files report success, and their captured windows are inspected.
+The artifacts retain native build identity, embedded-web manifest identity,
+executable checksums and bundled-tool provenance. The workflow used
+`publish=false`; it does not create a new tagged release.
+
+The [Pages deployment](https://github.com/mogura-rs/cuemol-rs/actions/runs/42470180722)
+serves the clean `f6c4154` build. All 45 public assets match their manifest
+hashes, including the WASM content type and source identity. Eight public
+browser checks pass: malformed-map recovery, both repeated-scene backends,
+both read-only-script backends, lighting, OIDN and reference CMYK proof.
+Raw CI jobs/logs, package GUI results, downloaded manifests and public-browser
+results are retained under `.cache/deep-audit`. Test/documentation follow-ups
+are checked by their own final CI and public artifact identity rather than
+relabeling these native packages as a later source build.
+
+The retained limits are the explicitly deferred physical Mac screen/input
+permissions and hardware quad-buffer presentation. Native Tauri is covered by
+its model tests and real GPU/output checks; browser shell interactions also run
+against the shell test bridge. Those checks do not replace the deferred macOS
+WebKit/OS-input run. Neither these finite workload checks nor the source-oracle
+comparisons establish correctness for every possible input.

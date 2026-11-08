@@ -1289,8 +1289,11 @@ test('Tauri sequence virtualizes both axes and ranges include offscreen residues
     await cell(index).click();
     await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'sequence_action').at(-1)?.args.input.targetSelection)).toBe(`'A'.${index}.*`);
   }
-  const insertionA = await cell('1A').boundingBox(), insertionB = await cell('1B').boundingBox();
-  expect(insertionB.x).toBeGreaterThanOrEqual(insertionA.x + insertionA.width - 0.1);
+  await expect.poll(() => firstRow.evaluate(row => {
+    const a = row.querySelector('[data-residue-index="1A"]')?.getBoundingClientRect();
+    const b = row.querySelector('[data-residue-index="1B"]')?.getBoundingClientRect();
+    return a && b ? b.x - (a.x + a.width) : null;
+  })).toBeGreaterThanOrEqual(-0.1);
   await cell(1).click();
   await page.locator('.sequence-placeholder').evaluate(element => { element.scrollLeft = 50000; });
   await expect(cell(5000)).toBeVisible();

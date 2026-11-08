@@ -15,7 +15,7 @@ async function click(page, key, options={}) {
   const [x,y,w,h]=(await status(page)).ui.rects[key];
   await page.mouse.move(x+w/2,y+h/2);
   await present(page);
-  await page.mouse.click(x+w/2,y+h/2,options);
+  await page.mouse.click(x+w/2,y+h/2,{delay:options.clickCount > 1 ? 50 : 0,...options});
   await present(page);
 }
 async function fill(page, key, text) {
@@ -191,6 +191,7 @@ for(const backend of ['webgl','webgpu']) {
     expect((await command(page,'get_style_set',{styleSet:'global-renamed',scope:'global'})).xml).not.toContain('focus');
     const anonymous = Number((await command(page,'execute_script',{source:"print(cuemol.getService('StyleManager').createStyleSet('',0));"})).log);
     await click(page,'Style global (anonymous)',{clickCount:2});
+    await expect.poll(async () => (await status(page)).ui.rects['Style readonly']).toBeTruthy();
     await command(page,'execute_script',{source:"cuemol.getService('StyleManager').createStyleSet('(anonymous)',0);"});
     await click(page,'Style readonly');
     await expect.poll(async () => (await command(page,'get_style_set',{styleSet:'',styleId:anonymous,scope:'global'})).readonly).toBe(true);

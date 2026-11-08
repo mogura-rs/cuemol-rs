@@ -2,6 +2,7 @@ import {test,expect} from '@playwright/test';
 import {PNG} from 'pngjs';
 import {gzipSync} from 'node:zlib';
 import {existsSync, readFileSync} from 'node:fs';
+import {resolve} from 'node:path';
 import {acceptFileOptions, load,call,enablePlugins} from './support.js';
 const structure=`HETATM    1  C1  LIG A   1      -2.000   0.000   0.000  1.00 10.00           C  
 HETATM    2  O1  LIG A   1       0.000   0.000   0.000  1.00 10.00           O  
@@ -354,7 +355,9 @@ test('ICC profiles load, proof colors, and persist in browser storage',async({pa
 });
 
 test('browser CMYK proof matches the reference LittleCMS colors',async({page})=>{
-  const file=new URL('../../../cuemol2/src/xul_gui/data/icc_profiles/GenericCMYK.icm',import.meta.url);
+  const file=process.env.CUEMOL2_REF_DIR
+    ? resolve(process.env.CUEMOL2_REF_DIR,'src/xul_gui/data/icc_profiles/GenericCMYK.icm')
+    : new URL('../../../cuemol2/src/xul_gui/data/icc_profiles/GenericCMYK.icm',import.meta.url);
   test.skip(!existsSync(file),'Optional CueMol2 profile is absent');
   await ready(page);
   const result=await page.evaluate(profile=>{

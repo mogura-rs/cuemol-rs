@@ -549,6 +549,7 @@ test('Inspector exposes nested enum defaults and keeps identity read-only', asyn
 });
 
 test('Scene presets use one undo and View fields follow viewport navigation', async ({page,context},testInfo) => {
+  await page.addInitScript(() => localStorage.setItem('cuemol.config', 'view_input:device\tmouse'));
   await context.grantPermissions(['clipboard-read','clipboard-write']);
   await setup(page);
   await click(page,'Scene menu',false);
