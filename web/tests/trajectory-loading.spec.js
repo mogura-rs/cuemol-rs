@@ -334,6 +334,16 @@ test(`mixed binary trajectories ${backend} preserve coordinates and cells throug
     expect(await snapshot(frame, 1)).toEqual(averaged(combined, frame, 1));
   }
   expect(await snapshot(14)).toEqual(combined[14]);
+  const storedCursor = async () => {
+    const result = await call(page, 'execute_script', {source:
+      `var o=cuemol.getObject(${object});print(JSON.stringify([o.frame,o.nframe]));`});
+    return JSON.parse(JSON.parse(result.message).log.trim());
+  };
+  expect(await snapshot(5, 1)).toEqual(averaged(combined, 5, 1));
+  expect(await storedCursor()).toEqual([5, 12]);
+  expect(await snapshot(14, 1)).toEqual(averaged(combined, 14, 1));
+  expect(await storedCursor()).toEqual([5, 12]);
+  expect(JSON.parse((await call(page, 'list_trajectories')).message).trajectories[0].frame).toBe(14);
 });
 
 test(`overflowing XTC lengths ${backend} terminate without repeated indexing or history changes`, async ({page}) => {

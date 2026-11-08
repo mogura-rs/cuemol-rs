@@ -138,8 +138,18 @@ command directly, or save and restore an embedded QSC to use the shared
 in-memory trajectory scripting API. Assigning an unknown JavaScript property
 does not attach trajectory data or make that property persistent.
 
-The shared core, MD and command suites pass 772 tests, with four explicitly
-optional external-tool/service checks left for final validation. Twenty focused
+For a mixed QSC/File trajectory, synchronous script properties describe only
+the stored QSC portion. Use `list_trajectories` and `set_frame` for the combined
+frame range. A further regression reproduced an incorrect stored cursor:
+averaging stored frame 5 after appending a File displayed the correct positions
+but left the script's `frame` at 11. Successful asynchronous frame completion
+now records the stored index without reloading coordinates or changing the
+averaging setting. Frames in the external File portion leave that stored cursor
+within its own valid range. Both backend regressions check coordinates, stored
+counts/cursors and the combined frame number.
+
+The shared core, MD and command suites pass 772 tests; the four optional
+external-tool/service checks also pass during final validation. Twenty focused
 browser cases pass across the full run and four corrected test reruns. The
 test corrections select a topology after QSC reload and respect the existing
 rule that ordinary playback does not create undo entries. Both backends verify

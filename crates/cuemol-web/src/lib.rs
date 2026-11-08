@@ -1282,6 +1282,7 @@ impl App {
     }
 
     fn set_trajectory_frame_index(&mut self, id: Uid, index: usize) {
+        self.state.record_trajectory_frame_index(id, index);
         if let Some(group) = self.trajectories.get_mut(&id) {
             group.current_frame = index;
         }

@@ -8391,6 +8391,16 @@ impl DesktopAppState {
             .map(|trajectory| (trajectory.current_frame, trajectory.frame_count()))
     }
 
+    /// Record an already applied frame when it belongs to the stored trajectory.
+    /// External frontend blocks do not change the stored trajectory's cursor.
+    pub fn record_trajectory_frame_index(&mut self, object_uid: Uid, index: usize) {
+        if let Some(trajectory) = self.trajectories.get_mut(&object_uid) {
+            if index < trajectory.frame_count() {
+                trajectory.current_frame = index;
+            }
+        }
+    }
+
     pub fn trajectory_frame_reader(&self, object_uid: Uid) -> Option<TrajectoryFrameReader> {
         self.trajectories
             .get(&object_uid)
