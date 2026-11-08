@@ -199,7 +199,7 @@ fn surface_and_lightweight_exports_roundtrip_and_link_without_losing_geometry() 
             object_type: "MolSurfObj".into(),
             srctype: "obj".into(),
             data: data.into(),
-            raw_data: data.as_bytes().to_vec(),
+            raw_data: data.as_bytes().to_vec().into(),
             qsc_node: None,
         });
     let surface = state.surface_summaries(scene)[0].uid;
@@ -211,7 +211,7 @@ fn surface_and_lightweight_exports_roundtrip_and_link_without_losing_geometry() 
             uid: Uid::new(0),
             name: "lightweight".into(),
             srctype: "qdflwobj".into(),
-            raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new()),
+            raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new()).into(),
             visible: true,
             xform: Matrix4::IDENTITY,
             renderers: vec![],

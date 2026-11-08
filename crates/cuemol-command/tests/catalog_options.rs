@@ -178,7 +178,7 @@ fn renderer_creation_uses_short_preset_names_and_keeps_empty_geometry_view() {
             uid: Uid::new(0),
             name: "empty".into(),
             srctype: "qdflwobj".into(),
-            raw_data: Vec::new(),
+            raw_data: Vec::new().into(),
             visible: true,
             xform: Matrix4::IDENTITY,
             renderers: Vec::new(),

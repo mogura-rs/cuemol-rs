@@ -4050,7 +4050,7 @@ impl DesktopAppState {
                     if object.raw_data.is_empty() {
                         object.data.as_bytes()
                     } else {
-                        object.raw_data.as_slice()
+                        object.raw_data.as_ref()
                     },
                 )
             })
@@ -4067,7 +4067,7 @@ impl DesktopAppState {
                     object.name.as_str(),
                     "LWObject",
                     object.srctype.as_str(),
-                    object.raw_data.as_slice(),
+                    object.raw_data.as_ref(),
                 )
             }));
         let mut chunks = suffix.to_vec();
@@ -6702,8 +6702,8 @@ impl DesktopAppState {
             name: object_name,
             object_type: "MolSurfObj".to_string(),
             srctype: "qdfsurf".to_string(),
-            data: String::from_utf8_lossy(&raw_data).into_owned(),
-            raw_data,
+            data: String::from_utf8_lossy(&raw_data).into_owned().into(),
+            raw_data: raw_data.into(),
             qsc_node: Some(object_node),
         }))
     }
@@ -6870,8 +6870,8 @@ impl DesktopAppState {
             name: name.to_string(),
             object_type: "MolSurfObj".to_string(),
             srctype: "qdfsurf".to_string(),
-            data: String::from_utf8_lossy(&raw_data).into_owned(),
-            raw_data,
+            data: String::from_utf8_lossy(&raw_data).into_owned().into(),
+            raw_data: raw_data.into(),
             qsc_node: Some(object_node),
         }))
     }
@@ -6970,8 +6970,8 @@ impl DesktopAppState {
             .and_then(|scene| scene.loaded_surface_mut(surface_uid))
             .expect("surface was checked above");
         target.srctype = "qdfsurf".to_string();
-        target.data = String::from_utf8_lossy(&raw_data).into_owned();
-        target.raw_data = raw_data;
+        target.data = String::from_utf8_lossy(&raw_data).into_owned().into();
+        target.raw_data = raw_data.into();
         let node = ensure_surface_qsc_node(target);
         node.set_str_attr("srctype", "qdfsurf");
         node.set_str_attr("orig_mol", surface.orig_mol());
@@ -14419,8 +14419,8 @@ impl DesktopAppState {
             name: object_name,
             object_type: "MolSurfObj".to_string(),
             srctype: srctype.to_string(),
-            data: String::from_utf8_lossy(&raw_data).into_owned(),
-            raw_data,
+            data: String::from_utf8_lossy(&raw_data).into_owned().into(),
+            raw_data: raw_data.into(),
             qsc_node,
         }))
     }
@@ -14463,7 +14463,7 @@ impl DesktopAppState {
             uid: Uid::new(0),
             name: object_name,
             srctype: "qdflwobj".to_string(),
-            raw_data,
+            raw_data: raw_data.into(),
             visible: true,
             xform: Matrix4::IDENTITY,
             renderers,
@@ -16461,7 +16461,7 @@ impl DesktopAppState {
                     uid: Uid::new(0),
                     name: object.name().to_string(),
                     srctype: "qdflwobj".to_string(),
-                    raw_data: cuemol_lwview::write_qdf_lwobj_bytes(object.data()),
+                    raw_data: cuemol_lwview::write_qdf_lwobj_bytes(object.data()).into(),
                     visible: object.is_visible(),
                     xform: Matrix4::IDENTITY,
                     renderers,
@@ -49762,8 +49762,8 @@ impl DesktopAppState {
                             name,
                             object_type: "MolSurfObj".to_string(),
                             srctype: "obj".to_string(),
-                            raw_data: data.as_bytes().to_vec(),
-                            data,
+                            raw_data: data.as_bytes().to_vec().into(),
+                            data: data.into(),
                             qsc_node: None,
                         });
                     }
@@ -49896,7 +49896,7 @@ impl DesktopAppState {
                             uid: Uid::new(expected_uid),
                             name,
                             srctype: "qdflwobj".to_string(),
-                            raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&object),
+                            raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&object).into(),
                             visible: true,
                             xform: Matrix4::IDENTITY,
                             renderers,
@@ -51740,8 +51740,8 @@ fn loaded_surface_object(surface: &LoadedSurface) -> Option<MolSurfObj> {
 fn sync_loaded_surface_geometry(surface: &mut LoadedSurface, object: &MolSurfObj) {
     let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(object);
     surface.srctype = "qdfsurf".to_string();
-    surface.data = String::from_utf8_lossy(&raw_data).into_owned();
-    surface.raw_data = raw_data;
+    surface.data = String::from_utf8_lossy(&raw_data).into_owned().into();
+    surface.raw_data = raw_data.into();
     let name = surface.name.clone();
     let node = ensure_surface_qsc_node(surface);
     node.set_type_name("MolSurfObj");
@@ -52011,8 +52011,8 @@ fn sync_script_surface(
         if state.surface_mesh_modified {
             let data = object.mesh().to_obj_string(&state.name);
             surface.srctype = "obj".to_string();
-            surface.data = data.clone();
-            surface.raw_data = data.into_bytes();
+            surface.data = data.clone().into();
+            surface.raw_data = data.into_bytes().into();
             node.set_str_attr("srctype", "obj");
             node.set_str_attr("src", "datachunk:");
         }
@@ -55027,8 +55027,8 @@ fn pse_surface_object(
         name: format!("{molecule_name}_surf"),
         object_type: "MolSurfObj".to_string(),
         srctype: "qdfsurf".to_string(),
-        data: String::from_utf8_lossy(&raw_data).into_owned(),
-        raw_data,
+        data: String::from_utf8_lossy(&raw_data).into_owned().into(),
+        raw_data: raw_data.into(),
         qsc_node: Some(object_node),
     })
 }
@@ -60713,15 +60713,15 @@ end_header
                 name: "source-surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n".to_string(),
-                raw_data: Vec::new(),
+                data: "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n".to_string().into(),
+                raw_data: Vec::new().into(),
                 qsc_node: None,
             });
             scene.add_loaded_lw_object(LoadedLWObject {
                 uid: Uid::new(0),
                 name: "source-lightweight".to_string(),
                 srctype: "qdflwobj".to_string(),
-                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&source_lw_data),
+                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&source_lw_data).into(),
                 visible: true,
                 xform: Matrix4::IDENTITY,
                 renderers: vec![LoadedLWRenderer {
@@ -62662,8 +62662,8 @@ end_header
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n".to_string(),
-                raw_data: Vec::new(),
+                data: "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n".to_string().into(),
+                raw_data: Vec::new().into(),
                 qsc_node: None,
             });
         let surface_renderer_uid = app
@@ -62682,7 +62682,7 @@ end_header
                 uid: Uid::new(0),
                 name: "lightweight".to_string(),
                 srctype: "qdflwobj".to_string(),
-                raw_data: Vec::new(),
+                raw_data: Vec::new().into(),
                 visible: true,
                 xform: Matrix4::IDENTITY,
                 renderers: Vec::new(),
@@ -66747,8 +66747,8 @@ end_header
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: data.to_string(),
-                raw_data: data.as_bytes().to_vec(),
+                data: data.to_string().into(),
+                raw_data: data.as_bytes().to_vec().into(),
                 qsc_node: None,
             });
         let surface_group_uid = app.create_renderer_group(surface_uid, "surfaces").unwrap();
@@ -66791,7 +66791,7 @@ end_header
                 uid: Uid::new(0),
                 name: "lightweight".to_string(),
                 srctype: "qdflwobj".to_string(),
-                raw_data: Vec::new(),
+                raw_data: Vec::new().into(),
                 visible: true,
                 xform: Matrix4::IDENTITY,
                 renderers: Vec::new(),
@@ -66855,8 +66855,8 @@ end_header
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: data.to_string(),
-                raw_data: data.as_bytes().to_vec(),
+                data: data.to_string().into(),
+                raw_data: data.as_bytes().to_vec().into(),
                 qsc_node: None,
             });
         let first_surface_uid = app.surface_summary(surface_uid).unwrap().renderers[0].uid;
@@ -66883,7 +66883,7 @@ end_header
                 uid: Uid::new(0),
                 name: "lightweight".to_string(),
                 srctype: "qdflwobj".to_string(),
-                raw_data: Vec::new(),
+                raw_data: Vec::new().into(),
                 visible: true,
                 xform: Matrix4::IDENTITY,
                 renderers: Vec::new(),
@@ -66999,8 +66999,8 @@ end_header
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: "v 0 0 0\n".to_string(),
-                raw_data: b"v 0 0 0\n".to_vec(),
+                data: "v 0 0 0\n".to_string().into(),
+                raw_data: b"v 0 0 0\n".to_vec().into(),
                 qsc_node: None,
             });
         let lw_uid = app
@@ -67011,7 +67011,8 @@ end_header
                 uid: Uid::new(0),
                 name: "lightweight".to_string(),
                 srctype: "qdflwobj".to_string(),
-                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new()),
+                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new())
+                    .into(),
                 visible: true,
                 xform: Matrix4::IDENTITY,
                 renderers: vec![LoadedLWRenderer {
@@ -67191,8 +67192,8 @@ end_header
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: String::new(),
-                raw_data: Vec::new(),
+                data: String::new().into(),
+                raw_data: Vec::new().into(),
                 qsc_node: None,
             });
         let lw_uid = app
@@ -67203,7 +67204,8 @@ end_header
                 uid: Uid::new(0),
                 name: "lightweight".to_string(),
                 srctype: "qdflwobj".to_string(),
-                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new()),
+                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new())
+                    .into(),
                 visible: true,
                 xform: Matrix4::IDENTITY,
                 renderers: Vec::new(),
@@ -67646,8 +67648,8 @@ end_header
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: data.to_string(),
-                raw_data: data.as_bytes().to_vec(),
+                data: data.to_string().into(),
+                raw_data: data.as_bytes().to_vec().into(),
                 qsc_node: None,
             });
         let initial = app.surface_summary(surface_uid).unwrap();
@@ -69825,8 +69827,8 @@ end_header
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: "v 0 0 0\n".to_string(),
-                raw_data: b"v 0 0 0\n".to_vec(),
+                data: "v 0 0 0\n".to_string().into(),
+                raw_data: b"v 0 0 0\n".to_vec().into(),
                 qsc_node: None,
             });
         let surface_renderer_uid = app.surface_summary(surface_uid).unwrap().renderers[0].uid;
@@ -69838,7 +69840,8 @@ end_header
                 uid: Uid::new(0),
                 name: "lightweight".to_string(),
                 srctype: "qdflwobj".to_string(),
-                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new()),
+                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new())
+                    .into(),
                 visible: true,
                 xform: Matrix4::IDENTITY,
                 renderers: vec![LoadedLWRenderer {
@@ -69962,8 +69965,8 @@ end_header
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: "v 0 0 0\n".to_string(),
-                raw_data: b"v 0 0 0\n".to_vec(),
+                data: "v 0 0 0\n".to_string().into(),
+                raw_data: b"v 0 0 0\n".to_vec().into(),
                 qsc_node: None,
             });
         let surface_renderer_uid = app.surface_summary(surface_uid).unwrap().renderers[0].uid;
@@ -69975,7 +69978,8 @@ end_header
                 uid: Uid::new(0),
                 name: "lightweight".to_string(),
                 srctype: "qdflwobj".to_string(),
-                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new()),
+                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new())
+                    .into(),
                 visible: true,
                 xform: Matrix4::IDENTITY,
                 renderers: vec![LoadedLWRenderer {
@@ -72912,8 +72916,8 @@ attribute \"dep\" string \"positions\"
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "qdfsurf".to_string(),
-                data: String::from_utf8_lossy(&raw_data).into_owned(),
-                raw_data,
+                data: String::from_utf8_lossy(&raw_data).into_owned().into(),
+                raw_data: raw_data.into(),
                 qsc_node: Some(node),
             });
         app.scene_manager_mut()
@@ -73017,8 +73021,8 @@ attribute \"dep\" string \"positions\"
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "qdfsurf".to_string(),
-                data: String::from_utf8_lossy(&raw_data).into_owned(),
-                raw_data,
+                data: String::from_utf8_lossy(&raw_data).into_owned().into(),
+                raw_data: raw_data.into(),
                 qsc_node: Some(node),
             });
 
@@ -73481,8 +73485,8 @@ attribute \"dep\" string \"positions\"
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: String::new(),
-                raw_data: Vec::new(),
+                data: String::new().into(),
+                raw_data: Vec::new().into(),
                 qsc_node: None,
             });
         let surface_renderer_uid = app.surface_summary(surface_uid).unwrap().renderers[0].uid;
@@ -74252,8 +74256,8 @@ attribute \"dep\" string \"positions\"
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: "v 0 0 0\n".to_string(),
-                raw_data: b"v 0 0 0\n".to_vec(),
+                data: "v 0 0 0\n".to_string().into(),
+                raw_data: b"v 0 0 0\n".to_vec().into(),
                 qsc_node: None,
             });
         let surface_renderer = app.surface_summary(surface_uid).unwrap().renderers[0].clone();
@@ -74293,7 +74297,8 @@ attribute \"dep\" string \"positions\"
                 uid: Uid::new(0),
                 name: "lightweight".to_string(),
                 srctype: "qdflwobj".to_string(),
-                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new()),
+                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new())
+                    .into(),
                 visible: true,
                 xform: Matrix4::IDENTITY,
                 renderers: vec![LoadedLWRenderer {
@@ -74757,8 +74762,8 @@ attribute \"dep\" string \"positions\"
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "qdfsurf".to_string(),
-                data: String::from_utf8_lossy(&raw_data).into_owned(),
-                raw_data,
+                data: String::from_utf8_lossy(&raw_data).into_owned().into(),
+                raw_data: raw_data.into(),
                 qsc_node: None,
             });
         app.save_workspace_object_as(GuiWorkspaceObjectKind::Surface, surface_uid, &surface_path)

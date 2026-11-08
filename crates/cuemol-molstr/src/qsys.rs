@@ -1764,17 +1764,17 @@ impl MolObject {
     }
 }
 
-/// A surface object captured from a `.qsc` load. The data is either OBJ/PLY text
-/// or CueMol's textual QDF1 envelope (`qdfsurf`); a front end converts it to
-/// geometry through the reader selected by `srctype`.
+/// A surface object captured from a `.qsc` load. Immutable source text and bytes
+/// are shared by scene snapshots. A front end decodes OBJ, ASCII/binary PLY, or
+/// QDF geometry through the reader selected by `srctype`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedSurface {
     pub uid: Uid,
     pub name: String,
     pub object_type: String,
     pub srctype: String,
-    pub data: String,
-    pub raw_data: Vec<u8>,
+    pub data: std::sync::Arc<str>,
+    pub raw_data: std::sync::Arc<[u8]>,
     pub qsc_node: Option<LDom2Node>,
 }
 
@@ -1806,7 +1806,7 @@ pub struct LoadedLWObject {
     pub uid: Uid,
     pub name: String,
     pub srctype: String,
-    pub raw_data: Vec<u8>,
+    pub raw_data: std::sync::Arc<[u8]>,
     pub visible: bool,
     pub xform: Matrix4,
     pub renderers: Vec<LoadedLWRenderer>,
@@ -1820,7 +1820,7 @@ pub struct LoadedQscObject {
     pub name: String,
     pub object_type: String,
     pub node: LDom2Node,
-    pub raw_data: Option<Vec<u8>>,
+    pub raw_data: Option<std::sync::Arc<[u8]>>,
 }
 
 /// A scene-local CueMol style sheet captured from a QSC `<styles>` element.
@@ -2730,8 +2730,8 @@ impl MolScene {
                         name: object_name.clone(),
                         object_type: object_type.clone(),
                         srctype,
-                        data: String::from_utf8_lossy(&data).into_owned(),
-                        raw_data: data,
+                        data: String::from_utf8_lossy(&data).into_owned().into(),
+                        raw_data: data.into(),
                         qsc_node: Some(object_node.clone()),
                     });
                     return Ok(());
@@ -2800,7 +2800,7 @@ impl MolScene {
                         uid: Uid::new(0),
                         name: object_name.clone(),
                         srctype,
-                        raw_data: data,
+                        raw_data: data.into(),
                         visible,
                         xform: attr_value(object_line, "xformMat")
                             .as_deref()
@@ -2823,7 +2823,7 @@ impl MolScene {
                 name: object_name.clone(),
                 object_type: object_type.clone(),
                 node: object_node.clone(),
-                raw_data,
+                raw_data: raw_data.map(Into::into),
             });
             self.skipped_qsc_objects.push((object_name, object_type));
             return Ok(());
@@ -5782,6 +5782,19 @@ opaque payload
             .as_deref()
             .unwrap()
             .starts_with(b"opaque payload"));
+
+        let mut snapshot = scene.clone();
+        let initial = scene.loaded_qsc_objects()[0].raw_data.as_ref().unwrap();
+        assert_eq!(
+            snapshot.loaded_qsc_objects()[0]
+                .raw_data
+                .as_ref()
+                .unwrap()
+                .as_ptr(),
+            initial.as_ptr()
+        );
+        snapshot.loaded_qsc_objects[0].raw_data = Some(b"replacement\n".to_vec().into());
+        assert!(initial.starts_with(b"opaque payload"));
 
         let rewritten = scene.write_qsc_string();
         assert!(rewritten.contains("type=\"PluginObject\""));

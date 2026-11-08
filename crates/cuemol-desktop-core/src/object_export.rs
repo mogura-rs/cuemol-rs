@@ -106,7 +106,7 @@ impl DesktopAppState {
                     .and_then(|scene| scene.loaded_lw_object(object_uid))
                     .ok_or_else(|| CueMolError::not_found("lightweight object"))?;
                 cuemol_lwview::read_qdf_lwobj_bytes(&object.raw_data)?;
-                Ok(object.raw_data.clone())
+                Ok(object.raw_data.to_vec())
             }
             _ => Err(CueMolError::invalid_argument(format!(
                 "unsupported object writer: {format}"
@@ -163,8 +163,8 @@ impl DesktopAppState {
                     .and_then(|scene| scene.loaded_surface_mut(object_uid))
                     .ok_or_else(|| CueMolError::not_found("surface"))?;
                 object.srctype = format.into();
-                object.data.clear();
-                object.raw_data = bytes;
+                object.data = "".into();
+                object.raw_data = bytes.into();
                 let node = ensure_surface_qsc_node(object);
                 node.set_str_attr("src", source);
                 node.set_str_attr("srctype", format);
@@ -181,7 +181,7 @@ impl DesktopAppState {
                     .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
                     .ok_or_else(|| CueMolError::not_found("lightweight object"))?;
                 object.srctype = format.into();
-                object.raw_data = bytes;
+                object.raw_data = bytes.into();
                 let node = ensure_lw_qsc_node(object);
                 node.set_str_attr("src", source);
                 node.set_str_attr("srctype", format);

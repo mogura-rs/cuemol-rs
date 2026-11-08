@@ -376,6 +376,101 @@ mod tests {
     }
 
     #[test]
+    fn surface_snapshots_share_payloads_and_isolate_replacement() {
+        let source = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+        let mut state = DesktopAppState::new();
+        state.open_bytes("surface.obj", source).unwrap();
+        let scene_uid = state.active_scene().unwrap();
+        let before = state.clone();
+        let initial = &before
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_surfaces()[0];
+        let initial_bytes = initial.raw_data.as_ptr();
+        let initial_text = initial.data.as_ptr();
+        let surface_uid = initial.uid;
+        state.rename_surface(surface_uid, "renamed").unwrap();
+        let current = state
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_surface(surface_uid)
+            .unwrap();
+        assert_eq!(current.raw_data.as_ptr(), initial_bytes);
+        assert_eq!(current.data.as_ptr(), initial_text);
+        let rename = ChangeSet::between(&before, &state);
+        rename.apply(&mut state, Direction::Undo);
+        let current = state
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_surface(surface_uid)
+            .unwrap();
+        assert_eq!(current.raw_data.as_ptr(), initial_bytes);
+        assert_eq!(current.name, initial.name);
+        rename.apply(&mut state, Direction::Redo);
+        let surface = state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .loaded_surface_mut(surface_uid)
+            .unwrap();
+        surface.raw_data = b"replacement".to_vec().into();
+        surface.data = "replacement".into();
+        assert_eq!(&*initial.raw_data, source);
+        assert_eq!(&*initial.data, std::str::from_utf8(source).unwrap());
+    }
+
+    #[test]
+    fn lightweight_snapshots_keep_shared_bytes_through_undo_and_save() {
+        use cuemol_lwview::{LWDrawData, LWDrawElement, LWObject};
+        let mut object = LWObject::new();
+        object.add_draw_element(LWDrawElement::new(
+            1,
+            cuemol_gfx::AbstDrawElem::DRAW_TRIANGLES as i8,
+            1.,
+            [255; 4],
+            LWDrawData::Vertices(vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]]),
+        ));
+        let bytes = cuemol_lwview::write_qdf_lwobj_bytes(&object);
+        let mut state = DesktopAppState::new();
+        state.open_bytes("lightweight.qdf", &bytes).unwrap();
+        let scene_uid = state.active_scene().unwrap();
+        let before = state.clone();
+        let initial = &before
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_lw_objects()[0];
+        state.set_lw_object_visible(initial.uid, false).unwrap();
+        let changes = ChangeSet::between(&before, &state);
+        for direction in [Direction::Undo, Direction::Redo, Direction::Undo] {
+            changes.apply(&mut state, direction);
+            let current = state
+                .scene_manager()
+                .scene(scene_uid)
+                .unwrap()
+                .loaded_lw_object(initial.uid)
+                .unwrap();
+            assert_eq!(current.raw_data.as_ptr(), initial.raw_data.as_ptr());
+            assert_eq!(&*current.raw_data, &bytes);
+            assert_eq!(current.visible, direction == Direction::Undo);
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("lightweight.qsc");
+        state.save_active_scene_qsc(&path).unwrap();
+        let mut restored = DesktopAppState::new();
+        restored.open_path(&path).unwrap();
+        let scene = restored
+            .scene_manager()
+            .scene(restored.active_scene().unwrap())
+            .unwrap();
+        assert_eq!(scene.loaded_lw_objects().len(), 1);
+        assert_eq!(&*scene.loaded_lw_objects()[0].raw_data, &bytes);
+    }
+
+    #[test]
     fn undoing_all_creations_clears_modified_without_reusing_object_ids() {
         let mut state = DesktopAppState::new();
         let scene = state.new_scene("Scene", true).result_scene;

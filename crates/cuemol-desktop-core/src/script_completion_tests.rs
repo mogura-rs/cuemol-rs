@@ -705,7 +705,7 @@ fn surface_without_renderers_stays_hidden_after_scripts_and_renderer_recreation(
             object_type: "MolSurfObj".into(),
             srctype: "obj".into(),
             data: "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n".into(),
-            raw_data: Vec::new(),
+            raw_data: Vec::new().into(),
             qsc_node: None,
         });
     assert_eq!(app.active_scene_surface_meshes().len(), 1);

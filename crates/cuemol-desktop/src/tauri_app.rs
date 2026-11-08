@@ -21218,7 +21218,7 @@ mod tests {
                 uid: Uid::new(0),
                 name: "lightweight".to_string(),
                 srctype: "qdflwobj".to_string(),
-                raw_data: Vec::new(),
+                raw_data: Vec::new().into(),
                 visible: true,
                 xform: cuemol_core::Matrix4::IDENTITY,
                 renderers: vec![cuemol_molstr::LoadedLWRenderer {
@@ -22816,8 +22816,8 @@ mod tests {
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: data.to_string(),
-                raw_data: data.as_bytes().to_vec(),
+                data: data.to_string().into(),
+                raw_data: data.as_bytes().to_vec().into(),
                 qsc_node: None,
             });
         let snapshot = model.snapshot();
@@ -24233,8 +24233,8 @@ mod tests {
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: data.to_string(),
-                raw_data: data.as_bytes().to_vec(),
+                data: data.to_string().into(),
+                raw_data: data.as_bytes().to_vec().into(),
                 qsc_node: None,
             });
         let surface_renderer_uid = surface_model.snapshot().surfaces[0].renderers[0].uid;

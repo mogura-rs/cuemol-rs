@@ -25,7 +25,7 @@ fn fixture() -> (DesktopAppState, Camera, Vec<(Uid, Uid)>) {
             object_type: "MolSurfObj".into(),
             srctype: "obj".into(),
             data: data.into(),
-            raw_data: data.as_bytes().to_vec(),
+            raw_data: data.as_bytes().to_vec().into(),
             qsc_node: None,
         });
     let surface = state.surface_summaries(sid)[0].clone();
@@ -37,7 +37,7 @@ fn fixture() -> (DesktopAppState, Camera, Vec<(Uid, Uid)>) {
             uid: Uid::new(0),
             name: "lightweight".into(),
             srctype: "qdflwobj".into(),
-            raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new()),
+            raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new()).into(),
             visible: true,
             xform: Matrix4::IDENTITY,
             renderers: vec![LoadedLWRenderer {

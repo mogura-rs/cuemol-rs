@@ -596,13 +596,14 @@ impl DesktopAppState {
                     uid: Uid::new(0),
                     name,
                     object_type: "MolSurfObj".into(),
-                    data: if format == "obj" {
+                    data: (if format == "obj" {
                         String::from_utf8_lossy(&source).into_owned()
                     } else {
                         String::new()
-                    },
+                    })
+                    .into(),
                     srctype: format,
-                    raw_data: source,
+                    raw_data: source.into(),
                     qsc_node: None,
                 };
                 ensure_surface_qsc_node(&mut surface);
@@ -621,7 +622,7 @@ impl DesktopAppState {
                     uid: Uid::new(0),
                     name,
                     srctype: "qdflwobj".into(),
-                    raw_data: source,
+                    raw_data: source.into(),
                     visible: true,
                     xform: Matrix4::IDENTITY,
                     qsc_node: None,

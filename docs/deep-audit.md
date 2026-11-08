@@ -14,7 +14,7 @@ requests remain outside tests under the repository instructions.
 | --- | --- | --- |
 | Large molecules | Load, topology, secondary structure, base pairs, edits, serialization and unchanged snapshots | Indexed topology, residue-property lookup, unchanged-edit snapshots and large DNA pairing pass the comparisons below. Frontend integration remains part of the combined-operation checks. |
 | Long trajectories | Indexed reads, random seek, averaging, selection, append, playback, Undo/Redo and bounded retention | Averaging and selection pass exact-coordinate, cell and failure checks across storage/block types. The 2,000-frame indexed run below visits every frame. Frontend repetition and final broad checks remain open. |
-| Maps and surfaces | Large grids, repeated replacement, cancellation, failed inputs, geometry and memory retention | Large OpenDX grids and XPLOR/BRIX reader boundaries pass the checks below. Surface retention and frontend repetition remain open. |
+| Maps and surfaces | Large grids, repeated replacement, cancellation, failed inputs, geometry and memory retention | Large OpenDX grids, XPLOR/BRIX reader boundaries and shared surface/LW payload retention pass the checks below. Frontend repetition remains open. |
 | Input boundaries | Truncated, malformed and non-finite inputs; failed loads preserve the existing scene | Extreme-coordinate overflow, invalid hydrogen-bond geometry and five malformed-map failures are reproduced and fixed below. Shared application loads preserve existing scenes on these map errors. Broader frontend checks remain open. |
 | Combined scene edits | Multiple scenes, selection, cameras, animation, Undo/Redo and save/reload | Open. |
 | Rendering jobs | Repeated still/movie output, concurrent edits, cancellation/failure and worker/output cleanup | Open. |
@@ -248,3 +248,50 @@ Portable helpers are `map_reader_bench`, `potential_check`,
 The benchmark script can generate deterministic OpenDX and XPLOR inputs. Raw
 measurements, before/after failure logs and native QDF exports are retained under
 `.cache/deep-audit/maps`.
+
+## Surface, lightweight and opaque payload snapshots
+
+Surface text/raw bytes, lightweight QDF bytes and unknown QSC payloads previously
+copied their entire buffers when a scene was cloned. Application Undo retains
+before/after snapshots, so even renaming a scene repeatedly retained duplicate
+geometry. These immutable payloads now use shared `Arc` storage. Geometry edits
+replace the payload; they do not alter older snapshots. Existing export methods
+still return owned bytes where their API requires them.
+
+A regression first demonstrated detached surface buffers after a metadata edit.
+The final tests check shared storage through metadata changes and Undo/Redo,
+replacement isolation, lightweight save/reload bytes, and preservation of opaque
+plugin data. The molecular, shared application and command suites pass 971 checks
+across 72 groups. Four explicitly optional checks require live metadata services,
+FFmpeg or POV-Ray and remain for the final integration run. This count does not
+include the deferred native/browser frontend runs. Both native frontends and
+their test targets also pass a combined `egui-gui,tauri-gui` compilation check.
+
+The probe loads each input through `DesktopAppState`, makes eight scene-name
+edits through `ChangeSet`, keeps all eight changes and performs two complete
+Undo/Redo cycles. Every step hashes the full retained payload and verifies the
+restored scene name. Three fresh processes per version alternate order; all
+hashes match the preceding implementation.
+
+| Input | Geometry or payload | Eight edits, before/after (ms) | Peak RSS, before/after (MiB) |
+| --- | --- | --- | --- |
+| OBJ surface | 65,536 vertices / 130,050 triangles | 7.99 / 0.121 | 147.39 / 26.52 |
+| OBJ surface | 147,456 vertices / 293,378 triangles | 18.71 / 0.127 | 346.67 / 61.73 |
+| QDF surface | Same 147,456-vertex mesh | 8.43 / 0.129 | 165.83 / 41.56 |
+| Lightweight QDF | Same indexed geometry | 8.37 / 0.120 | 160.19 / 35.86 |
+| Unknown QSC object | Approximately 8 MiB of retained opaque data | 8.25 / 0.105 | 165.17 / 52.92 |
+
+Edit time includes snapshot capture and change recording, and excludes rendering
+and verification hashes. RSS includes loading and both verification cycles. The
+separately recorded Undo/Redo times include hashing and should not be interpreted
+as isolated UI latency. Creating shared allocations adds about 0.5 ms to the
+initial QDF surface/LW loads in this comparison; it is not a loading speedup.
+OBJ geometry is a deterministic synthetic height field, not a molecular SES
+accuracy benchmark. Opaque data is retained without requiring its original plugin.
+
+The `scene_snapshot_bench` example and `benchmark-scene-snapshots.py` reproduce
+the checks. The script generates OBJ fixtures; the example can convert them to
+surface or lightweight QDF for paired runs. Raw evidence is retained in
+`.cache/deep-audit/scene-payloads/paired.json`. The old `LoadedSurface` comment
+described textual QDF1/PLY only, although readers also accept binary QDF/PLY;
+the comment now matches the implementation.

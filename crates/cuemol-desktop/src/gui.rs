@@ -36302,7 +36302,7 @@ mod tests {
                 uid: cuemol_core::Uid::new(0),
                 name: "lightweight".to_string(),
                 srctype: "qdflwobj".to_string(),
-                raw_data: Vec::new(),
+                raw_data: Vec::new().into(),
                 visible: true,
                 xform: cuemol_core::Matrix4::IDENTITY,
                 renderers: Vec::new(),
@@ -36430,8 +36430,8 @@ mod tests {
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: data.to_string(),
-                raw_data: data.as_bytes().to_vec(),
+                data: data.to_string().into(),
+                raw_data: data.as_bytes().to_vec().into(),
                 qsc_node: Some(surface_node),
             });
         let renderer_uid = app.state.surface_summary(surface_uid).unwrap().renderers[0].uid;
@@ -37031,8 +37031,8 @@ mod tests {
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: data.to_string(),
-                raw_data: data.as_bytes().to_vec(),
+                data: data.to_string().into(),
+                raw_data: data.as_bytes().to_vec().into(),
                 qsc_node: None,
             });
         let surface_group = app
@@ -37075,7 +37075,7 @@ mod tests {
                 uid: cuemol_core::Uid::new(0),
                 name: "lightweight".to_string(),
                 srctype: "qdflwobj".to_string(),
-                raw_data: Vec::new(),
+                raw_data: Vec::new().into(),
                 visible: true,
                 xform: cuemol_core::Matrix4::IDENTITY,
                 renderers: Vec::new(),
@@ -39089,8 +39089,8 @@ mod tests {
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "qdfsurf".to_string(),
-                data: String::from_utf8_lossy(&raw_data).into_owned(),
-                raw_data,
+                data: String::from_utf8_lossy(&raw_data).into_owned().into(),
+                raw_data: raw_data.into(),
                 qsc_node: Some(node),
             });
         app.open_surface_cutter_tool();
@@ -39571,8 +39571,8 @@ mod tests {
                 name: "surface".to_string(),
                 object_type: "MolSurfObj".to_string(),
                 srctype: "obj".to_string(),
-                data: data.to_string(),
-                raw_data: data.as_bytes().to_vec(),
+                data: data.to_string().into(),
+                raw_data: data.as_bytes().to_vec().into(),
                 qsc_node: Some(surface_node),
             });
         let surface_renderer_uid = app.state.surface_summary(surface_uid).unwrap().renderers[0].uid;
@@ -41540,8 +41540,8 @@ mod tests {
                     name: "Molecular surface".to_string(),
                     object_type: "MolSurfObj".to_string(),
                     srctype: "obj".to_string(),
-                    data: data.to_string(),
-                    raw_data: data.as_bytes().to_vec(),
+                    data: data.to_string().into(),
+                    raw_data: data.as_bytes().to_vec().into(),
                     qsc_node: None,
                 });
             if let Some(object_uid) = app
@@ -41601,8 +41601,8 @@ mod tests {
                     name: "Molecular surface".to_string(),
                     object_type: "MolSurfObj".to_string(),
                     srctype: "obj".to_string(),
-                    data: data.to_string(),
-                    raw_data: data.as_bytes().to_vec(),
+                    data: data.to_string().into(),
+                    raw_data: data.as_bytes().to_vec().into(),
                     qsc_node: None,
                 });
             let renderer_uid = app.state.surface_summary(surface_uid).unwrap().renderers[0].uid;
