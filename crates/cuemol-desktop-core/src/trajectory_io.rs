@@ -1,5 +1,76 @@
 use super::*;
 
+enum FramePositions<'a> {
+    Vectors(&'a [Vector4]),
+    Packed(&'a [f32]),
+}
+
+struct FrameView<'a> {
+    positions: FramePositions<'a>,
+    indices: Option<&'a [usize]>,
+    count: usize,
+    cell: Option<[f64; 6]>,
+}
+
+impl<'a> FrameView<'a> {
+    fn new(
+        positions: FramePositions<'a>,
+        indices: Option<&'a [usize]>,
+        cell: Option<[f64; 6]>,
+    ) -> Result<Self> {
+        let source_count = match &positions {
+            FramePositions::Vectors(values) => values.len(),
+            FramePositions::Packed(values) => values.len() / 3,
+        };
+        if indices.is_some_and(|indices| indices.iter().any(|index| *index >= source_count)) {
+            return Err(CueMolError::invalid_argument(
+                "trajectory selection index is out of range",
+            ));
+        }
+        Ok(Self {
+            positions,
+            indices,
+            count: indices.map_or(source_count, <[usize]>::len),
+            cell,
+        })
+    }
+
+    fn position(&self, index: usize) -> Vector4 {
+        let index = self.indices.map_or(index, |indices| indices[index]);
+        match &self.positions {
+            FramePositions::Vectors(values) => values[index],
+            FramePositions::Packed(values) => Vector4::new3(
+                values[index * 3] as f64,
+                values[index * 3 + 1] as f64,
+                values[index * 3 + 2] as f64,
+            ),
+        }
+    }
+
+    fn accumulate(&self, sums: &mut [Vector4]) {
+        fn add(sums: &mut [Vector4], values: impl Iterator<Item = Vector4>) {
+            for (sum, value) in sums.iter_mut().zip(values) {
+                *sum = *sum + value;
+            }
+        }
+        let unpack =
+            |value: &[f32]| Vector4::new3(value[0] as f64, value[1] as f64, value[2] as f64);
+        match (&self.positions, self.indices) {
+            (FramePositions::Vectors(values), None) => add(sums, values.iter().copied()),
+            (FramePositions::Vectors(values), Some(indices)) => {
+                add(sums, indices.iter().map(|&index| values[index]))
+            }
+            (FramePositions::Packed(values), None) => add(sums, values.chunks_exact(3).map(unpack)),
+            (FramePositions::Packed(values), Some(indices)) => add(
+                sums,
+                indices
+                    .iter()
+                    .map(|&index| unpack(&values[index * 3..index * 3 + 3])),
+            ),
+        }
+    }
+}
+
 fn apply_coordinates(
     molecule: &mut MolCoord,
     count: usize,
@@ -25,6 +96,95 @@ fn apply_coordinates(
 }
 
 impl GuiTrajectoryFrames {
+    fn with_frame<T>(
+        &self,
+        index: usize,
+        indices: Option<&[usize]>,
+        read: impl FnOnce(FrameView<'_>) -> Result<T>,
+    ) -> Result<T> {
+        match self {
+            Self::Memory(frames) => {
+                let frame = frames
+                    .get(index)
+                    .ok_or_else(|| CueMolError::not_found("trajectory frame"))?;
+                read(FrameView::new(
+                    FramePositions::Vectors(frame),
+                    indices,
+                    None,
+                )?)
+            }
+            Self::Owned(block) => {
+                let frame = block
+                    .frame(index)
+                    .ok_or_else(|| CueMolError::not_found("trajectory frame"))?;
+                read(FrameView::new(
+                    FramePositions::Packed(frame),
+                    indices,
+                    block.cell(index),
+                )?)
+            }
+            Self::File(file) => {
+                let frame = file.read_frame(index)?;
+                read(FrameView::new(
+                    FramePositions::Packed(&frame.coordinates),
+                    indices,
+                    frame.cell,
+                )?)
+            }
+            Self::Selected {
+                source,
+                indices: selected,
+            } => {
+                if let Some(indices) = indices {
+                    let remapped = indices
+                        .iter()
+                        .map(|index| {
+                            selected.get(*index).copied().ok_or_else(|| {
+                                CueMolError::invalid_argument(
+                                    "trajectory selection index is out of range",
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    source.with_frame(index, Some(&remapped), read)
+                } else {
+                    source.with_frame(index, Some(selected), read)
+                }
+            }
+        }
+    }
+
+    pub(super) fn frame_with_cell(&self, index: usize) -> Result<(Vec<Vector4>, Option<[f64; 6]>)> {
+        self.with_frame(index, None, |frame| {
+            Ok((
+                (0..frame.count)
+                    .map(|index| frame.position(index))
+                    .collect(),
+                frame.cell,
+            ))
+        })
+    }
+
+    pub(super) fn accumulate_frame(
+        &self,
+        index: usize,
+        positions: &mut Vec<Vector4>,
+        initialize: bool,
+    ) -> Result<Option<[f64; 6]>> {
+        self.with_frame(index, None, |frame| {
+            if initialize {
+                positions.clear();
+                positions.resize(frame.count, Vector4::ZERO);
+            } else if positions.len() != frame.count {
+                return Err(CueMolError::invalid_argument(
+                    "trajectory atom counts differ",
+                ));
+            }
+            frame.accumulate(positions);
+            Ok(frame.cell)
+        })
+    }
+
     pub(super) fn frame_atom_count(&self, index: usize) -> Result<usize> {
         match self {
             Self::Memory(frames) => frames
@@ -613,6 +773,162 @@ mod playback_tests {
     }
 
     #[test]
+    fn averaged_trajectory_preserves_order_cells_and_nested_selection_across_blocks() {
+        let raw = (0..7)
+            .map(|frame| {
+                (0..4)
+                    .map(|atom| {
+                        Vector4::new3(
+                            ((frame * 4 + atom) as f32 * 0.1) as f64,
+                            if frame % 2 == 0 {
+                                1.0e12_f32 as f64
+                            } else {
+                                -1.0e12_f32 as f64
+                            },
+                            -0.,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let cells = (0..7)
+            .map(|frame| (frame < 5).then_some([20. + frame as f64, 25., 30., 90., 80., 75.]))
+            .collect::<Vec<_>>();
+        let mut blocks = Vec::new();
+        for (block_index, (start, end)) in [(0, 3), (3, 5), (5, 7)].into_iter().enumerate() {
+            let mut packed = cuemol_mdtools::TrajBlock::new(4);
+            for frame in start..end {
+                packed
+                    .append_frame(
+                        raw[frame]
+                            .iter()
+                            .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32])
+                            .collect(),
+                        cells[frame],
+                    )
+                    .unwrap();
+            }
+            let source = GuiTrajectoryFrames::Owned(Arc::new(packed));
+            let source = match block_index {
+                0 => source,
+                1 => GuiTrajectoryFrames::File(Arc::new(
+                    cuemol_mdtools::IndexedTrajectory::from_bytes(
+                        &source.dcd_bytes(4).unwrap(),
+                        1,
+                        Some(4),
+                    )
+                    .unwrap(),
+                )),
+                _ => GuiTrajectoryFrames::Memory(Arc::new(raw[start..end].to_vec())),
+            };
+            let selected = GuiTrajectoryFrames::Selected {
+                source: Arc::new(source),
+                indices: Arc::new(vec![3, 1, 0]),
+            };
+            let nested = GuiTrajectoryFrames::Selected {
+                source: Arc::new(selected),
+                indices: Arc::new(vec![2, 0, 2]),
+            };
+            blocks.push(GuiTrajectoryBlockData {
+                stride: 1,
+                uid: block_index as u64 + 1,
+                source: String::new(),
+                format: "TEST".into(),
+                frames: nested,
+            });
+        }
+        for radius in [0, 1, 3, usize::MAX] {
+            let mut trajectory = GuiTrajectoryData {
+                blocks: blocks.clone(),
+                frame_average_size: radius,
+                ..Default::default()
+            };
+            for index in 0..raw.len() {
+                let expected = [0, 3, 0].map(|atom| {
+                    if radius == 0 {
+                        return raw[index][atom];
+                    }
+                    let start = index.saturating_sub(radius);
+                    let end = index.saturating_add(radius).min(raw.len() - 1);
+                    let sum =
+                        (start..=end).fold(Vector4::ZERO, |sum, frame| sum + raw[frame][atom]);
+                    sum.scale(1. / (end - start + 1) as f64)
+                });
+                let mut molecule = molecule(3);
+                let old_cell = cuemol_core::CellParams::new(10., 11., 12., 90., 90., 90.);
+                molecule.set_cell_params(old_cell.clone());
+                let before = molecule.clone();
+                trajectory.apply_frame(&mut molecule, index).unwrap();
+                assert_eq!(trajectory.current_frame, index);
+                for (atom, expected) in molecule.atoms().iter().zip(expected) {
+                    let p = atom.position;
+                    assert_eq!(
+                        [p.x, p.y, p.z, p.w].map(f64::to_bits),
+                        [expected.x, expected.y, expected.z, expected.w].map(f64::to_bits),
+                        "radius={radius} index={index}"
+                    );
+                }
+                let expected_cell = cells[index]
+                    .map(|[a, b, c, alpha, beta, gamma]| {
+                        cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma)
+                    })
+                    .unwrap_or(old_cell);
+                assert_eq!(molecule.cell_params(), Some(&expected_cell));
+                assert_eq!(before.atoms()[0].position, Vector4::ZERO);
+            }
+        }
+    }
+
+    #[test]
+    fn averaged_trajectory_failure_preserves_the_visible_frame_and_cell() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("changing.dcd");
+        let mut block = cuemol_mdtools::TrajBlock::new(1);
+        block
+            .append_frame(vec![1., 2., 3.], Some([10., 11., 12., 90., 90., 90.]))
+            .unwrap();
+        block
+            .append_frame(vec![4., 5., 6.], Some([20., 21., 22., 90., 90., 90.]))
+            .unwrap();
+        let bytes = GuiTrajectoryFrames::Owned(Arc::new(block))
+            .dcd_bytes(1)
+            .unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let frames = GuiTrajectoryFrames::File(Arc::new(
+            cuemol_mdtools::IndexedTrajectory::open(&path, 1, Some(1)).unwrap(),
+        ));
+        let mut trajectory = GuiTrajectoryData {
+            blocks: vec![GuiTrajectoryBlockData {
+                stride: 1,
+                uid: 1,
+                source: String::new(),
+                format: "DCD".into(),
+                frames,
+            }],
+            ..Default::default()
+        };
+        let mut molecule = molecule(1);
+        trajectory.apply_frame(&mut molecule, 0).unwrap();
+        let before = molecule.clone();
+        trajectory.frame_average_size = 1;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(bytes.len() as u64 - 4)
+            .unwrap();
+        for index in [0, 1, 2, usize::MAX] {
+            assert!(trajectory.apply_frame(&mut molecule, index).is_err());
+            assert_eq!(trajectory.current_frame, 0);
+            assert_eq!(molecule, before);
+            assert_eq!(
+                molecule.atoms_moved_generation(),
+                before.atoms_moved_generation()
+            );
+        }
+    }
+
+    #[test]
     fn invalid_direct_frame_does_not_change_coordinates_cell_or_frame_index() {
         let source = GuiTrajectoryFrames::Memory(Arc::new(vec![
             vec![Vector4::new3(1., 2., 3.)],
@@ -647,6 +963,7 @@ mod playback_tests {
                 source: Arc::new(source.clone()),
                 indices: Arc::new(selected),
             };
+            assert!(frames.frame_with_cell(0).is_err());
             assert!(frames.apply_frame(&mut molecule, 0, None).is_err());
             assert_eq!(molecule.atoms(), before.atoms());
             assert_eq!(

@@ -527,51 +527,6 @@ impl GuiTrajectoryFrames {
             Self::Selected { source, .. } => source.len(),
         }
     }
-
-    fn frame_with_cell(&self, index: usize) -> Result<(Vec<Vector4>, Option<[f64; 6]>)> {
-        match self {
-            Self::Memory(frames) => frames
-                .get(index)
-                .cloned()
-                .map(|frame| (frame, None))
-                .ok_or_else(|| CueMolError::not_found("trajectory frame")),
-            Self::Owned(block) => block
-                .frame(index)
-                .map(|frame| {
-                    (
-                        frame
-                            .chunks_exact(3)
-                            .map(|p| Vector4::new3(p[0] as f64, p[1] as f64, p[2] as f64))
-                            .collect(),
-                        block.cell(index),
-                    )
-                })
-                .ok_or_else(|| CueMolError::not_found("trajectory frame")),
-            Self::Selected { source, indices } => {
-                let (positions, cell) = source.frame_with_cell(index)?;
-                let selected = indices
-                    .iter()
-                    .map(|index| {
-                        positions.get(*index).copied().ok_or_else(|| {
-                            CueMolError::invalid_argument(
-                                "trajectory selection index is out of range",
-                            )
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                Ok((selected, cell))
-            }
-            Self::File(file) => {
-                let frame = file.read_frame(index)?;
-                let positions = frame
-                    .coordinates
-                    .chunks_exact(3)
-                    .map(|xyz| Vector4::new3(xyz[0] as f64, xyz[1] as f64, xyz[2] as f64))
-                    .collect();
-                Ok((positions, frame.cell))
-            }
-        }
-    }
 }
 
 impl GuiTrajectoryData {
@@ -640,24 +595,22 @@ impl GuiTrajectoryData {
     }
 
     fn frame_with_cell(&self, index: usize) -> Result<(Vec<Vector4>, Option<[f64; 6]>)> {
-        let (mut positions, cell) = self.raw_frame_with_cell(index)?;
         if self.frame_average_size == 0 {
-            return Ok((positions, cell));
+            return self.raw_frame_with_cell(index);
         }
-        positions.fill(Vector4::ZERO);
+        let count = self.frame_count();
+        if index >= count {
+            return Err(CueMolError::not_found("trajectory frame"));
+        }
+        let mut positions = Vec::new();
+        let mut cell = None;
         let start = index.saturating_sub(self.frame_average_size);
-        let end = index
-            .saturating_add(self.frame_average_size)
-            .min(self.frame_count() - 1);
+        let end = index.saturating_add(self.frame_average_size).min(count - 1);
         for frame in start..=end {
-            let (source, _) = self.raw_frame_with_cell(frame)?;
-            if source.len() != positions.len() {
-                return Err(CueMolError::invalid_argument(
-                    "trajectory atom counts differ",
-                ));
-            }
-            for (sum, value) in positions.iter_mut().zip(source) {
-                *sum = *sum + value;
+            let (block, local_index) = self.frame_location(frame)?;
+            let frame_cell = block.accumulate_frame(local_index, &mut positions, frame == start)?;
+            if frame == index {
+                cell = frame_cell;
             }
         }
         let scale = 1. / (end - start + 1) as f64;
@@ -700,10 +653,15 @@ impl GuiTrajectoryData {
     }
 
     fn raw_frame_with_cell(&self, index: usize) -> Result<(Vec<Vector4>, Option<[f64; 6]>)> {
+        let (frames, index) = self.frame_location(index)?;
+        frames.frame_with_cell(index)
+    }
+
+    fn frame_location(&self, index: usize) -> Result<(&GuiTrajectoryFrames, usize)> {
         let mut remaining = index;
         for block in &self.blocks {
             if remaining < block.frames.len() {
-                return block.frames.frame_with_cell(remaining);
+                return Ok((&block.frames, remaining));
             }
             remaining -= block.frames.len();
         }

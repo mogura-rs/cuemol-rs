@@ -9,8 +9,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source = args.next().ok_or("expected memory or a trajectory path")?;
     let atoms: usize = args.next().ok_or("expected atom count")?.parse()?;
     let iterations: usize = args.next().as_deref().unwrap_or("32").parse()?;
-    if atoms == 0 || atoms > i32::MAX as usize || iterations == 0 {
+    let average: usize = args.next().as_deref().unwrap_or("0").parse()?;
+    let memory_frames: usize = args.next().as_deref().unwrap_or("4").parse()?;
+    if atoms == 0 || atoms > i32::MAX as usize || iterations == 0 || memory_frames == 0 {
         return Err("atom count and iteration count must be positive".into());
+    }
+    if average > i32::MAX as usize {
+        return Err("averaging window exceeds the script property range".into());
     }
     let template = read_pdb_str(
         "HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n",
@@ -34,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if source == "memory" {
         app.set_object_trajectory(
             object,
-            (0..4)
+            (0..memory_frames)
                 .map(|frame| {
                     (0..atoms)
                         .map(|index| Vector4::new3(index as f64 * 0.125, frame as f64, -0.25))
@@ -47,10 +52,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let load_ms = started.elapsed().as_secs_f64() * 1000.;
     let frames = app.trajectory_len(object);
+    if average > 0 {
+        #[cfg(feature = "scripting")]
+        app.run_script_js(&format!(
+            "cuemol.getObject({}).frame_aver_size={average};",
+            object.get()
+        ))?;
+        #[cfg(not(feature = "scripting"))]
+        return Err("averaging measurements require the scripting feature".into());
+    }
     let mut elapsed = Duration::ZERO;
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     for iteration in 0..iterations {
-        let index = (iteration * 7) % frames;
+        let index = (iteration * if frames > 4 { 104729 } else { 7 }) % frames;
         let started = Instant::now();
         app.apply_trajectory_frame(object, index)?;
         elapsed += started.elapsed();
@@ -71,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!(
-        "{{\"atoms\":{atoms},\"frames\":{frames},\"iterations\":{iterations},\"load_ms\":{load_ms},\"apply_ms\":{},\"hash\":\"{:016x}\"}}",
+        "{{\"atoms\":{atoms},\"frames\":{frames},\"average\":{average},\"iterations\":{iterations},\"load_ms\":{load_ms},\"apply_ms\":{},\"hash\":\"{:016x}\"}}",
         elapsed.as_secs_f64() * 1000.,
         hash.finish()
     );

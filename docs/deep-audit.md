@@ -13,7 +13,7 @@ requests remain outside tests under the repository instructions.
 | Area | Required checks | Current evidence |
 | --- | --- | --- |
 | Large molecules | Load, topology, secondary structure, base pairs, edits, serialization and unchanged snapshots | Indexed topology, residue-property lookup, unchanged-edit snapshots and large DNA pairing pass the comparisons below. Frontend integration remains part of the combined-operation checks. |
-| Long trajectories | Indexed reads, random seek, averaging, selection, append, playback, Undo/Redo and bounded retention | Open. |
+| Long trajectories | Indexed reads, random seek, averaging, selection, append, playback, Undo/Redo and bounded retention | Averaging and selection pass exact-coordinate, cell and failure checks across storage/block types. The 2,000-frame indexed run below visits every frame. Frontend repetition and final broad checks remain open. |
 | Maps and surfaces | Large grids, repeated replacement, cancellation, failed inputs, geometry and memory retention | Open. |
 | Input boundaries | Truncated, malformed and non-finite inputs; failed loads preserve the existing scene | Extreme-coordinate overflow and invalid hydrogen-bond geometry are reproduced and fixed below. Broader reader and transactional-load checks remain open. |
 | Combined scene edits | Multiple scenes, selection, cameras, animation, Undo/Redo and save/reload | Open. |
@@ -144,3 +144,48 @@ Evidence is under `.cache/deep-audit/basepair-index`. The portable helpers are
 `scripts/export-reference-base-pairs.mjs` and the `base_pair_check` example.
 The reference export runs with the reference application's Node runtime and
 does not modify its installation or source checkout.
+
+## Trajectory averaging and selected coordinates
+
+The previous averaging path decoded the requested center frame twice and
+materialized every contributing frame as a full double-precision vector array.
+Load selections also converted all source atoms before keeping the selected
+ones. The shared reader now borrows memory/owned frames, decodes each file frame
+once and adds coordinates directly to one output array. Selection maps are
+composed before conversion. Summation order, floating-point bits, center-frame
+cell parameters and transactional application are preserved. Normal playback
+without averaging keeps its existing direct path.
+
+Three fresh processes per version alternate order. An averaging radius of four
+uses up to nine frames, with shorter windows at the ends. The 2,000-frame DCD
+contains 20,000 atoms per frame and occupies about 458 MiB; a coprime seek step
+visits every frame. Hashing checks all coordinates after each application but is
+excluded from the reported application time, as is rendering.
+
+| Source | Atoms / frames / updates | Application time, before/after (ms) | Peak RSS, before/after (MiB) |
+| --- | --- | --- | --- |
+| Memory | 20,000 / 64 / 64 | 17.0 / 10.9 | 63.84 / 63.39 |
+| Indexed DCD | 20,000 / 64 / 64 | 47.2 / 39.1 | 24.61 / 24.38 |
+| Memory | 200,000 / 32 / 32 | 117.9 / 77.8 | 325.73 / 319.70 |
+| Indexed DCD | 200,000 / 32 / 32 | 274.2 / 222.4 | 135.33 / 129.30 |
+| Indexed DCD | 20,000 / 2,000 / 2,000 | 1,546 / 1,305 | 24.66 / 24.39 |
+
+All coordinate hashes match, including memory-versus-file comparisons. An
+additional five-process comparison of 1,024 unaveraged memory updates measures
+35.45/35.85 ms, with overlapping ranges of 34.77-36.03/34.80-36.20 ms. It does
+not establish a speedup for the unchanged path. The first averaging candidate
+reduced allocation but regressed small-frame timing; moving format dispatch
+outside the atom loop produced the final results above. Its diagnostic results
+remain separate from the final measurements.
+
+Focused tests cover nested selections with repeated/reordered atoms, owned,
+memory and indexed data, windows crossing block boundaries, signed zero, very
+large windows, end frames and differing cell metadata. Truncating an already
+indexed file causes an error while preserving coordinates, cell, frame index
+and movement generation. Existing script checks cover selection, averaging,
+append/reorder/remove and Undo. Raw measurements are retained in
+`.cache/deep-audit/trajectory/paired.json` and `direct-paired.json`. The expanded
+`benchmark-trajectory-playback.py` accepts frame count, averaging radius and
+storage modes; averaging requires building the example with `scripting`.
+The full desktop-core suite with scripting and the MD-tools suite pass 440
+checks across 31 groups, with zero failures or ignored cases.
