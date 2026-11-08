@@ -33,7 +33,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     rc::Rc,
 };
-use trajectory::{BrowserTrajectory, BrowserTrajectoryGroup};
+use trajectory::{BrowserTrajectory, BrowserTrajectoryGroup, DecodedFrame};
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace=cuemolOidn,js_name=cancel)]
@@ -57,16 +57,11 @@ enum Event {
     Input(Value),
     AgentStart(String, cuemol_agent::Settings, String),
     AgentCancel,
-    ConsoleFrame(
-        u64,
-        Uid,
-        usize,
-        Result<cuemol_mdtools::TrajectoryFrame, String>,
-    ),
+    ConsoleFrame(u64, Uid, usize, Result<DecodedFrame, String>),
     AgentFrame(
         Uid,
         usize,
-        Result<cuemol_mdtools::TrajectoryFrame, String>,
+        Result<DecodedFrame, String>,
         cuemol_agent::ToolReply,
         u64,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -90,12 +85,7 @@ enum Event {
     Data(String, Vec<u8>),
     ActionImportError(String),
     Trajectory(u64, Uid, BrowserTrajectory, cuemol_mdtools::TrajectoryFrame),
-    Frame(
-        Uid,
-        usize,
-        Result<cuemol_mdtools::TrajectoryFrame, String>,
-        u64,
-    ),
+    Frame(Uid, usize, Result<DecodedFrame, String>, u64),
     Command(u32, String, Value),
     Rendered(cuemol_core::Result<Value>, Option<String>, bool),
     PngExported(cuemol_core::Result<Vec<u8>>, String),
@@ -372,6 +362,7 @@ struct App {
     source_batch: Option<Rc<RefCell<cuemol_desktop_core::FileOpenBatch>>>,
     frame: usize,
     busy: bool,
+    frame_read: Option<(u64, Arc<AtomicBool>)>,
     last_command: u32,
     render_cancel: Option<Arc<AtomicBool>>,
     movie: movie::Movie,
@@ -598,6 +589,7 @@ impl App {
             source_batch: None,
             frame: 0,
             busy: false,
+            frame_read: None,
             last_command: 0,
             render_cancel: None,
             movie: movie::Movie::default(),
@@ -719,6 +711,7 @@ impl App {
             self.cancel_console("Scene changed outside the console; remaining commands cancelled.");
         }
         if name == "cancel_load" {
+            self.cancel_frame_read();
             self.cancel_load();
             return;
         }
@@ -780,12 +773,19 @@ impl App {
             return;
         }
         if name == "set_frame" {
+            if let Err(error) = cuemol_command::validate_args(name, &args) {
+                self.message = error;
+                return;
+            }
             if let Some(id) = args["objId"].as_u64().map(Uid::new) {
                 if self.trajectories.contains_key(&id) {
                     if let Some(index) =
                         args["frame"].as_u64().and_then(|v| usize::try_from(v).ok())
                     {
-                        self.request_object_frame(id, index);
+                        match trajectory::average_radius(&args) {
+                            Ok(radius) => self.request_object_frame(id, index, radius),
+                            Err(error) => self.message = error,
+                        }
                     } else {
                         self.message = "Frame out of range".into();
                     }
@@ -967,11 +967,7 @@ impl App {
                     if !self.agent.changed_scene {
                         self.agent_history = Some(self.capture_history());
                     }
-                    let result = result.and_then(|frame| {
-                        self.state
-                            .apply_coordinate_frame(id, &frame)
-                            .map_err(|e| e.to_string())
-                    });
+                    let result = result.and_then(|frame| frame.apply(&mut self.state, id));
                     if result.is_ok() {
                         self.set_trajectory_frame_index(id, index);
                         self.dirty = true;
@@ -1160,16 +1156,20 @@ impl App {
                     self.message = format!("Indexed {added} frames; {} frames across all blocks. Coordinates are read one frame at a time.", previous.0 + added);
                 }
                 Event::Frame(id, index, result, revision) => {
+                    let cancelled = self
+                        .frame_read
+                        .take()
+                        .is_some_and(|(_, flag)| flag.load(Ordering::Relaxed));
                     if revision != self.revision {
                         self.busy = false;
                         continue;
                     }
                     self.busy = false;
-                    match result.and_then(|frame| {
-                        self.state
-                            .apply_coordinate_frame(id, &frame)
-                            .map_err(|error| error.to_string())
-                    }) {
+                    if cancelled {
+                        self.message = "Frame reading cancelled".into();
+                        continue;
+                    }
+                    match result.and_then(|frame| frame.apply(&mut self.state, id)) {
                         Ok(()) => {
                             self.revision = self.revision.wrapping_add(1);
                             self.set_trajectory_frame_index(id, index);
@@ -1290,11 +1290,18 @@ impl App {
 
     fn request_frame(&mut self, index: usize) {
         if let Some((id, _, _)) = self.trajectory_info() {
-            self.request_object_frame(id, index);
+            self.request_object_frame(id, index, None);
         }
     }
 
-    fn request_object_frame(&mut self, id: Uid, index: usize) {
+    fn cancel_frame_read(&mut self) {
+        if let Some((_, cancel)) = &self.frame_read {
+            cancel.store(true, Ordering::Relaxed);
+            self.playing = false;
+        }
+    }
+
+    fn request_object_frame(&mut self, id: Uid, index: usize, radius: Option<usize>) {
         if self.busy {
             return;
         }
@@ -1305,9 +1312,21 @@ impl App {
             self.message = "Frame out of range".into();
             return;
         }
-        let native_count = self.state.trajectory_len(id);
-        if index < native_count {
-            match self.state.apply_trajectory_frame(id, index) {
+        let request = match self.browser_frame_request(id, index, radius) {
+            Ok(request) => request,
+            Err(error) => {
+                self.message = error;
+                return;
+            }
+        };
+        let Some(request) = request else {
+            let result = match radius {
+                Some(radius) => self
+                    .state
+                    .apply_trajectory_frame_with_average(id, index, radius),
+                None => self.state.apply_trajectory_frame(id, index),
+            };
+            match result {
                 Ok(()) => {
                     self.set_trajectory_frame_index(id, index);
                     self.message = json!({"objectId": id.get(), "frame": index}).to_string();
@@ -1320,21 +1339,16 @@ impl App {
                 }
             }
             return;
-        }
-        let Some((source, local_index)) = self
-            .trajectories
-            .get(&id)
-            .and_then(|group| group.source(index - native_count))
-        else {
-            return;
         };
         self.busy = true;
         let revision = self.revision;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.frame_read = Some((revision, cancelled.clone()));
         spawn_local(async move {
             enqueue(Event::Frame(
                 id,
                 index,
-                source.frame(local_index).await.map_err(js_error),
+                request.read(|| cancelled.load(Ordering::Relaxed)).await,
                 revision,
             ));
         });
@@ -1694,6 +1708,7 @@ impl eframe::App for App {
             self.navigation.set_tool(tool);
         }
         if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.cancel_frame_read();
             self.cancel_image_export();
             self.cancel_load();
             self.navigation.cancel();
@@ -1761,6 +1776,11 @@ impl eframe::App for App {
         }
         self.clipboard_focus.end_frame(ctx);
         self.clipboard_keyboard(ctx);
+        if let Some((revision, cancel)) = &self.frame_read {
+            if *revision != self.revision {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        }
         let state = cuemol_command::call_tool(
             &mut self.state,
             &mut self.camera,

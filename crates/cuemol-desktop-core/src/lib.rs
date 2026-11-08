@@ -485,6 +485,21 @@ struct GuiTrajectoryData {
     atom_indices: Option<std::sync::Arc<Vec<usize>>>,
 }
 
+/// An immutable view of retained trajectory blocks for asynchronous frontends.
+#[derive(Debug, Clone)]
+pub struct TrajectoryFrameReader(GuiTrajectoryData);
+
+impl TrajectoryFrameReader {
+    pub fn frame_count(&self) -> usize {
+        self.0.frame_count()
+    }
+
+    /// Read one frame without applying the object's averaging setting.
+    pub fn read_frame(&self, index: usize) -> Result<(Vec<Vector4>, Option<[f64; 6]>)> {
+        self.0.raw_frame_with_cell(index)
+    }
+}
+
 #[derive(Debug, Clone)]
 enum GuiTrajectoryFrames {
     Memory(std::sync::Arc<Vec<Vec<Vector4>>>),
@@ -594,8 +609,12 @@ impl GuiTrajectoryData {
         Ok(block)
     }
 
-    fn frame_with_cell(&self, index: usize) -> Result<(Vec<Vector4>, Option<[f64; 6]>)> {
-        if self.frame_average_size == 0 {
+    fn frame_with_average(
+        &self,
+        index: usize,
+        radius: usize,
+    ) -> Result<(Vec<Vector4>, Option<[f64; 6]>)> {
+        if radius == 0 {
             return self.raw_frame_with_cell(index);
         }
         let count = self.frame_count();
@@ -604,8 +623,8 @@ impl GuiTrajectoryData {
         }
         let mut positions = Vec::new();
         let mut cell = None;
-        let start = index.saturating_sub(self.frame_average_size);
-        let end = index.saturating_add(self.frame_average_size).min(count - 1);
+        let start = index.saturating_sub(radius);
+        let end = index.saturating_add(radius).min(count - 1);
         for frame in start..=end {
             let (block, local_index) = self.frame_location(frame)?;
             let frame_cell = block.accumulate_frame(local_index, &mut positions, frame == start)?;
@@ -621,7 +640,16 @@ impl GuiTrajectoryData {
     }
 
     fn apply_frame(&mut self, molecule: &mut MolCoord, index: usize) -> Result<()> {
-        if self.frame_average_size == 0 {
+        self.apply_frame_with_average(molecule, index, self.frame_average_size)
+    }
+
+    fn apply_frame_with_average(
+        &mut self,
+        molecule: &mut MolCoord,
+        index: usize,
+        radius: usize,
+    ) -> Result<()> {
+        if radius == 0 {
             let mut remaining = index;
             for block in &self.blocks {
                 if remaining < block.frames.len() {
@@ -633,7 +661,7 @@ impl GuiTrajectoryData {
             }
             return Err(CueMolError::not_found("trajectory frame"));
         }
-        let (positions, cell) = self.frame_with_cell(index)?;
+        let (positions, cell) = self.frame_with_average(index, radius)?;
         if positions.len() != molecule.atom_count() {
             return Err(CueMolError::invalid_argument(
                 "trajectory atom count does not match topology",
@@ -8364,6 +8392,13 @@ impl DesktopAppState {
             .map(|trajectory| (trajectory.current_frame, trajectory.frame_count()))
     }
 
+    pub fn trajectory_frame_reader(&self, object_uid: Uid) -> Option<TrajectoryFrameReader> {
+        self.trajectories
+            .get(&object_uid)
+            .cloned()
+            .map(TrajectoryFrameReader)
+    }
+
     pub fn trajectory_summaries(&self, scene_uid: Uid) -> Vec<GuiTrajectorySummary> {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return Vec::new();
@@ -8400,6 +8435,25 @@ impl DesktopAppState {
             .object_mut(object_uid)
             .ok_or_else(|| CueMolError::not_found("trajectory object"))?;
         trajectory.apply_frame(object.mol_mut(), index)
+    }
+
+    /// Average only this display request; retain the object's playback setting.
+    pub fn apply_trajectory_frame_with_average(
+        &mut self,
+        object_uid: Uid,
+        index: usize,
+        radius: usize,
+    ) -> Result<()> {
+        let trajectory = self
+            .trajectories
+            .get_mut(&object_uid)
+            .ok_or_else(|| CueMolError::not_found("trajectory"))?;
+        let object = self
+            .command_manager
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::not_found("trajectory object"))?;
+        trajectory.apply_frame_with_average(object.mol_mut(), index, radius)
     }
 
     /// Apply the trajectory frame at `fraction` (0..1) to an object's atoms — overwrites

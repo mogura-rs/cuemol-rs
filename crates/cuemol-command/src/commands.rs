@@ -395,7 +395,23 @@ pub fn call_tool(
             Ok(json!({"objectId":loaded.object_uid.get(),"frames":loaded.frame_count}))
         }
         "append_trajectory" => {let result=state.append_trajectory_block(uid(args,"objId")?,text(args,"path")?,integer(args,"stride",1)?)?;Ok(json!({"objectId":result.object_uid.get(),"frames":result.frame_count}))}
-        "set_frame" => {let object=uid(args,"objId")?;let frame=integer(args,"frame",0)?;if state.object_has_trajectory(object){state.apply_trajectory_frame(object,frame)?;}else{state.apply_morph_frame(object,frame as f64)?;}Ok(json!({"frame":args["frame"]}))}
+        "set_frame" => {
+            let object = uid(args, "objId")?;
+            let frame = integer(args, "frame", 0)?;
+            if state.object_has_trajectory(object) {
+                if args.get("averageRadius").is_some() {
+                    state.apply_trajectory_frame_with_average(object, frame, integer(args, "averageRadius", 0)?)?;
+                } else {
+                    state.apply_trajectory_frame(object, frame)?;
+                }
+            } else {
+                if args.get("averageRadius").is_some() {
+                    return Err(CueMolError::invalid_argument("frame averaging requires a trajectory"));
+                }
+                state.apply_morph_frame(object, frame as f64)?;
+            }
+            Ok(json!({"frame":frame}))
+        }
         "get_renderer_property" | "set_renderer_property" => {
             let id=uid(args,"rendId")?;let prop=text(args,"prop")?;
             if name=="set_renderer_property" {crate::nodes::set_renderer_property(state,id,prop,text(args,"value")?)?;}

@@ -141,7 +141,136 @@ async function holdFrame(page, name, offset) {
   }, {name, offset});
 }
 
+async function consoleInput(page, source) {
+  const click = async name => {
+    await expect.poll(() => page.evaluate(name => !!window.cuemol.status().ui.rects[name], name)).toBe(true);
+    const [x,y,w,h] = await page.evaluate(name => window.cuemol.status().ui.rects[name], name);
+    await page.mouse.click(x + w / 2, y + h / 2);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  };
+  await click('Console');
+  await click('Console input');
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.insertText(source);
+  await page.keyboard.press('Enter');
+}
+
 for (const backend of ['webgl', 'webgpu']) {
+test(`console averaging ${backend} preserves existing undo and stops pending reads`, async ({page}) => {
+  const original = await ready(page, 3, backend);
+  const object = original.scene.objects[0].id;
+  await load(page, 'console.dcd', dcd(3));
+  await call(page, 'clear_undo');
+  await call(page, 'rename_node', {nodeType: 'object', nodeId: object, name: 'sentinel'});
+  await consoleInput(page, `set_frame ${object}, 0, averageRadius=1`);
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toBe('Console executed');
+  const x = async () => Number(JSON.parse((await call(page, 'execute_script', {
+    source: `print(cuemol.getObject(${object}).getAtomByID(1).pos.x);`,
+  })).message).log.trim());
+  expect(await x()).toBe(0.5);
+  await call(page, 'undo');
+  expect((await page.evaluate(() => window.cuemol.status())).scene.objects[0].name).toBe('topology.pdb');
+  expect(await x()).toBe(0.5);
+  await call(page, 'redo');
+  expect((await page.evaluate(() => window.cuemol.status())).scene.objects[0].name).toBe('sentinel');
+  expect(await x()).toBe(0.5);
+  await page.evaluate(() => {
+    const slice = File.prototype.slice;
+    window.consoleFrameReads = 0;
+    File.prototype.slice = function(...args) {
+      if (this.name === 'console.dcd') window.consoleFrameReads++;
+      return slice.apply(this, args);
+    };
+  });
+  await holdFrame(page, 'console.dcd', 176);
+  try {
+    await consoleInput(page, `set_frame ${object}, 1, averageRadius=1`);
+    await expect.poll(() => page.evaluate(() => window.frameGate.held)).toBe(true);
+    const [a,b,w,h] = await page.evaluate(() => window.cuemol.status().ui.rects['Console Stop']);
+    await page.mouse.click(a + w / 2, b + h / 2);
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toContain('Console stopped');
+    await page.evaluate(() => window.frameGate.release());
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    expect(await page.evaluate(() => window.consoleFrameReads)).toBe(2);
+    expect(await x()).toBe(0.5);
+  } finally {
+    await page.evaluate(() => window.frameGate.release());
+  }
+});
+
+for (const interruption of ['cancel', 'edit']) {
+test(`interrupted averaging ${backend} ${interruption} stops reads and preserves the visible frame`, async ({page}) => {
+  const original = await ready(page, 3, backend);
+  const object = original.scene.objects[0].id;
+  await load(page, 'average.dcd', dcd(20));
+  await call(page, 'clear_undo');
+  await page.evaluate(() => {
+    const slice = File.prototype.slice;
+    window.averageReads = 0;
+    File.prototype.slice = function(...args) {
+      if (this.name === 'average.dcd') window.averageReads++;
+      return slice.apply(this, args);
+    };
+  });
+  await holdFrame(page, 'average.dcd', 176);
+  try {
+    await page.evaluate(object => window.cuemol.command('set_frame', {objId: object, frame: 10, averageRadius: 20}), object);
+    await expect.poll(() => page.evaluate(() => window.frameGate.held)).toBe(true);
+    const command = await page.evaluate(({object, interruption}) => interruption === 'cancel'
+      ? window.cuemol.command('cancel_load', {})
+      : window.cuemol.command('rename_node', {nodeType: 'object', nodeId: object, name: 'newer edit'}), {object, interruption});
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().lastCommand)).toBe(command);
+    const message = (await page.evaluate(() => window.cuemol.status())).message;
+    await page.evaluate(() => window.frameGate.release());
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().busy)).toBe(false);
+    const after = await page.evaluate(() => window.cuemol.status());
+    expect(after.frame).toBe(0);
+    expect(await page.evaluate(() => window.averageReads)).toBe(2);
+    if (interruption === 'cancel') expect(after.message).toContain('cancelled');
+    else expect(after.message).toBe(message);
+    const position = await call(page, 'execute_script', {source: `print(cuemol.getObject(${object}).getAtomByID(1).pos.x);`});
+    expect(Number(JSON.parse(position.message).log.trim())).toBe(0);
+    if (interruption === 'edit') {
+      await call(page, 'undo');
+      expect((await page.evaluate(() => window.cuemol.status())).scene.objects[0].name).toBe('topology.pdb');
+    }
+    await call(page, 'set_frame', {objId: object, frame: 10, averageRadius: 20});
+    const averaged = await call(page, 'execute_script', {source: `print(cuemol.getObject(${object}).getAtomByID(1).pos.x);`});
+    expect(Number(JSON.parse(averaged.message).log.trim())).toBe(9.5);
+  } finally {
+    await page.evaluate(() => window.frameGate.release());
+  }
+});
+}
+
+test(`a queued trajectory import ${backend} waits for the pending frame`, async ({page}) => {
+  const original = await ready(page, 3, backend);
+  const object = original.scene.objects[0].id;
+  await load(page, 'old.dcd', dcd(2));
+  await holdFrame(page, 'old.dcd', 176);
+  await page.evaluate(object => window.cuemol.command('set_frame', {objId: object, frame: 1}), object);
+  await expect.poll(() => page.evaluate(() => window.frameGate.held)).toBe(true);
+  await page.evaluate(() => { window.oldFrameGate = window.frameGate; });
+  await holdFrame(page, 'new.xtc', 0);
+  try {
+    await load(page, 'new.xtc', xtc(3), {accept: false});
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    expect(await page.evaluate(() => window.frameGate.held)).toBe(false);
+    await page.evaluate(() => window.oldFrameGate.release());
+    await expect.poll(() => page.evaluate(() => window.frameGate.held)).toBe(true);
+    const pending = await page.evaluate(() => window.cuemol.status());
+    expect(pending.busy).toBe(true);
+    expect(pending.frame).toBe(1);
+    await page.evaluate(() => window.frameGate.release());
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().busy)).toBe(false);
+    expect(JSON.parse((await call(page, 'list_trajectories')).message).trajectories[0].frames).toBe(5);
+    await call(page, 'set_frame', {objId: object, frame: 4});
+    expect((await page.evaluate(() => window.cuemol.status())).frame).toBe(4);
+  } finally {
+    await page.evaluate(() => { window.oldFrameGate.release(); window.frameGate.release(); });
+  }
+});
+
 test(`mixed binary trajectories ${backend} preserve coordinates and cells through scene restoration`, async ({page}) => {
   const state = await ready(page, 3, backend);
   let object = state.scene.objects[0].id;
@@ -150,8 +279,10 @@ test(`mixed binary trajectories ${backend} preserve coordinates and cells throug
     await load(page, name, bytes);
     expect((await page.evaluate(() => window.cuemol.status())).message).toContain('Indexed 3 frames');
   }
-  const snapshot = async frame => {
-    await call(page, 'set_frame', {objId: object, frame});
+  const snapshot = async (frame, averageRadius) => {
+    const args = {objId: object, frame};
+    if (averageRadius !== undefined) args.averageRadius = averageRadius;
+    await call(page, 'set_frame', args);
     const result = await call(page, 'execute_script', {source: `
       var o = cuemol.getObject(${object}), c = o.getExtData('CrystalInfo');
       print(JSON.stringify({positions: [1,2,3].map(function(i) {
@@ -173,6 +304,14 @@ test(`mixed binary trajectories ${backend} preserve coordinates and cells throug
     expect(before[9 + frame].positions[0]).toEqual([frame / 4, (frame + 1) / 4, (frame + 2) / 4]);
     expect(before[9 + frame].cell).toEqual([30 + frame, 40, 50, 90, 90, 90]);
   }
+  const averaged = (frames, index, radius) => {
+    const window = frames.slice(Math.max(0, index - radius), Math.min(frames.length, index + radius + 1));
+    return {cell: frames[index].cell, positions: frames[index].positions.map((_, atom) =>
+      [0,1,2].map(axis => window.reduce((sum, frame) => sum + frame.positions[atom][axis], 0) * (1 / window.length)))};
+  };
+  for (const frame of [0, 2, 3, 5, 8, 11]) {
+    for (const radius of [1, 100]) expect(await snapshot(frame, radius)).toEqual(averaged(before, frame, radius));
+  }
   const pending = page.waitForEvent('download');
   await call(page, 'save_scene', {path: 'mixed.qsc', embedAll: true, version: 'QDF1', compress: 'gzip', base64: true});
   const stream = await (await pending).createReadStream(), chunks = [];
@@ -183,6 +322,18 @@ test(`mixed binary trajectories ${backend} preserve coordinates and cells throug
   object = (await page.evaluate(() => window.cuemol.status())).scene.objects[0].id;
   expect(JSON.parse((await call(page, 'list_trajectories')).message).trajectories[0].frames).toBe(12);
   for (let frame = 11; frame >= 0; frame--) expect(await snapshot(frame)).toEqual(before[frame]);
+  for (const frame of [0, 2, 3, 5, 8, 11]) {
+    expect(await snapshot(frame, 1)).toEqual(averaged(before, frame, 1));
+  }
+  const [x,y,w,h] = await page.evaluate(id => window.cuemol.status().ui.rects[`object:${id}`], object);
+  await page.mouse.click(x + w / 2, y + h / 2);
+  await load(page, 'appended.xtc', xtc(3));
+  expect((await page.evaluate(() => window.cuemol.status())).message).toContain('Indexed 3 frames; 15 frames');
+  const combined = before.concat(before.slice(0, 3));
+  for (const frame of [11, 12, 14]) {
+    expect(await snapshot(frame, 1)).toEqual(averaged(combined, frame, 1));
+  }
+  expect(await snapshot(14)).toEqual(combined[14]);
 });
 
 test(`overflowing XTC lengths ${backend} terminate without repeated indexing or history changes`, async ({page}) => {
@@ -285,6 +436,9 @@ test(`a superseded frame failure ${backend} preserves the newer edit and its res
     const failed = await call(page, 'set_frame', {objId: object, frame: 1});
     expect(failed.message).toMatch(/DCD|record/i);
     expect(failed.frame).toBe(0);
+    const average = await call(page, 'set_frame', {objId: object, frame: 0, averageRadius: 1});
+    expect(average.message).toMatch(/DCD|record/i);
+    expect(average.frame).toBe(0);
     await call(page, 'set_frame', {objId: object, frame: 0});
   } finally {
     await page.evaluate(() => window.frameGate.release());

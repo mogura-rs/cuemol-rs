@@ -26,29 +26,34 @@ impl App {
             }
             if name == "set_frame" {
                 if let Some(id) = arguments["objId"].as_u64().map(Uid::new) {
-                    if let Some(group) = self.trajectories.get(&id) {
-                        let frame = arguments["frame"]
+                    if self.trajectories.contains_key(&id) {
+                        let index = arguments["frame"]
                             .as_u64()
                             .and_then(|v| usize::try_from(v).ok())
                             .unwrap_or(usize::MAX);
-                        let native_count = self.state.trajectory_len(id);
-                        if frame >= native_count + group.frame_count() {
-                            let _ = reply.try_send(Err("Frame out of range".into()));
-                            continue;
-                        }
-                        if let Some((source, local_index)) = frame
-                            .checked_sub(native_count)
-                            .and_then(|index| group.source(index))
+                        match trajectory::average_radius(&arguments)
+                            .and_then(|radius| self.browser_frame_request(id, index, radius))
                         {
-                            let revision = self.revision;
-                            let cancelled = self.agent.operation_cancel();
-                            spawn_local(async move {
-                                let result = source.frame(local_index).await.map_err(js_error);
-                                enqueue(Event::AgentFrame(
-                                    id, frame, result, reply, revision, cancelled,
-                                ));
-                            });
-                            continue;
+                            Ok(Some(request)) => {
+                                let revision = self.revision;
+                                let cancelled = self.agent.operation_cancel();
+                                spawn_local(async move {
+                                    let result = request
+                                        .read(|| {
+                                            cancelled.load(Ordering::Relaxed) || reply.is_closed()
+                                        })
+                                        .await;
+                                    enqueue(Event::AgentFrame(
+                                        id, index, result, reply, revision, cancelled,
+                                    ));
+                                });
+                                continue;
+                            }
+                            Err(error) => {
+                                let _ = reply.try_send(Err(error));
+                                continue;
+                            }
+                            Ok(None) => {}
                         }
                     }
                 }

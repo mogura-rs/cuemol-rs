@@ -239,6 +239,23 @@ impl DesktopAppState {
         object.mol_mut().fire_atoms_moved();
         Ok(())
     }
+
+    /// Apply a complete frame computed by an asynchronous frontend.
+    pub fn apply_coordinate_positions(
+        &mut self,
+        object_uid: Uid,
+        positions: Vec<Vector4>,
+        cell: Option<[f64; 6]>,
+    ) -> Result<()> {
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::not_found("molecule"))?;
+        object.mol_mut().set_positions(positions)?;
+        trajectory_io::apply_cell(object.mol_mut(), cell);
+        object.mol_mut().fire_atoms_moved();
+        Ok(())
+    }
 }
 
 #[cfg(test)]

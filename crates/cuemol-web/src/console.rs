@@ -13,6 +13,13 @@ pub(super) struct ConsoleExecution {
     camera: Camera,
     waiting: bool,
     changed: bool,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Drop for ConsoleExecution {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
 }
 
 impl App {
@@ -47,6 +54,7 @@ impl App {
             camera: self.camera.clone(),
             waiting: false,
             changed: false,
+            cancelled: Arc::new(AtomicBool::new(false)),
         });
         let context = CONTEXT.with(|ctx| ctx.borrow().clone()).unwrap_or_default();
         self.poll_console(&context);
@@ -116,6 +124,7 @@ impl App {
             camera: self.camera.clone(),
             waiting: false,
             changed: false,
+            cancelled: Arc::new(AtomicBool::new(false)),
         });
         let context = CONTEXT.with(|ctx| ctx.borrow().clone()).unwrap_or_default();
         self.poll_console(&context);
@@ -197,7 +206,7 @@ impl App {
         generation: u64,
         id: Uid,
         index: usize,
-        result: Result<cuemol_mdtools::TrajectoryFrame, String>,
+        result: Result<DecodedFrame, String>,
     ) {
         if generation != self.console_generation {
             return;
@@ -216,11 +225,7 @@ impl App {
             self.finish_console();
             return;
         }
-        let result = result.and_then(|frame| {
-            self.state
-                .apply_coordinate_frame(id, &frame)
-                .map_err(|e| e.to_string())
-        });
+        let result = result.and_then(|frame| frame.apply(&mut self.state, id));
         match result {
             Ok(()) => {
                 self.set_trajectory_frame_index(id, index);
@@ -338,26 +343,33 @@ impl App {
                                     .as_u64()
                                     .and_then(|value| usize::try_from(value).ok()),
                             ) {
-                                let native = self.state.trajectory_len(id);
-                                if let Some((source, local)) =
-                                    index.checked_sub(native).and_then(|offset| {
-                                        self.trajectories
-                                            .get(&id)
-                                            .and_then(|group| group.source(offset))
-                                    })
-                                {
-                                    let generation = self.console_generation;
-                                    spawn_local(async move {
-                                        enqueue(Event::ConsoleFrame(
-                                            generation,
-                                            id,
-                                            index,
-                                            source.frame(local).await.map_err(js_error),
-                                        ));
-                                    });
-                                    run.waiting = true;
-                                    self.message = "Console loading frame".into();
-                                    break;
+                                match trajectory::average_radius(&args).and_then(|radius| {
+                                    self.browser_frame_request(id, index, radius)
+                                }) {
+                                    Ok(Some(request)) => {
+                                        let generation = self.console_generation;
+                                        let cancelled = run.cancelled.clone();
+                                        spawn_local(async move {
+                                            enqueue(Event::ConsoleFrame(
+                                                generation,
+                                                id,
+                                                index,
+                                                request
+                                                    .read(|| cancelled.load(Ordering::Relaxed))
+                                                    .await,
+                                            ));
+                                        });
+                                        run.waiting = true;
+                                        self.message = "Console loading frame".into();
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        self.logs.push(error);
+                                        self.message = "Console error".into();
+                                        keep = false;
+                                        break;
+                                    }
+                                    Ok(None) => {}
                                 }
                             }
                         }

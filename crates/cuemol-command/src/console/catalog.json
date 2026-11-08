@@ -1934,7 +1934,8 @@
     "group": "other",
     "params": [
       "objId",
-      "frame"
+      "frame",
+      "averageRadius"
     ]
   },
   "set_renderer_property": {

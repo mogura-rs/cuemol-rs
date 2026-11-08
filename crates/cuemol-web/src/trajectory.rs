@@ -3,6 +3,169 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{AbortSignal, File};
 
+pub(super) enum DecodedFrame {
+    Packed(TrajectoryFrame),
+    Positions(Vec<cuemol_core::Vector4>, Option<[f64; 6]>),
+}
+
+impl DecodedFrame {
+    pub fn apply(
+        self,
+        state: &mut cuemol_desktop_core::DesktopAppState,
+        id: cuemol_core::Uid,
+    ) -> Result<(), String> {
+        match self {
+            Self::Packed(frame) => state.apply_coordinate_frame(id, &frame),
+            Self::Positions(positions, cell) => {
+                state.apply_coordinate_positions(id, positions, cell)
+            }
+        }
+        .map_err(|error| error.to_string())
+    }
+
+    fn accumulate(
+        &self,
+        sums: &mut Vec<cuemol_core::Vector4>,
+        first: bool,
+    ) -> Result<Option<[f64; 6]>, String> {
+        let count = match self {
+            Self::Packed(frame) => frame.coordinates.len() / 3,
+            Self::Positions(positions, _) => positions.len(),
+        };
+        if first {
+            sums.resize(count, cuemol_core::Vector4::ZERO);
+        } else if sums.len() != count {
+            return Err("Trajectory atom counts differ".into());
+        }
+        match self {
+            Self::Packed(frame) => {
+                for (sum, xyz) in sums.iter_mut().zip(frame.coordinates.chunks_exact(3)) {
+                    *sum = *sum
+                        + cuemol_core::Vector4::new3(xyz[0] as f64, xyz[1] as f64, xyz[2] as f64);
+                }
+                Ok(frame.cell)
+            }
+            Self::Positions(positions, cell) => {
+                for (sum, position) in sums.iter_mut().zip(positions) {
+                    *sum = *sum + *position;
+                }
+                Ok(*cell)
+            }
+        }
+    }
+}
+
+pub(super) struct FrameRequest {
+    native: Option<cuemol_desktop_core::TrajectoryFrameReader>,
+    browser: BrowserTrajectoryGroup,
+    index: usize,
+    radius: usize,
+    count: usize,
+}
+
+impl FrameRequest {
+    async fn frame(&self, index: usize) -> Result<DecodedFrame, String> {
+        let native_count = self
+            .native
+            .as_ref()
+            .map_or(0, |source| source.frame_count());
+        if index < native_count {
+            return self
+                .native
+                .as_ref()
+                .unwrap()
+                .read_frame(index)
+                .map(|(positions, cell)| DecodedFrame::Positions(positions, cell))
+                .map_err(|error| error.to_string());
+        }
+        let (source, local) = self
+            .browser
+            .source(index - native_count)
+            .ok_or_else(|| "Frame out of range".to_string())?;
+        source
+            .frame(local)
+            .await
+            .map(DecodedFrame::Packed)
+            .map_err(super::js_error)
+    }
+
+    pub async fn read(self, cancelled: impl Fn() -> bool) -> Result<DecodedFrame, String> {
+        let check = || {
+            if cancelled() {
+                Err("Frame reading cancelled".to_string())
+            } else {
+                Ok(())
+            }
+        };
+        check()?;
+        if self.radius == 0 {
+            let frame = self.frame(self.index).await?;
+            check()?;
+            return Ok(frame);
+        }
+        let start = self.index.saturating_sub(self.radius);
+        let end = self.index.saturating_add(self.radius).min(self.count - 1);
+        let mut positions = Vec::new();
+        let mut cell = None;
+        for index in start..=end {
+            check()?;
+            let frame = self.frame(index).await?;
+            check()?;
+            let frame_cell = frame.accumulate(&mut positions, index == start)?;
+            if index == self.index {
+                cell = frame_cell;
+            }
+        }
+        let scale = 1. / (end - start + 1) as f64;
+        for position in &mut positions {
+            *position = position.scale(scale);
+        }
+        Ok(DecodedFrame::Positions(positions, cell))
+    }
+}
+
+pub(super) fn average_radius(args: &serde_json::Value) -> Result<Option<usize>, String> {
+    args.get("averageRadius")
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| "Invalid nonnegative integer: averageRadius".to_string())
+        })
+        .transpose()
+}
+
+impl super::App {
+    pub(super) fn browser_frame_request(
+        &self,
+        id: cuemol_core::Uid,
+        index: usize,
+        radius: Option<usize>,
+    ) -> Result<Option<FrameRequest>, String> {
+        let Some(browser) = self.trajectories.get(&id) else {
+            return Ok(None);
+        };
+        let native = self.state.trajectory_frame_reader(id);
+        let native_count = native.as_ref().map_or(0, |source| source.frame_count());
+        let count = native_count
+            .checked_add(browser.frame_count())
+            .ok_or_else(|| "Trajectory frame count overflow".to_string())?;
+        if index >= count {
+            return Err("Frame out of range".into());
+        }
+        if index < native_count && radius.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(FrameRequest {
+            native,
+            browser: browser.clone(),
+            index,
+            radius: radius.unwrap_or(0),
+            count,
+        }))
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct BrowserTrajectoryGroup {
     pub blocks: Vec<std::rc::Rc<BrowserTrajectory>>,

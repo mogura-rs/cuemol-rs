@@ -1233,7 +1233,7 @@
   },
   {
     "name": "set_frame",
-    "description": "Display an indexed trajectory frame (zero based).",
+    "description": "Display an indexed trajectory frame (zero based). Optional averageRadius averages neighboring coordinates for this request only; the central frame supplies the cell. The window is clipped at the trajectory ends.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1242,6 +1242,10 @@
         },
         "frame": {
           "type": "integer"
+        },
+        "averageRadius": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "required": [

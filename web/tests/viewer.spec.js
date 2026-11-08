@@ -616,7 +616,7 @@ test('browser agent cancellation keeps completed edits and rejects late tool cal
   state=await call(page,'undo');expect(state.scene.objects[0].name).not.toBe('Completed edit');
 });
 
-test('browser agent seeks an indexed trajectory and undo restores the previous coordinates',async({page})=>{
+test('browser agent averages an indexed trajectory and undo restores the previous coordinates',async({page})=>{
   await enablePlugins(page,['agent']);
   await ready(page);await load(page,'topology.pdb',Buffer.from(structure));
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
@@ -627,15 +627,19 @@ test('browser agent seeks an indexed trajectory and undo restores the previous c
   let round=0;
   await page.route('**/mock-api/responses',route=>{
     round++;
-    const output=round===1?[agentCall('enable_toolsets',{toolsets:['trajectory']},'enable'),agentCall('set_frame',{objId:object,frame:4},'frame')]:[];
+    const output=round===1?[agentCall('enable_toolsets',{toolsets:['trajectory']},'enable'),agentCall('set_frame',{objId:object,frame:4,averageRadius:1},'frame')]:[];
     return route.fulfill({contentType:'text/event-stream',body:agentSse(output)});
   });
   await startAgent(page,'Show frame 4.');
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().frame)).toBe(4);
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().agent.running)).toBe(false);
   expect((await page.evaluate(()=>window.cuemol.status())).agent.messages.some(m=>m.role==='Error')).toBe(false);
+  const x=async()=>Number(JSON.parse((await call(page,'execute_script',{source:`print(cuemol.getObject(${object}).getAtomByID(1).pos.x);`})).message).log.trim());
+  expect(await x()).toBe(3.5);
   expect((await call(page,'undo')).frame).toBe(0);
+  expect(await x()).toBe(0);
   expect((await call(page,'redo')).frame).toBe(4);
+  expect(await x()).toBe(3.5);
 });
 
 test('browser agent cancellation rejects a pending indexed frame after a new turn starts',async({page})=>{
@@ -650,7 +654,7 @@ test('browser agent cancellation rejects a pending indexed frame after a new tur
   await call(page,'set_node_prop',{nodeType:'object',nodeId:object,prop:'name',value:'Undo sentinel'});
   let round=0;
   await page.route('**/mock-api/responses',route=>{
-    const output=++round===1?[agentCall('enable_toolsets',{toolsets:['trajectory']},'enable'),agentCall('set_frame',{objId:object,frame:4},'frame')]:[];
+    const output=++round===1?[agentCall('enable_toolsets',{toolsets:['trajectory']},'enable'),agentCall('set_frame',{objId:object,frame:4,averageRadius:1},'frame')]:[];
     return route.fulfill({contentType:'text/event-stream',body:agentSse(output)});
   });
   await page.evaluate(()=>{

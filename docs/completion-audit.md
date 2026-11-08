@@ -13,10 +13,10 @@ correctness for every input or platform combination.
 
 | Area | Completion criterion | State |
 | --- | --- | --- |
-| Indexed browser trajectories | Reject malformed lengths/counts, stop cancelled reads, preserve later operations and history, and clarify direct-file averaging behavior | Investigating |
+| Indexed browser trajectories | Reject malformed lengths/counts, stop cancelled reads, preserve later operations and history, and clarify direct-file averaging behavior | Complete; direct asynchronous averaging is implemented and checked |
 | Shared trajectory readers | Bound work and allocations for malformed headers and preserve valid coordinate/cell results | Complete; 447 shared checks and 10 focused browser checks passed |
 | Imported surface rendering | Measure repeated parsing and retained binary/text storage; preserve geometry, edits and scene round trips after any change | Pending |
-| Concurrent frontend work | Check superseded frames, scene changes, failure recovery and ownership of busy state | Pending |
+| Concurrent frontend work | Check superseded frames, scene changes, failure recovery and ownership of busy state | Complete for the identified cases; cancellation, queued imports, Console and Agent checks pass |
 | Documentation and requirements | Reconcile current implementation, historical evidence and remaining platform limits | Pending |
 | Final delivery | Complete affected local checks, terminal CI, applicable native packages and the deployed WASM artifact | Pending |
 
@@ -112,3 +112,39 @@ The browser check now passes on WebGL and WebGPU with four concatenated blocks
 (XTC, single/double TRR and NetCDF), checking all positions and cell dimensions
 at all 12 frames before and after embedded QSC restoration. The complete shared
 core/MD run passes 447 tests; the focused browser run passes ten tests.
+
+## Averaging directly indexed browser files
+
+`set_frame` accepts an optional `averageRadius`. For example,
+`{"objId":1,"frame":20,"averageRadius":2}` displays the mean coordinates of
+frames 18 through 22. The window is clipped at either end, and the requested
+center frame supplies the cell. This override applies only to the request;
+it does not change the saved `frame_aver_size` playback setting. An explicit
+zero displays the original frame without an arithmetic round trip.
+
+The native command and asynchronous browser command use the same window and
+double-precision accumulation. The browser retains one accumulator and one
+decoded frame at a time. It handles windows across raw File blocks, restored
+QSC blocks and the boundary between both kinds. A failed neighbor, cancellation
+or newer scene edit leaves the visible coordinates and frame index unchanged.
+Cancellation is checked before and after each file read. Console Stop and
+Agent cancellation stop subsequent reads as well.
+
+The CueMol console accepts `set_frame 1, 20, averageRadius=2`. Ordinary frame
+commands preserve the existing playback policy of creating no undo entry.
+An Agent turn retains its existing single undo entry. Browser File objects do
+not expose synchronous `frame_aver_size` script accessors; use this asynchronous
+command directly, or save and restore an embedded QSC to use the shared
+in-memory trajectory scripting API. Assigning an unknown JavaScript property
+does not attach trajectory data or make that property persistent.
+
+The shared core, MD and command suites pass 772 tests, with four explicitly
+optional external-tool/service checks left for final validation. Twenty focused
+browser cases pass across the full run and four corrected test reruns. The
+test corrections select a topology after QSC reload and respect the existing
+rule that ordinary playback does not create undo entries. Both backends verify
+exact averaged coordinates before/after restoration and across a newly appended
+File block. Cancellation after the second read prevents all later reads; tests
+also cover a malformed neighboring frame, retry, Console Stop, preserved prior
+undo and the Agent's grouped undo. New imports are serialized behind a pending
+frame and retain their busy state while their own read is pending.
