@@ -235,11 +235,7 @@ impl DesktopAppState {
         {
             atom.position = Vector4::new3(p[0] as f64, p[1] as f64, p[2] as f64);
         }
-        if let Some([a, b, c, alpha, beta, gamma]) = frame.cell {
-            object
-                .mol_mut()
-                .set_cell_params(cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma));
-        }
+        trajectory_io::apply_cell(object.mol_mut(), frame.cell);
         object.mol_mut().fire_atoms_moved();
         Ok(())
     }
@@ -509,5 +505,26 @@ mod tests {
         assert_eq!(molecule.atoms()[1].position, Vector4::new3(7.0, 8.0, 9.0));
         assert_eq!(molecule.cell_params().unwrap().b, 40.0);
         assert_eq!(molecule.cell_params().unwrap().beta, 100.0);
+        assert_eq!(molecule.cell_params().unwrap().space_group_number, Some(1));
+        let mut cell = molecule.cell_params().unwrap().clone();
+        cell.space_group_number = Some(19);
+        cell.space_group_name = "P 21 21 21".into();
+        state
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .mol_mut()
+            .set_cell_params(cell);
+        state.apply_coordinate_frame(object_uid, &frame).unwrap();
+        let cell = state
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .mol()
+            .cell_params()
+            .unwrap();
+        assert_eq!(cell.space_group_number, Some(19));
+        assert_eq!(cell.space_group_name, "P 21 21 21");
+        assert!(cuemol_symm::CrystalInfo::from_cell_params(cell).is_some());
     }
 }

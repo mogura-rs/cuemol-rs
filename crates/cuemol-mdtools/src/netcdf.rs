@@ -476,9 +476,21 @@ impl<'a> Netcdf3InStream<'a> {
         let bytes = record
             .get(variable.relative_offset..end)
             .ok_or_else(|| CueMolError::parse("NetCDF3: truncated variable data"))?;
-        let mut values = Vec::with_capacity(variable.value_count);
-        for chunk in bytes.chunks_exact(nc_type_size(variable.data_type)?) {
-            values.push((decode_numeric(variable.data_type, chunk)? * variable.scale) as f32);
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(variable.value_count)
+            .map_err(|_| CueMolError::parse("NetCDF3: coordinate allocation failed"))?;
+        match variable.data_type {
+            NC_FLOAT => values.extend(bytes.chunks_exact(4).map(|word| {
+                (f64::from(f32::from_be_bytes(
+                    word.try_into().expect("four-byte coordinate"),
+                )) * variable.scale) as f32
+            })),
+            NC_DOUBLE => values.extend(bytes.chunks_exact(8).map(|word| {
+                (f64::from_be_bytes(word.try_into().expect("eight-byte coordinate"))
+                    * variable.scale) as f32
+            })),
+            _ => unreachable!("coordinate type was validated"),
         }
         Ok(values)
     }
@@ -739,25 +751,34 @@ pub fn read_amber_netcdf_bytes_with_options(
             )));
         }
     }
-    let atom_indices = options
-        .atom_indices
-        .clone()
-        .unwrap_or_else(|| (0..atom_count).collect());
-    if atom_indices.iter().any(|&index| index >= atom_count) {
+    let atom_indices = options.atom_indices.as_deref();
+    if atom_indices.is_some_and(|indices| indices.iter().any(|&index| index >= atom_count)) {
         return Err(CueMolError::invalid_argument(
             "AMBER NetCDF atom selection index out of range",
         ));
     }
 
-    let mut block = TrajBlock::new(atom_indices.len());
+    let selected_count = atom_indices.map_or(atom_count, <[usize]>::len);
+    let coordinate_count = selected_count
+        .checked_mul(3)
+        .ok_or_else(|| CueMolError::parse("AMBER NetCDF coordinate count overflow"))?;
+    let mut block = TrajBlock::new(selected_count);
     let mut frame_index = 0_usize;
     while let Some(frame) = netcdf.read_frame()? {
         if frame_index.is_multiple_of(options.skip_no) {
-            let mut selected = Vec::with_capacity(atom_indices.len() * 3);
-            for &atom_index in &atom_indices {
-                let offset = atom_index * 3;
-                selected.extend_from_slice(&frame.coordinates[offset..offset + 3]);
-            }
+            let selected = if let Some(indices) = atom_indices {
+                let mut selected = Vec::new();
+                selected
+                    .try_reserve_exact(coordinate_count)
+                    .map_err(|_| CueMolError::parse("AMBER NetCDF coordinate allocation failed"))?;
+                for &atom_index in indices {
+                    let offset = atom_index * 3;
+                    selected.extend_from_slice(&frame.coordinates[offset..offset + 3]);
+                }
+                selected
+            } else {
+                frame.coordinates
+            };
             block.append_frame(selected, frame.cell)?;
         }
         frame_index += 1;

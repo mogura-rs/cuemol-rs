@@ -100,18 +100,34 @@ impl<'a> XdrInStream<'a> {
     }
 
     pub fn read_f32_array(&mut self, count: usize) -> Result<Vec<f32>> {
-        let mut values = Vec::with_capacity(count);
-        for _ in 0..count {
-            values.push(self.read_f32()?);
-        }
+        let bytes = count
+            .checked_mul(4)
+            .ok_or_else(|| CueMolError::parse("XDR coordinate count overflow"))?;
+        let input = self.read_exact(bytes)?;
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(count)
+            .map_err(|_| CueMolError::parse("XDR coordinate allocation failed"))?;
+        values.extend(
+            input
+                .chunks_exact(4)
+                .map(|word| f32::from_be_bytes(word.try_into().expect("four-byte coordinate"))),
+        );
         Ok(values)
     }
 
     pub fn read_f64_array_as_f32(&mut self, count: usize) -> Result<Vec<f32>> {
-        let mut values = Vec::with_capacity(count);
-        for _ in 0..count {
-            values.push(self.read_f64()? as f32);
-        }
+        let bytes = count
+            .checked_mul(8)
+            .ok_or_else(|| CueMolError::parse("XDR coordinate count overflow"))?;
+        let input = self.read_exact(bytes)?;
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(count)
+            .map_err(|_| CueMolError::parse("XDR coordinate allocation failed"))?;
+        values.extend(input.chunks_exact(8).map(|word| {
+            f64::from_be_bytes(word.try_into().expect("eight-byte coordinate")) as f32
+        }));
         Ok(values)
     }
 
@@ -148,6 +164,9 @@ impl<'a> XdrInStream<'a> {
         atom_count: usize,
         long_format: bool,
     ) -> Result<(Vec<f32>, f32)> {
+        let coordinate_count = atom_count
+            .checked_mul(3)
+            .ok_or_else(|| CueMolError::parse("XTC coordinate count overflow"))?;
         let precision = self.read_f32()?;
         if !precision.is_finite() || precision <= 0.0 {
             return Err(CueMolError::parse("XTC coordinate precision is invalid"));
@@ -162,8 +181,15 @@ impl<'a> XdrInStream<'a> {
         }
         let (sizes, bits_per_axis, combined_bits) = coordinate_sizes(min, max)?;
         let compressed = self.read_opaque_with_length(long_format)?;
+        // Each base atom consumes a flag bit; run atoms consume at least nine bits.
+        if atom_count > compressed.len().saturating_mul(8) {
+            return Err(CueMolError::parse("XTC compressed data is truncated"));
+        }
         let mut bits = BitReader::new(compressed);
-        let mut output = Vec::with_capacity(atom_count.saturating_mul(3));
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(coordinate_count)
+            .map_err(|_| CueMolError::parse("XTC coordinate allocation failed"))?;
         let mut encoded_atoms = 0_usize;
         let mut run = 0_usize;
         let mut current_small_index = small_index;
@@ -259,7 +285,7 @@ impl<'a> XdrInStream<'a> {
             }
         }
 
-        if output.len() != atom_count.saturating_mul(3) {
+        if output.len() != coordinate_count {
             return Err(CueMolError::parse(
                 "XTC decompressed coordinate count mismatch",
             ));
@@ -351,14 +377,15 @@ fn decode_mixed_integers(
         return Err(CueMolError::parse("XTC zero mixed-integer coordinate size"));
     }
 
-    let mut bytes = Vec::with_capacity(bit_count.div_ceil(8) as usize);
+    let mut storage = [0_u8; 12];
+    let bytes = storage
+        .get_mut(..bit_count.div_ceil(8) as usize)
+        .ok_or_else(|| CueMolError::parse("XTC mixed integer size overflow"))?;
     let mut remaining = bit_count;
-    while remaining >= 8 {
-        bytes.push(bits.read_bits(8)? as u8);
-        remaining -= 8;
-    }
-    if remaining > 0 {
-        bytes.push(bits.read_bits(remaining)? as u8);
+    for byte in bytes.iter_mut() {
+        let width = remaining.min(8);
+        *byte = bits.read_bits(width)? as u8;
+        remaining -= width;
     }
 
     let mut output = [0_i32; 3];
@@ -487,5 +514,40 @@ mod tests {
     fn distinguishes_clean_end_from_truncated_boundary() {
         assert_eq!(XdrInStream::new(&[]).read_i32_optional().unwrap(), None);
         assert!(XdrInStream::new(&[0, 0, 0]).read_i32_optional().is_err());
+    }
+
+    #[test]
+    fn bulk_arrays_preserve_float_bits_and_double_rounding() {
+        let bits = [
+            0_u32, 0x80000000, 1, 0x80000001, 0x7f7fffff, 0xff7fffff, 0x7f800000, 0xff800000,
+            0x7fc01234, 0xffc05678,
+        ];
+        let bytes = bits
+            .iter()
+            .flat_map(|value| value.to_be_bytes())
+            .collect::<Vec<_>>();
+        let values = XdrInStream::new(&bytes).read_f32_array(bits.len()).unwrap();
+        assert_eq!(
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            bits
+        );
+        let doubles = [0.0_f64, -0.0, 1.0000000596046448, 1.0000001788139343];
+        let bytes = doubles
+            .iter()
+            .flat_map(|value| value.to_be_bytes())
+            .collect::<Vec<_>>();
+        let values = XdrInStream::new(&bytes)
+            .read_f64_array_as_f32(doubles.len())
+            .unwrap();
+        assert_eq!(
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            [0, 0x80000000, 0x3f800000, 0x3f800002]
+        );
     }
 }

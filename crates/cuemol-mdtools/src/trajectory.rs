@@ -10,6 +10,35 @@ use cuemol_qsys::{InOutHandler, ObjReader};
 use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
 
+pub(crate) fn select_scaled_coordinates(
+    mut coordinates: Vec<f32>,
+    atom_indices: Option<&[usize]>,
+    scale: f32,
+) -> Result<Vec<f32>> {
+    let Some(indices) = atom_indices else {
+        for value in &mut coordinates {
+            *value *= scale;
+        }
+        return Ok(coordinates);
+    };
+    let count = indices
+        .len()
+        .checked_mul(3)
+        .ok_or_else(|| CueMolError::parse("selected coordinate count overflow"))?;
+    let mut selected = Vec::new();
+    selected
+        .try_reserve_exact(count)
+        .map_err(|_| CueMolError::parse("selected coordinate allocation failed"))?;
+    for &index in indices {
+        selected.extend(
+            coordinates[index * 3..index * 3 + 3]
+                .iter()
+                .map(|value| value * scale),
+        );
+    }
+    Ok(selected)
+}
+
 /// Shared trajectory-reader properties exposed by the C++ `TrajBlockReader`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrajBlockReader {
@@ -835,20 +864,18 @@ fn read_dcd_stream_with_options(input: impl Read, options: &DcdReadOptions) -> R
         }
     }
 
-    let atom_indices = options
-        .atom_indices
-        .clone()
-        .unwrap_or_else(|| (0..atom_count).collect());
-    if atom_indices.iter().any(|&index| index >= atom_count) {
+    let atom_indices = options.atom_indices.as_deref();
+    if atom_indices.is_some_and(|indices| indices.iter().any(|&index| index >= atom_count)) {
         return Err(CueMolError::invalid_argument(
             "DCD atom selection index out of range",
         ));
     }
 
-    let kept_frames = (frame_count as usize).div_ceil(options.skip_no);
-    let mut block = TrajBlock::new(atom_indices.len());
-    block.frames.reserve(kept_frames);
-    block.cells.reserve(kept_frames);
+    let selected_count = atom_indices.map_or(atom_count, <[usize]>::len);
+    let mut block = TrajBlock::new(selected_count);
+    let coordinate_count = selected_count
+        .checked_mul(3)
+        .ok_or_else(|| CueMolError::parse("DCD coordinate count overflow"))?;
 
     let coordinate_bytes = atom_count
         .checked_mul(4)
@@ -879,18 +906,27 @@ fn read_dcd_stream_with_options(input: impl Read, options: &DcdReadOptions) -> R
         };
 
         let keep = frame_index % options.skip_no == 0;
-        let mut coordinates = if keep {
-            vec![0.0; atom_indices.len() * 3]
-        } else {
-            Vec::new()
-        };
+        let mut coordinates = Vec::new();
         for axis in 0..3 {
             let record = records.next_record(Some(coordinate_bytes))?;
             if keep {
-                for (output_index, &atom_index) in atom_indices.iter().enumerate() {
-                    let offset = atom_index * 4;
-                    coordinates[output_index * 3 + axis] =
-                        decode_f32(&record[offset..offset + 4], endian);
+                if axis == 0 {
+                    coordinates
+                        .try_reserve_exact(coordinate_count)
+                        .map_err(|_| CueMolError::parse("DCD coordinate allocation failed"))?;
+                    coordinates.resize(coordinate_count, 0.0);
+                }
+                if let Some(indices) = atom_indices {
+                    for (output_index, &atom_index) in indices.iter().enumerate() {
+                        let offset = atom_index * 4;
+                        coordinates[output_index * 3 + axis] =
+                            decode_f32(&record[offset..offset + 4], endian);
+                    }
+                } else {
+                    for (point, word) in coordinates.chunks_exact_mut(3).zip(record.chunks_exact(4))
+                    {
+                        point[axis] = decode_f32(word, endian);
+                    }
                 }
             }
         }
@@ -948,10 +984,14 @@ impl<R: Read> FortranRecords<R> {
                     "DCD invalid record length {size} != {expected}"
                 )));
             }
-            self.buffer.resize(size, 0);
-            self.input
-                .read_exact(&mut self.buffer)
+            self.buffer.clear();
+            let copied = (&mut self.input)
+                .take(size as u64)
+                .read_to_end(&mut self.buffer)
                 .map_err(|_| CueMolError::parse("DCD record payload is truncated"))?;
+            if copied != size {
+                return Err(CueMolError::parse("DCD record payload is truncated"));
+            }
         } else {
             let copied = std::io::copy(
                 &mut (&mut self.input).take(size as u64),

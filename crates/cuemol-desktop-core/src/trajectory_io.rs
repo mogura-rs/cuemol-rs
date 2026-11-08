@@ -71,6 +71,22 @@ impl<'a> FrameView<'a> {
     }
 }
 
+pub(super) fn apply_cell(molecule: &mut MolCoord, cell: Option<[f64; 6]>) {
+    let Some([a, b, c, alpha, beta, gamma]) = cell else {
+        return;
+    };
+    let mut updated = cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma);
+    if let Some(previous) = molecule.cell_params() {
+        updated.space_group_name = previous.space_group_name.clone();
+        updated.space_group_number = previous.space_group_number;
+    }
+    if updated.space_group_number.is_none() && updated.space_group_name.is_empty() {
+        updated.space_group_number = Some(1);
+        updated.space_group_name = "P 1".into();
+    }
+    molecule.set_cell_params(updated);
+}
+
 fn apply_coordinates(
     molecule: &mut MolCoord,
     count: usize,
@@ -88,9 +104,7 @@ fn apply_coordinates(
     } else {
         molecule.set_positions((0..count).map(position))?;
     }
-    if let Some([a, b, c, alpha, beta, gamma]) = cell {
-        molecule.set_cell_params(cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma));
-    }
+    apply_cell(molecule, cell);
     molecule.fire_atoms_moved();
     Ok(())
 }
@@ -762,10 +776,11 @@ mod playback_tests {
                     assert_eq!(molecule.atoms_moved_generation(), generation + 1);
                     assert_eq!(molecule.cell_params().is_some(), cell.is_some());
                     if let Some([a, b, c, alpha, beta, gamma]) = cell {
-                        assert_eq!(
-                            molecule.cell_params(),
-                            Some(&cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma))
-                        );
+                        let mut expected =
+                            cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma);
+                        expected.space_group_number = Some(1);
+                        expected.space_group_name = "P 1".into();
+                        assert_eq!(molecule.cell_params(), Some(&expected));
                     }
                 }
             }
@@ -855,7 +870,9 @@ mod playback_tests {
                     sum.scale(1. / (end - start + 1) as f64)
                 });
                 let mut molecule = molecule(3);
-                let old_cell = cuemol_core::CellParams::new(10., 11., 12., 90., 90., 90.);
+                let mut old_cell = cuemol_core::CellParams::new(10., 11., 12., 90., 90., 90.);
+                old_cell.space_group_number = Some(19);
+                old_cell.space_group_name = "P 21 21 21".into();
                 molecule.set_cell_params(old_cell.clone());
                 let before = molecule.clone();
                 trajectory.apply_frame(&mut molecule, index).unwrap();
@@ -870,7 +887,10 @@ mod playback_tests {
                 }
                 let expected_cell = cells[index]
                     .map(|[a, b, c, alpha, beta, gamma]| {
-                        cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma)
+                        let mut cell = cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma);
+                        cell.space_group_number = old_cell.space_group_number;
+                        cell.space_group_name = old_cell.space_group_name.clone();
+                        cell
                     })
                     .unwrap_or(old_cell);
                 assert_eq!(molecule.cell_params(), Some(&expected_cell));

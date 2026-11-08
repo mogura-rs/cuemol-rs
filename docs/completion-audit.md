@@ -14,7 +14,7 @@ correctness for every input or platform combination.
 | Area | Completion criterion | State |
 | --- | --- | --- |
 | Indexed browser trajectories | Reject malformed lengths/counts, stop cancelled reads, preserve later operations and history, and clarify direct-file averaging behavior | Investigating |
-| Shared trajectory readers | Bound work and allocations for malformed headers and preserve valid coordinate/cell results | Pending |
+| Shared trajectory readers | Bound work and allocations for malformed headers and preserve valid coordinate/cell results | Complete; 447 shared checks and 10 focused browser checks passed |
 | Imported surface rendering | Measure repeated parsing and retained binary/text storage; preserve geometry, edits and scene round trips after any change | Pending |
 | Concurrent frontend work | Check superseded frames, scene changes, failure recovery and ownership of busy state | Pending |
 | Documentation and requirements | Reconcile current implementation, historical evidence and remaining platform limits | Pending |
@@ -51,3 +51,64 @@ All 28 focused browser checks pass after rebuilding the WASM module, including
 the eight new regressions and existing loader, Action, rendering and Agent
 cancellation checks. This result does not close the later full-suite and
 distribution requirements.
+
+## Shared trajectory readers
+
+Three bounded regressions reproduced capacity-overflow panics in the public XDR
+float, double and compressed-coordinate readers. Count arithmetic and the
+available payload are now checked before reserving coordinate storage. The
+compressed path also bounds the claimed atoms by the available bitstream, and
+mixed-integer decoding uses a stack buffer instead of allocating for each atom.
+DCD reads records into a reusable buffer as bytes arrive, without allocating
+the size claimed by a truncated record. The eager readers no longer allocate
+an identity selection or copy every complete frame when no selection is given.
+TRR and NetCDF decode arrays with one type dispatch per array.
+
+`scripts/benchmark-trajectory-readers.py` generates deterministic inputs and
+compares two builds of `trajectory_reader_bench`. The following measurements
+use 200,000 atoms and 16 frames, three fresh processes per build, alternating
+build order, and two parses per process. Times are medians of the second parse;
+RSS is the median process peak, including input and retained output. Loading
+files and hashing outputs are outside the timed parse. All coordinate-bit and
+cell-bit hashes match for full frames and for a reordered selection containing
+a duplicate atom, with every other frame skipped.
+
+| Format, full frames | Parse before → after (ms) | Peak RSS before → after (MiB) |
+| --- | ---: | ---: |
+| DCD | 4.45 → 3.55 | 77.63 → 76.19 |
+| XTC | 66.67 → 37.52 | 45.97 → 42.09 |
+| XTC 2023 | 66.52 → 36.83 | 45.97 → 42.09 |
+| TRR float | 11.09 → 1.32 | 79.13 → 75.28 |
+| TRR double | 11.42 → 1.82 | 115.75 → 111.91 |
+| AMBER NetCDF | 16.00 → 1.19 | 79.13 → 75.28 |
+
+The first five formats use the unchanged reader implementation at `e9b1af6`
+as the baseline. NetCDF was measured separately after those changes, while its
+own parser remained unchanged; it does not call the modified DCD/XDR paths.
+This avoids attributing an unrelated change to the NetCDF result. Small
+selected outputs show RSS variation up to about 0.1 MiB in either direction.
+These inputs do not establish a speedup for every trajectory.
+
+Truncated inputs claiming two million atoms, but containing only a small
+header and partial record, previously peaked at 16.9–47.5 MiB. The same cases
+now peak at 1.59–1.64 MiB and fail in less than 0.01 ms. No out-of-memory
+experiment was needed. The shared core and MD suites pass with the reference
+fixtures and QIF declarations present. Bulk-reader tests also preserve signed
+zero, subnormal and NaN payload bits and the specified double-to-float rounding.
+Raw measurements and before/after failure logs are in
+`.cache/final-sweep/readers`.
+
+The mixed-format browser check also reproduced a separate cell-metadata bug:
+updating coordinates replaced the cell with geometry alone, dropping the space
+group. `getExtData('CrystalInfo')` then returned `null`. All four shared update
+paths now preserve an existing group and use P1 when no group is set, matching
+the default of the reference `CrystalInfo` extension. This covers initial
+trajectory loading, direct frames, averaged frames and browser frame delivery.
+It does not claim the reference trajectory player updates cell dimensions in
+the same way; its coordinate readers retain box data separately. Native tests
+cover P1 initialization, preservation of group 19 and averaged/block-selected
+playback, including failed reads that leave the previous frame intact.
+The browser check now passes on WebGL and WebGPU with four concatenated blocks
+(XTC, single/double TRR and NetCDF), checking all positions and cell dimensions
+at all 12 frames before and after embedded QSC restoration. The complete shared
+core/MD run passes 447 tests; the focused browser run passes ten tests.

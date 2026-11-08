@@ -640,9 +640,7 @@ impl GuiTrajectoryData {
             ));
         }
         molecule.set_positions(positions)?;
-        if let Some([a, b, c, alpha, beta, gamma]) = cell {
-            molecule.set_cell_params(cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma));
-        }
+        trajectory_io::apply_cell(molecule, cell);
         molecule.fire_atoms_moved();
         self.current_frame = index;
         Ok(())
@@ -8157,9 +8155,7 @@ impl DesktopAppState {
         for (atom, position) in molecule.atoms_mut().iter_mut().zip(&first_frame) {
             atom.position = *position;
         }
-        if let Some([a, b, c, alpha, beta, gamma]) = cell {
-            molecule.set_cell_params(cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma));
-        }
+        trajectory_io::apply_cell(&mut molecule, cell);
         molecule.fire_atoms_moved();
 
         let object_name = setup.object_name.trim().to_string();

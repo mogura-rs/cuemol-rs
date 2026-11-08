@@ -194,7 +194,7 @@ pub fn read_trr_bytes_with_options(input: &[u8], options: &TrrReadOptions) -> Re
     let mut xdr = XdrInStream::new(input);
     let mut block = None;
     let mut file_atom_count = None;
-    let mut atom_indices = Vec::new();
+    let atom_indices = options.atom_indices.as_deref();
     let mut frame_index = 0_usize;
 
     while let Some(magic) = xdr.read_i32_optional()? {
@@ -235,16 +235,12 @@ pub fn read_trr_bytes_with_options(input: &[u8], options: &TrrReadOptions) -> Re
             }
         } else {
             file_atom_count = Some(natoms);
-            atom_indices = options
-                .atom_indices
-                .clone()
-                .unwrap_or_else(|| (0..natoms).collect());
-            if atom_indices.iter().any(|&index| index >= natoms) {
+            if atom_indices.is_some_and(|indices| indices.iter().any(|&index| index >= natoms)) {
                 return Err(CueMolError::invalid_argument(
                     "TRR atom selection index out of range",
                 ));
             }
-            block = Some(TrajBlock::new(atom_indices.len()));
+            block = Some(TrajBlock::new(atom_indices.map_or(natoms, <[usize]>::len)));
         }
 
         // These obsolete blocks occur before the box in the TRR layout.
@@ -273,15 +269,8 @@ pub fn read_trr_bytes_with_options(input: &[u8], options: &TrrReadOptions) -> Re
 
         if frame_index.is_multiple_of(options.skip_no) {
             if let Some(coordinates) = coordinates {
-                let mut selected = Vec::with_capacity(atom_indices.len() * 3);
-                for &atom_index in &atom_indices {
-                    let offset = atom_index * 3;
-                    selected.extend(
-                        coordinates[offset..offset + 3]
-                            .iter()
-                            .map(|value| value * 10.0),
-                    );
-                }
+                let selected =
+                    crate::trajectory::select_scaled_coordinates(coordinates, atom_indices, 10.0)?;
                 block
                     .as_mut()
                     .expect("TRR block initialized")

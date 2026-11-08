@@ -51,6 +51,65 @@ function dcd(frames, atoms = 3) {
   return Buffer.concat(parts);
 }
 
+function trr(frames, double) {
+  const parts = [];
+  for (let frame = 0; frame < frames; frame++) {
+    const width = double ? 8 : 4;
+    const bytes = Buffer.alloc(76 + 20 * width);
+    bytes.writeInt32BE(1993);
+    bytes.writeInt32BE(13, 4);
+    bytes.writeInt32BE(12, 8);
+    bytes.write('GMX_trn_file\0', 12);
+    [0, 0, 9 * width, 0, 0, 0, 0, 9 * width, 0, 0, 3, frame, 0]
+      .forEach((value, index) => bytes.writeInt32BE(value, 24 + index * 4));
+    const values = [frame, 0, 3 + frame, 0, 0, 0, 4, 0, 0, 0, 5,
+      ...Array.from({length: 9}, (_, index) => (index + frame) / 4)];
+    values.forEach((value, index) => double
+      ? bytes.writeDoubleBE(value, 76 + index * width)
+      : bytes.writeFloatBE(value, 76 + index * width));
+    parts.push(bytes);
+  }
+  return Buffer.concat(parts);
+}
+
+function netcdf(frames) {
+  const parts = [Buffer.from('CDF\x01')];
+  const ints = (...values) => {
+    const bytes = Buffer.alloc(values.length * 4);
+    values.forEach((value, index) => bytes.writeUInt32BE(value, index * 4));
+    parts.push(bytes);
+  };
+  const name = value => {
+    ints(value.length);
+    parts.push(Buffer.from(value), Buffer.alloc((-value.length >>> 0) % 4));
+  };
+  ints(frames, 10, 3);
+  for (const [label, size] of [['frame', 0], ['atom', 3], ['spatial', 3]]) {
+    name(label); ints(size);
+  }
+  ints(12, 1); name('Conventions'); ints(2, 5); parts.push(Buffer.from('AMBER\0\0\0'));
+  ints(11, 3);
+  const offsets = [];
+  for (const [label, dimensions, size, offset] of [
+    ['coordinates', [0, 1, 2], 36, 0], ['cell_lengths', [0, 2], 12, 36],
+    ['cell_angles', [0, 2], 12, 48],
+  ]) {
+    name(label); ints(dimensions.length, ...dimensions, 0, 0, 5, size);
+    const position = Buffer.alloc(4);
+    offsets.push([position, offset]); parts.push(position);
+  }
+  const length = parts.reduce((sum, part) => sum + part.length, 0);
+  for (const [position, offset] of offsets) position.writeUInt32BE(length + offset);
+  for (let frame = 0; frame < frames; frame++) {
+    const bytes = Buffer.alloc(60);
+    [...Array.from({length: 9}, (_, index) => (index + frame) / 4),
+      30 + frame, 40, 50, 90, 90, 90]
+      .forEach((value, index) => bytes.writeFloatBE(value, index * 4));
+    parts.push(bytes);
+  }
+  return Buffer.concat(parts);
+}
+
 async function ready(page, atoms, backend) {
   await page.route('https://data.rcsb.org/graphql', route => route.fulfill({
     status: 503, headers: {'access-control-allow-origin': '*'}, body: '',
@@ -83,6 +142,49 @@ async function holdFrame(page, name, offset) {
 }
 
 for (const backend of ['webgl', 'webgpu']) {
+test(`mixed binary trajectories ${backend} preserve coordinates and cells through scene restoration`, async ({page}) => {
+  const state = await ready(page, 3, backend);
+  let object = state.scene.objects[0].id;
+  for (const [name, bytes] of [['small.xtc', xtc(3)], ['single.trr', trr(3, false)],
+    ['double.trr', trr(3, true)], ['amber.nc', netcdf(3)]]) {
+    await load(page, name, bytes);
+    expect((await page.evaluate(() => window.cuemol.status())).message).toContain('Indexed 3 frames');
+  }
+  const snapshot = async frame => {
+    await call(page, 'set_frame', {objId: object, frame});
+    const result = await call(page, 'execute_script', {source: `
+      var o = cuemol.getObject(${object}), c = o.getExtData('CrystalInfo');
+      print(JSON.stringify({positions: [1,2,3].map(function(i) {
+        var a = o.getAtomByID(i); if (!a) return null;
+        var p = a.pos; return [p.x,p.y,p.z];
+      }), cell: c ? [c.a,c.b,c.c,c.alpha,c.beta,c.gamma] : null}));`});
+    expect(result.message).toMatch(/^\{/);
+    return JSON.parse(JSON.parse(result.message).log.trim());
+  };
+  const before = [];
+  for (let frame = 0; frame < 12; frame++) before.push(await snapshot(frame));
+  for (let frame = 0; frame < 3; frame++) {
+    expect(before[frame].positions[0]).toEqual([frame * 2.5, 0, 0]);
+    expect(before[frame].cell).toEqual([10, 10, 10, 90, 90, 90]);
+    for (const offset of [3, 6]) {
+      expect(before[offset + frame].positions[0]).toEqual([frame * 2.5, (frame + 1) * 2.5, (frame + 2) * 2.5]);
+      expect(before[offset + frame].cell).toEqual([30 + frame * 10, 40, 50, 90, 90, 90]);
+    }
+    expect(before[9 + frame].positions[0]).toEqual([frame / 4, (frame + 1) / 4, (frame + 2) / 4]);
+    expect(before[9 + frame].cell).toEqual([30 + frame, 40, 50, 90, 90, 90]);
+  }
+  const pending = page.waitForEvent('download');
+  await call(page, 'save_scene', {path: 'mixed.qsc', embedAll: true, version: 'QDF1', compress: 'gzip', base64: true});
+  const stream = await (await pending).createReadStream(), chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => !!window.cuemol), {timeout: 60000}).toBe(true);
+  await load(page, 'mixed.qsc', Buffer.concat(chunks));
+  object = (await page.evaluate(() => window.cuemol.status())).scene.objects[0].id;
+  expect(JSON.parse((await call(page, 'list_trajectories')).message).trajectories[0].frames).toBe(12);
+  for (let frame = 11; frame >= 0; frame--) expect(await snapshot(frame)).toEqual(before[frame]);
+});
+
 test(`overflowing XTC lengths ${backend} terminate without repeated indexing or history changes`, async ({page}) => {
   const original = await ready(page, 10, backend);
   await call(page, 'rename_node', {nodeType: 'object', nodeId: original.scene.objects[0].id, name: 'renamed'});
