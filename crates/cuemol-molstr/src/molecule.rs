@@ -1108,10 +1108,20 @@ impl MolCoord {
                 chain, sindex
             )));
         }
+        let name = name.into();
+        let value = value.into();
+        if self
+            .residue_props
+            .get(&key)
+            .and_then(|props| props.get(&name))
+            == Some(&value)
+        {
+            return Ok(());
+        }
         Arc::make_mut(&mut self.residue_props)
             .entry(key)
             .or_default()
-            .insert(name.into(), value.into());
+            .insert(name, value);
         Ok(())
     }
 
@@ -1157,6 +1167,13 @@ impl MolCoord {
     ) -> Result<bool> {
         let (res_id, ins_code) = parse_residue_index(sindex)?;
         let key = ResidueKey::new(chain, res_id, ins_code);
+        if self
+            .residue_props
+            .get(&key)
+            .is_none_or(|props| !props.contains_key(name) && !props.is_empty())
+        {
+            return Ok(false);
+        }
         let Some(props) = Arc::make_mut(&mut self.residue_props).get_mut(&key) else {
             return Ok(false);
         };
@@ -1569,8 +1586,14 @@ impl MolCoord {
             })
             .collect::<Vec<_>>();
 
-        for atom in Arc::make_mut(&mut self.atoms) {
-            atom.int_props.remove("base_pair");
+        if self
+            .atoms
+            .iter()
+            .any(|atom| atom.int_props.contains_key("base_pair"))
+        {
+            for atom in Arc::make_mut(&mut self.atoms) {
+                atom.int_props.remove("base_pair");
+            }
         }
 
         const EDGE_NAMES: [&str; 8] = ["N1", "N2", "O6", "N6", "N3", "N4", "O2", "O4"];
@@ -2849,5 +2872,35 @@ mod tests {
         assert_eq!(original.atoms()[1].b_factor, 99.0);
         assert_eq!(original.bonds(), snapshot.bonds());
         assert_eq!(original.residue_props(), snapshot.residue_props());
+    }
+
+    #[test]
+    fn unchanged_molecular_edits_preserve_shared_snapshot_storage() {
+        let mut molecule = MolCoord::with_atoms(vec![atom(1, "A", 1, "CA", 0.)]);
+        molecule
+            .set_residue_prop_str("A", "1", "tag", "kept")
+            .unwrap();
+        let snapshot = molecule.clone();
+        assert_eq!(molecule.calc_base_pair(3.7, 30.), 0);
+        assert_eq!(molecule, snapshot);
+        assert!(Arc::ptr_eq(&molecule.atoms, &snapshot.atoms));
+        assert!(!molecule
+            .remove_residue_prop_str("missing", "1", "tag")
+            .unwrap());
+        assert!(!molecule
+            .remove_residue_prop_str("A", "1", "missing")
+            .unwrap());
+        molecule
+            .set_residue_prop_str("A", "1", "tag", "kept")
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &molecule.residue_props,
+            &snapshot.residue_props
+        ));
+        molecule.atoms_mut()[0].set_int_prop("base_pair", 2);
+        let stale = molecule.clone();
+        assert_eq!(molecule.calc_base_pair(3.7, 30.), 0);
+        assert_eq!(molecule, snapshot);
+        assert_eq!(stale.atoms()[0].int_prop("base_pair"), Some(2));
     }
 }

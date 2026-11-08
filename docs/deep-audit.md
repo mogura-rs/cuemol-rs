@@ -12,7 +12,7 @@ requests remain outside tests under the repository instructions.
 
 | Area | Required checks | Current evidence |
 | --- | --- | --- |
-| Large molecules | Load, topology, secondary structure, base pairs, edits, serialization and unchanged snapshots | Indexed topology and residue-property lookup pass the comparisons below; base-pair and repeated-edit work remains open. |
+| Large molecules | Load, topology, secondary structure, base pairs, edits, serialization and unchanged snapshots | Indexed topology, residue-property lookup and unchanged-edit snapshots pass the comparisons below; large nucleic-acid pairing remains open. |
 | Long trajectories | Indexed reads, random seek, averaging, selection, append, playback, Undo/Redo and bounded retention | Open. |
 | Maps and surfaces | Large grids, repeated replacement, cancellation, failed inputs, geometry and memory retention | Open. |
 | Input boundaries | Truncated, malformed and non-finite inputs; failed loads preserve the existing scene | Open. |
@@ -77,3 +77,29 @@ uv run --no-project python scripts/benchmark-molecular-structure.py \
   --samples 3 --iterations 2 \
   --output .cache/deep-audit/paired.json
 ```
+
+## Unchanged edits and snapshot retention
+
+Recalculating base pairs on a protein with no base-pair annotations previously
+detached the entire shared atom array. Removing an absent residue property or
+setting its existing value also detached the residue-property map. Keeping Undo
+snapshots alive therefore retained unnecessary copies even though the molecule
+was unchanged. A regression first reproduced the atom-storage detachment before
+the fix. These operations now preserve shared storage unless a value actually
+changes; stale base-pair annotations are still removed without modifying older
+snapshots.
+
+The edit probe loads 6VXX (23,694 atoms), retains ten successive molecular
+snapshots, recalculates base pairs and attempts an absent-property removal at
+each step. Three fresh processes per version alternate order. Median peak RSS
+falls from 109.9 to 24.0 MiB and the ten-operation time from 47.4 to 31.4 ms.
+Every retained snapshot and the final molecule serialize identically to the
+initial state. RSS includes input loading and the equality checks, while the
+time covers only the snapshot/edit loop. These measurements compare against
+the already optimized topology build, isolating this additional change.
+
+All 269 molecular checks pass after the change, with the same explicit optional
+oracle limits described above. The raw comparison is
+`.cache/deep-audit/noop-edits/paired.json`; the portable probe is built with
+`cargo build --release --locked -p cuemol-molstr --example molecular_edit_bench`
+and accepts an input PDB and a positive snapshot count.
