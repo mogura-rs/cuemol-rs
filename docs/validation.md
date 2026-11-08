@@ -1,5 +1,94 @@
 # Validation evidence
 
+## Five-platform application validation at 74d1825
+
+The clean application build `74d18258d630c752d3d864b0170db90566426711`
+passes all five native jobs of
+[Release validation](https://github.com/mogura-rs/cuemol-rs/actions/runs/42449904394).
+The subsequent documentation update does not change application code or those
+native artifact identities. The read-only reference remains `794fe4ac` (3.0.0.554).
+
+| Native target | Packaged GUI and OS input | Client size |
+| --- | --- | --- |
+| Linux x86-64 | Passed | 1024 x 768 |
+| Linux ARM64 | Passed | 1024 x 768 |
+| macOS Intel | Passed on the Intel runner | 1024 x 768 |
+| macOS Apple silicon | Passed | 944 x 561 |
+| Windows x86-64 | Passed | 944 x 608 |
+
+Each job verifies Python source installation, CLI/Python helpers, Umbreon, APBS,
+PDB2PQR, FFmpeg, POV-Ray, OIDN, and installer/self-upgrade fixtures before packaging.
+The packaged-window checks cover rotation, zoom, slab, centering, font families
+and styles, Python helpers, console input/completion/history, external clipboard,
+shell shortcuts, Inspector drafts/resets/axes and selection building. All five
+result files report success. The Windows and Apple-silicon captures were inspected.
+This hosted macOS evidence is separate from the deferred physical screen/input
+permission check on the user's other Mac.
+
+The seven native archives consist of five CLI packages and two macOS app bundles.
+They consume the same Release browser artifact. `scripts/prepare-release.py`
+requires the full platform set, verifies clean source identities and native
+binary hashes, checks each macOS app against its CLI binary, verifies the shared
+browser manifest, and prepares the eighth browser archive and `SHA256SUMS`.
+Validation outputs belong under `.cache/release-74d1825`; generated archives and
+screenshots remain ignored. This workflow uses `publish=false`, so it does not
+create a new version tag or public native release.
+
+[CI](https://github.com/mogura-rs/cuemol-rs/actions/runs/42449904445) and
+[Pages deployment](https://github.com/mogura-rs/cuemol-rs/actions/runs/42451179701)
+passed at the same source revision. The exact counts and public browser checks
+are recorded in the follow-up section below. Separate CI/Release builds can
+carry different embedded build timestamps; native packages are compared against
+their own shared Release manifest rather than assuming cross-run byte identity.
+
+## Release validation follow-up
+
+The initial Actions run for `eddc449` passed 1,849 shared checks and 388 native
+UI/model checks. Its browser jobs passed 394 cases; the remaining CMYK oracle
+requires the optional sibling reference profile and was skipped in Actions.
+The earlier local run with that profile passed all 395 cases. The four optional
+external-tool/network tests and the CPU movie-output test also passed explicitly
+on the current application source. The movie test no longer requires a GPU, so
+its obsolete adapter-related ignore annotation was removed; all six tests in
+that integration suite passed after the change.
+
+The same run passed both Linux packaged-window checks and the Intel macOS check.
+Windows and Apple-silicon macOS reached the packaged GUI stage after their
+command, Python, bundled-tool and installer checks, but the startup fixture
+remained empty. The GUI and MCP endpoint were
+already running. On the smaller desktop, egui constrained the initial dialog
+area and shifted its buttons 22 pixels left; the test clicked Cancel instead
+of OK. The probe now accounts for that offset and captures startup or early
+failure pixels. A temporary headless diagnostic verified pointer acceptance at
+five layouts, including the 944 x 608 Windows and 944 x 561 macOS client sizes.
+The actual packaged Linux application then passed the complete OS-input suite
+at 944 x 608, including the selection pane's required scrolling. No runtime
+application change was needed for this failure.
+
+One browser shard completed in 19 minutes in Release, while the same shard hit
+the normal CI job's 20-minute deadline. The job limit is now 25 minutes and each
+test's timing is logged. Browser checks are a separate reusable workflow: after
+one shared WASM build, Release runs its five native builds and four browser
+shards concurrently. Publication still requires both groups to succeed, and
+the complete archive/source/checksum gate is unchanged. This removes the serial
+browser wait from native build startup without reducing test coverage.
+
+The diagnostic logs and small-window captures are retained under
+`.cache/current-audit` and `.cache/release-eddc449`. Failed or cancelled runs
+remain diagnostic evidence and are not counted as successful releases.
+
+The follow-up `74d1825` CI run passed 1,850 shared checks and 388 native UI/model
+checks, with four external cases ignored in the shared run. All four browser
+shards passed: 394 cases succeeded and only the optional reference ICC case was
+skipped. Reference-dependent native oracles may return early when their fixtures
+are absent in CI; their executed local comparisons are recorded below.
+Pages deployed that tested source. Direct retrieval verified all 45
+public asset hashes and an identical manifest to the CI artifact. Five checks
+against the actual Pages URL passed WebGL/WebGPU script history, lighting, OIDN
+darkness and coverage alpha, and the missing CMYK oracle using the local reference
+profile. These frontend suites overlap and are not summed into a unique-test
+count. The final native distribution matrix is recorded separately above.
+
 ## GI lighting reuse and dark-image denoising
 
 The GI gather now prepares its lights, environment transform and ray origin once
@@ -66,7 +155,7 @@ Generated scenes, per-process logs, hashes, before/after records and screenshots
 are retained under `.cache/gi-current`; test logs are in `.cache/current-audit`.
 No absolute machine path or generated benchmark artifact is tracked.
 
-## Intel macOS distribution through Rosetta
+## Local f7f5829 Intel macOS distribution through Rosetta
 
 The clean application revision `f7f5829` now also builds for
 `x86_64-apple-darwin`. The optimized cross-build on Apple silicon completed in
@@ -98,9 +187,9 @@ The complete-matrix release gate and publication state remain unchanged.
 Evidence is in `.cache/current-audit/*f7f5829*intel*`,
 `.cache/current-audit/intel-embedded-f7f5829.json` and the distribution manifest.
 
-## Current application and distribution verification
+## Local f7f5829 application and distribution verification
 
-The current application revision is `f7f5829`. Native Linux x86-64,
+At this local checkpoint, the application revision was `f7f5829`. Native Linux x86-64,
 Apple-silicon macOS, Intel macOS and embedded browser builds all report that
 clean commit. Intel execution uses Rosetta as described above.
 The following test/documentation update does not change application sources.
