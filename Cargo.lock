@@ -1683,10 +1683,8 @@ dependencies = [
 name = "cuemol-molanl"
 version = "0.1.0"
 dependencies = [
- "cc",
  "cuemol-core",
  "cuemol-molstr",
- "wasm-bindgen",
 ]
 
 [[package]]

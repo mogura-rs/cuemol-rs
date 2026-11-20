@@ -35,7 +35,7 @@ shutil.copy2(binary, package / binary.name)
 (package / 'build-info.json').write_text(json.dumps(info, indent=2) + '\n')
 shutil.copytree(tools, package / 'cuemol-tools')
 licenses = package / 'cuemol-tools/licenses'
-shutil.copy2(root / 'crates/cuemol-molanl/vendor/usalign/LICENSE', licenses / 'USalign.txt')
+shutil.copy2(root / 'licenses/USalign.txt', licenses / 'USalign.txt')
 shutil.copy2(root / 'crates/cuemol-gfx/vendor/lcms2/LICENSE', licenses / 'LittleCMS.txt')
 for name in ('winit.txt', 'smaa.txt', 'molstar.txt', 'xegtao.txt', 'phosphor.txt'):
     shutil.copy2(root / 'licenses' / name, licenses / name)

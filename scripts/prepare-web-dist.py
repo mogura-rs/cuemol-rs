@@ -14,7 +14,6 @@ REQUIRED = (
     'pkg/source-build.json',
     'pkg/logo.png', 'index.html', 'kernels.js', 'oidn.js', 'movie.js', 'recent.js', 'image-export.js', 'input.js', 'loader.js', 'loader-worker.js', 'pkg/cuemol_web.js',
     'pkg/cuemol_web_bg.wasm', 'pkg/cuemol_web_loader.js', 'pkg/cuemol_web_loader_bg.wasm',
-    'pkg/kernels/usalign.js', 'pkg/kernels/usalign.wasm',
     'pkg/kernels/lcms.js', 'pkg/kernels/lcms.wasm',
     'pkg/kernels/surface.js', 'pkg/kernels/surface.wasm',
     'pkg/oidn/oidn.js', 'pkg/oidn/rt_hdr_calb_cnrm.tza',

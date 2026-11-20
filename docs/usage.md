@@ -1055,8 +1055,8 @@ the browser. The Rust integrator does not promise pixel identity with Embree.
 
 ### Bundled tools
 
-USalign is compiled from the vendored reference implementation; its source
-and license are retained. Release tool bundles contain APBS, PDB2PQR, FFmpeg,
+USalign uses a Rust port of the monomer TM-align algorithm. Its upstream
+revision and license are recorded in `licenses/USalign.txt`. Release tool bundles contain APBS, PDB2PQR, FFmpeg,
 POV-Ray and the Intel OIDN runtime, including a private PDB2PQR runtime. They do
 not require a system Python install.
 Tool lookup checks configured paths, `CUEMOL_TOOLS_DIR`, the binary/application
@@ -1170,8 +1170,8 @@ handles, and scene downloads interleave them with QSC fragments as browser Blobs
 ### Native and browser differences
 
 The browser cannot access arbitrary native paths or spawn external
-tools. USalign uses the same vendored calculation kernel as the native application,
-compiled into a companion WebAssembly module. LSQ and SSM remain shared Rust code.
+tools. Native and browser applications share the Rust implementations of USalign,
+LSQ and SSM.
 ICC soft proofing uses the embedded LittleCMS engine on both targets. Open an
 ICC/ICM file in the browser to activate it; the profile is retained in browser
 storage. OIDN runs through WebGPU with a bundled neural-network model; it requires

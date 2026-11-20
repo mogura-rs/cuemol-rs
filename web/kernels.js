@@ -1,9 +1,8 @@
-import createUsalign from './pkg/kernels/usalign.js';
 import createLcms from './pkg/kernels/lcms.js';
 import createSurface from './pkg/kernels/surface.js';
 
 export async function initKernels() {
-  const [module, cms, ses] = await Promise.all([createUsalign(), createLcms(), createSurface()]);
+  const [cms, ses] = await Promise.all([createLcms(), createSurface()]);
   globalThis.cuemolKernels = {
     surface(xyzr, density, probe, backend) {
       const data = ses._malloc(xyzr.byteLength), error = ses._malloc(512);
@@ -49,36 +48,6 @@ export async function initKernels() {
         } finally { cms._free(output); }
       }
       return values.join('\n');
-    },
-    usalign(moving, movingNames, reference, referenceNames, pivot) {
-      const pointers = [];
-      const allocate = bytes => {
-        const pointer = module._malloc(bytes);
-        if (!pointer) throw new Error('USalign allocation failed');
-        pointers.push(pointer);
-        return pointer;
-      };
-      const copy = array => {
-        const pointer = allocate(array.byteLength);
-        module.HEAPU8.set(new Uint8Array(array.buffer, array.byteOffset, array.byteLength), pointer);
-        return pointer;
-      };
-      try {
-        const mx = copy(moving), mn = copy(movingNames);
-        const rx = copy(reference), rn = copy(referenceNames);
-        const atom = copy(new TextEncoder().encode(pivot + '\0'));
-        const matrix = allocate(96), scores = allocate(48), error = allocate(512);
-        module.HEAPU8[error] = 0;
-        const status = module._cuemol_usalign(mx, mn, moving.length / 3,
-          rx, rn, reference.length / 3, atom, matrix, scores, error, 512);
-        if (status) throw new Error(module.UTF8ToString(error) || 'USalign failed');
-        const output = new Float64Array(18);
-        output.set(module.HEAPF64.subarray(matrix / 8, matrix / 8 + 12));
-        output.set(module.HEAPF64.subarray(scores / 8, scores / 8 + 6), 12);
-        return output;
-      } finally {
-        for (const pointer of pointers) module._free(pointer);
-      }
     },
   };
 }

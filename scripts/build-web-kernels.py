@@ -59,11 +59,7 @@ def main():
     args = parser.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     emxx = compiler()
-    sources = ROOT / "crates/cuemol-molanl/vendor"
-    build_kernel("usalign", sources, [sources / "USalignImpl.cpp", sources / "usalign_bridge.cpp"],
-                 ["-std=c++17", "-fexceptions", "-sDISABLE_EXCEPTION_CATCHING=0"],
-                 ["_cuemol_usalign"], ["HEAPU8", "HEAPF64", "UTF8ToString"], args.out_dir, emxx)
-    shutil.copyfile(sources / "usalign/LICENSE", args.out_dir / "USalign-LICENSE")
+    shutil.copyfile(ROOT / "licenses/USalign.txt", args.out_dir / "USalign-LICENSE")
     sources = ROOT / "crates/cuemol-gfx/vendor"
     build_kernel("lcms", sources, [*sorted((sources / "lcms2/src").glob("*.c")), sources / "cms_bridge.c"],
                  ["-x", "c", "-std=c99", "-I" + str(sources / "lcms2/include")],

@@ -65,7 +65,7 @@ jobs:
             '.commit == $commit and .repository == $repo' web/build-info.json
           test -s web/index.html
           test -s web/pkg/cuemol_web_bg.wasm
-          test -s web/pkg/kernels/usalign.wasm
+          test -s web/pkg/cuemol_web_loader_bg.wasm
           test -s web/pkg/oidn/rt_hdr_calb_cnrm.tza
       - uses: actions/upload-pages-artifact@v3
         if: steps.source.outputs.deploy == 'true'
