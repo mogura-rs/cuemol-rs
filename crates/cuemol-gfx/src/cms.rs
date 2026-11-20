@@ -4,6 +4,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "cms_golden.rs"]
+mod golden;
 #[path = "cms_platform.rs"]
 mod platform;
 
@@ -240,7 +243,7 @@ mod tests {
     use super::*;
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn srgb_profile() -> Vec<u8> {
+    pub(super) fn srgb_profile() -> Vec<u8> {
         use std::ffi::c_void;
         unsafe extern "C" {
             fn cmsCreate_sRGBProfile() -> *mut c_void;

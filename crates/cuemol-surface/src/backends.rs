@@ -181,13 +181,46 @@ pub(crate) fn direct_surface_kernel(
     })
 }
 
+/// Kernel mesh: interleaved position/normal vertices, triangles, backend id, owner atom indices.
+pub(crate) type KernelMesh = (Vec<f64>, Vec<u32>, u32, Vec<u32>);
+
 #[cfg(not(target_arch = "wasm32"))]
-fn kernel(
-    xyzr: &[f64],
-    density: f64,
-    probe: f64,
-    backend: u32,
-) -> Result<(Vec<f64>, Vec<u32>, u32, Vec<u32>)> {
+pub(crate) fn kernel(xyzr: &[f64], density: f64, probe: f64, backend: u32) -> Result<KernelMesh> {
+    let (vertices, triangles, used, mut owners) = match backend {
+        3..=5 => edtsurf_kernel(xyzr, density, probe, backend - 3)?,
+        6 => meshms_kernel(xyzr, density, probe)?,
+        2 => ball_kernel(xyzr, density, probe)?,
+        _ => match meshms_kernel(xyzr, 1.18 / density.sqrt(), probe) {
+            Ok(mesh) => mesh,
+            Err(_) => ball_kernel(xyzr, density, probe)?,
+        },
+    };
+    if vertices.iter().any(|v| !v.is_finite()) {
+        return Err(CueMolError::invalid_argument(
+            "Surface contains a non-finite vertex",
+        ));
+    }
+    owners.resize(vertices.len() / 6, u32::MAX);
+    Ok((vertices, triangles, used, owners))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn edtsurf_kernel(xyzr: &[f64], scale: f64, probe: f64, surface_type: u32) -> Result<KernelMesh> {
+    native_kernel(xyzr, scale, probe, 3 + surface_type)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn meshms_kernel(xyzr: &[f64], mesh_size: f64, probe: f64) -> Result<KernelMesh> {
+    native_kernel(xyzr, mesh_size, probe, 6)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ball_kernel(xyzr: &[f64], density: f64, probe: f64) -> Result<KernelMesh> {
+    native_kernel(xyzr, density, probe, 2)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_kernel(xyzr: &[f64], density: f64, probe: f64, backend: u32) -> Result<KernelMesh> {
     use std::ffi::{c_char, c_void, CStr};
     unsafe extern "C" {
         fn cuemol_surface_build(

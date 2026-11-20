@@ -21,62 +21,8 @@ pub fn superpose_usalign(
     pivot: &str,
 ) -> Result<UsAlignResult> {
     let automatic = pivot.is_empty() || pivot.eq_ignore_ascii_case("auto");
-    let extract = |mol: &MolCoord, sel: &Selector| -> Result<(Vec<f64>, Vec<u8>)> {
-        let mut residues = BTreeMap::new();
-        for atom in mol.atoms() {
-            let entry = residues
-                .entry((atom.chain_id.as_str(), atom.res_id, atom.ins_code))
-                .or_insert((false, false));
-            entry.0 |= atom.name == "CA";
-            entry.1 |= matches!(atom.name.as_str(), "C3'" | "C4'");
-        }
-        let mut seen = BTreeSet::new();
-        let mut xyz = Vec::new();
-        let mut names = Vec::new();
-        for atom in mol.atoms() {
-            if !matches!(atom.alt_loc, None | Some(' ') | Some('A'))
-                || !sel.matches_in_molecule(atom, mol)
-            {
-                continue;
-            }
-            let key = (atom.chain_id.as_str(), atom.res_id, atom.ins_code);
-            let (has_ca, has_sugar) = residues[&key];
-            let nucleic = TopparManager::is_nucl_acid(&atom.res_name) || (!has_ca && has_sugar);
-            let atom_name = if automatic {
-                if nucleic {
-                    "C3'"
-                } else {
-                    "CA"
-                }
-            } else {
-                pivot
-            };
-            if atom.name != atom_name || !seen.insert(key) {
-                continue;
-            }
-            if ![atom.position.x, atom.position.y, atom.position.z]
-                .iter()
-                .all(|v| v.is_finite())
-            {
-                return Err(CueMolError::invalid_argument("non-finite atom position"));
-            }
-            xyz.extend([atom.position.x, atom.position.y, atom.position.z]);
-            let mut name = [b' '; 4];
-            let bytes = atom.res_name.as_bytes();
-            let count = bytes.len().min(3);
-            name[3 - count..3].copy_from_slice(&bytes[..count]);
-            name[3] = u8::from(nucleic);
-            names.extend(name);
-        }
-        if xyz.len() < 9 || xyz.len() / 3 > i32::MAX as usize {
-            return Err(CueMolError::invalid_argument(
-                "US-align needs at least three selected pivot residues",
-            ));
-        }
-        Ok((xyz, names))
-    };
-    let (rx, rn) = extract(reference, reference_selection)?;
-    let (mx, mn) = extract(moving, moving_selection)?;
+    let (rx, rn) = pivot_arrays(reference, reference_selection, pivot)?;
+    let (mx, mn) = pivot_arrays(moving, moving_selection, pivot)?;
     let (matrix, scores) = align_arrays(&mx, &mn, &rx, &rn, if automatic { "C3'" } else { pivot })?;
     let mut transform = Matrix4::IDENTITY;
     for row in 0..3 {
@@ -95,8 +41,69 @@ pub fn superpose_usalign(
     })
 }
 
+/// Pivot coordinates and residue name/nucleic-flag records for US-align.
+pub(crate) fn pivot_arrays(
+    mol: &MolCoord,
+    sel: &Selector,
+    pivot: &str,
+) -> Result<(Vec<f64>, Vec<u8>)> {
+    let automatic = pivot.is_empty() || pivot.eq_ignore_ascii_case("auto");
+    let mut residues = BTreeMap::new();
+    for atom in mol.atoms() {
+        let entry = residues
+            .entry((atom.chain_id.as_str(), atom.res_id, atom.ins_code))
+            .or_insert((false, false));
+        entry.0 |= atom.name == "CA";
+        entry.1 |= matches!(atom.name.as_str(), "C3'" | "C4'");
+    }
+    let mut seen = BTreeSet::new();
+    let mut xyz = Vec::new();
+    let mut names = Vec::new();
+    for atom in mol.atoms() {
+        if !matches!(atom.alt_loc, None | Some(' ') | Some('A'))
+            || !sel.matches_in_molecule(atom, mol)
+        {
+            continue;
+        }
+        let key = (atom.chain_id.as_str(), atom.res_id, atom.ins_code);
+        let (has_ca, has_sugar) = residues[&key];
+        let nucleic = TopparManager::is_nucl_acid(&atom.res_name) || (!has_ca && has_sugar);
+        let atom_name = if automatic {
+            if nucleic {
+                "C3'"
+            } else {
+                "CA"
+            }
+        } else {
+            pivot
+        };
+        if atom.name != atom_name || !seen.insert(key) {
+            continue;
+        }
+        if ![atom.position.x, atom.position.y, atom.position.z]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Err(CueMolError::invalid_argument("non-finite atom position"));
+        }
+        xyz.extend([atom.position.x, atom.position.y, atom.position.z]);
+        let mut name = [b' '; 4];
+        let bytes = atom.res_name.as_bytes();
+        let count = bytes.len().min(3);
+        name[3 - count..3].copy_from_slice(&bytes[..count]);
+        name[3] = u8::from(nucleic);
+        names.extend(name);
+    }
+    if xyz.len() < 9 || xyz.len() / 3 > i32::MAX as usize {
+        return Err(CueMolError::invalid_argument(
+            "US-align needs at least three selected pivot residues",
+        ));
+    }
+    Ok((xyz, names))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
-fn align_arrays(
+pub(crate) fn align_arrays(
     mx: &[f64],
     mn: &[u8],
     rx: &[f64],

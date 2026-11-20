@@ -13,6 +13,8 @@ pub mod backends;
 pub mod boundary;
 mod direct_surface;
 pub mod dist_field;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod golden_tests;
 pub mod grid_surface;
 pub mod hole_surface;
 pub mod msms;

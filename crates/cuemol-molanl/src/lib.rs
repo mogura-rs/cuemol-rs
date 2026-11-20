@@ -1,4 +1,6 @@
 mod usalign;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod usalign_golden;
 use cuemol_core::{CueMolError, Matrix4, Result, Uid, Vector4};
 use cuemol_molstr::mol_undo::{
     MolBondEditInfo, MolMergeEditInfo, MolUndoManager, ResiduePropsEdit, ResidueRelabelEdit,
