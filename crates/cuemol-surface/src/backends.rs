@@ -182,15 +182,29 @@ pub(crate) fn direct_surface_kernel(
 }
 
 /// Kernel mesh: interleaved position/normal vertices, triangles, backend id, owner atom indices.
-pub(crate) type KernelMesh = (Vec<f64>, Vec<u32>, u32, Vec<u32>);
+pub type KernelMesh = (Vec<f64>, Vec<u32>, u32, Vec<u32>);
 
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn kernel(xyzr: &[f64], density: f64, probe: f64, backend: u32) -> Result<KernelMesh> {
+/// Builds a packed MeshMS (1, 6), BALL (2), or EDTSurf (3–5) mesh.
+pub fn kernel(xyzr: &[f64], density: f64, probe: f64, backend: u32) -> Result<KernelMesh> {
+    if xyzr.is_empty()
+        || !xyzr.len().is_multiple_of(4)
+        || !density.is_finite()
+        || density <= 0.0
+        || !probe.is_finite()
+        || probe < 0.0
+        || xyzr
+            .chunks_exact(4)
+            .any(|a| a.iter().any(|v| !v.is_finite()) || a[3] <= 0.0)
+    {
+        return Err(CueMolError::invalid_argument(
+            "invalid surface coordinates, radii, probe, or density",
+        ));
+    }
     let (vertices, triangles, used, mut owners) = match backend {
-        3..=5 => edtsurf_kernel(xyzr, density, probe, backend - 3)?,
-        6 => meshms_kernel(xyzr, density, probe)?,
+        3..=5 => crate::edtsurf::edtsurf_mesh(xyzr, density, probe, backend - 3)?,
+        6 => crate::meshms::surface_kernel(xyzr, density, probe)?,
         2 => ball_kernel(xyzr, density, probe)?,
-        _ => match meshms_kernel(xyzr, 1.18 / density.sqrt(), probe) {
+        _ => match crate::meshms::surface_kernel(xyzr, 1.18 / density.sqrt(), probe) {
             Ok(mesh) => mesh,
             Err(_) => ball_kernel(xyzr, density, probe)?,
         },
@@ -204,127 +218,22 @@ pub(crate) fn kernel(xyzr: &[f64], density: f64, probe: f64, backend: u32) -> Re
     Ok((vertices, triangles, used, owners))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn edtsurf_kernel(xyzr: &[f64], scale: f64, probe: f64, surface_type: u32) -> Result<KernelMesh> {
-    native_kernel(xyzr, scale, probe, 3 + surface_type)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn meshms_kernel(xyzr: &[f64], mesh_size: f64, probe: f64) -> Result<KernelMesh> {
-    native_kernel(xyzr, mesh_size, probe, 6)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn ball_kernel(xyzr: &[f64], density: f64, probe: f64) -> Result<KernelMesh> {
-    native_kernel(xyzr, density, probe, 2)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn native_kernel(xyzr: &[f64], density: f64, probe: f64, backend: u32) -> Result<KernelMesh> {
-    use std::ffi::{c_char, c_void, CStr};
-    unsafe extern "C" {
-        fn cuemol_surface_build(
-            xyzr: *const f64,
-            count: u32,
-            density: f64,
-            probe: f64,
-            backend: u32,
-            error: *mut c_char,
-            error_length: u32,
-        ) -> *mut c_void;
-        fn cuemol_surface_destroy(surface: *mut c_void);
-        fn cuemol_surface_owners(surface: *const c_void) -> *const u32;
-        fn cuemol_surface_vertex_count(surface: *const c_void) -> u32;
-        fn cuemol_surface_triangle_count(surface: *const c_void) -> u32;
-        fn cuemol_surface_backend(surface: *const c_void) -> u32;
-        fn cuemol_surface_vertices(surface: *const c_void) -> *const f64;
-        fn cuemol_surface_triangles(surface: *const c_void) -> *const u32;
-    }
-    struct Handle(*mut c_void);
-    impl Drop for Handle {
-        fn drop(&mut self) {
-            unsafe {
-                cuemol_surface_destroy(self.0);
-            }
-        }
-    }
-    let count = u32::try_from(xyzr.len() / 4)
-        .map_err(|_| CueMolError::invalid_argument("too many SES atoms"))?;
-    let mut error = [0; 512];
-    let raw = unsafe {
-        cuemol_surface_build(
-            xyzr.as_ptr(),
-            count,
-            density,
-            probe,
-            backend,
-            error.as_mut_ptr(),
-            error.len() as u32,
-        )
-    };
-    if raw.is_null() {
-        return Err(CueMolError::invalid_argument(
-            unsafe { CStr::from_ptr(error.as_ptr()) }.to_string_lossy(),
-        ));
-    }
-    let handle = Handle(raw);
-    unsafe {
-        let vertices = cuemol_surface_vertex_count(handle.0) as usize;
-        let triangles = cuemol_surface_triangle_count(handle.0) as usize;
-        Ok((
-            std::slice::from_raw_parts(cuemol_surface_vertices(handle.0), vertices * 6).to_vec(),
-            std::slice::from_raw_parts(cuemol_surface_triangles(handle.0), triangles * 3).to_vec(),
-            cuemol_surface_backend(handle.0),
-            std::slice::from_raw_parts(cuemol_surface_owners(handle.0), vertices).to_vec(),
-        ))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn kernel(
-    xyzr: &[f64],
-    density: f64,
-    probe: f64,
-    backend: u32,
-) -> Result<(Vec<f64>, Vec<u32>, u32, Vec<u32>)> {
-    use wasm_bindgen::prelude::*;
-    #[wasm_bindgen]
-    extern "C" {
-        #[wasm_bindgen(js_namespace = cuemolKernels, js_name = surface, catch)]
-        fn surface(
-            xyzr: &[f64],
-            density: f64,
-            probe: f64,
-            backend: u32,
-        ) -> std::result::Result<js_sys::Array, JsValue>;
-    }
-    let result = surface(xyzr, density, probe, backend)
-        .map_err(|e| CueMolError::invalid_argument(format!("SES generation failed: {e:?}")))?;
-    let vertices = result
-        .get(0)
-        .dyn_into::<js_sys::Float64Array>()
-        .map_err(|_| CueMolError::invalid_argument("invalid SES vertices"))?
-        .to_vec();
-    let triangles = result
-        .get(1)
-        .dyn_into::<js_sys::Uint32Array>()
-        .map_err(|_| CueMolError::invalid_argument("invalid SES triangles"))?
-        .to_vec();
-    Ok((
-        vertices,
-        triangles,
-        result.get(2).as_f64().unwrap_or(0.) as u32,
-        result
-            .get(3)
-            .dyn_into::<js_sys::Uint32Array>()
-            .map_err(|_| CueMolError::invalid_argument("invalid surface atom ids"))?
-            .to_vec(),
-    ))
+    let (vertices, faces) =
+        crate::ball::ball_surface(xyzr, density, probe).map_err(CueMolError::invalid_argument)?;
+    Ok((vertices, faces, 2, Vec::new()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn oversized_mesh_subdivision_returns_an_error() {
+        let atoms = [0.0, 0.0, 0.0, 1.7, 2.0, 0.0, 0.0, 1.5];
+        assert!(kernel(&atoms, 1e-12, 1.4, 6).is_err());
+        assert!(kernel(&atoms, 1e24, 1.4, 2).is_err());
+    }
+
     #[test]
     fn analytic_backends_reproduce_a_sphere_and_validate_inputs() {
         let radius = 1.7;

@@ -1637,11 +1637,9 @@ dependencies = [
 name = "cuemol-gfx"
 version = "0.1.0"
 dependencies = [
- "cc",
  "cuemol-core",
  "libloading 0.8.9",
  "serde",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -1769,14 +1767,11 @@ dependencies = [
 name = "cuemol-surface"
 version = "0.1.0"
 dependencies = [
- "cc",
  "cuemol-core",
  "cuemol-gfx",
  "cuemol-molstr",
  "cuemol-qsys",
- "js-sys",
  "lyon",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -1823,9 +1818,11 @@ dependencies = [
  "cuemol-desktop-core",
  "cuemol-gfx",
  "cuemol-mdtools",
+ "cuemol-molanl",
  "cuemol-molstr",
  "cuemol-qsys",
  "cuemol-render",
+ "cuemol-surface",
  "cuemol-ui",
  "eframe",
  "getrandom 0.2.17",

@@ -1172,7 +1172,7 @@ handles, and scene downloads interleave them with QSC fragments as browser Blobs
 The browser cannot access arbitrary native paths or spawn external
 tools. Native and browser applications share the Rust implementations of USalign,
 LSQ and SSM.
-ICC soft proofing uses the embedded LittleCMS engine on both targets. Open an
+ICC soft proofing uses the shared Rust port of LittleCMS on both targets. Open an
 ICC/ICM file in the browser to activate it; the profile is retained in browser
 storage. OIDN runs through WebGPU with a bundled neural-network model; it requires
 WebGPU even when the interactive viewport uses WebGL2. Bilateral and A-trous

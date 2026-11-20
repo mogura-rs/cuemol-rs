@@ -56,26 +56,6 @@ fn profiles() -> Vec<(&'static str, Option<Vec<u8>>)> {
     ]
 }
 
-/// Records the fixtures; run with LittleCMS still linked.
-#[test]
-#[ignore]
-fn record_cms_golden() {
-    std::fs::create_dir_all(golden_dir()).unwrap();
-    std::fs::write(
-        golden_dir().join("srgb_lcms.icc"),
-        super::tests::srgb_profile(),
-    )
-    .unwrap();
-    for (name, profile) in profiles() {
-        let profile = profile.expect("profile");
-        std::fs::write(
-            golden_dir().join(format!("cms_{name}.txt")),
-            render(&profile),
-        )
-        .unwrap();
-    }
-}
-
 #[test]
 fn soft_proofing_matches_golden() {
     for (name, profile) in profiles() {
@@ -104,6 +84,24 @@ fn soft_proofing_matches_golden() {
                     std::str::from_utf8(ac).unwrap()
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn floating_point_curve_matrix_and_clut_match_littlecms() {
+    let inputs = [0x103050, 0x8000cc, 0x888888, 0xffffff];
+    let perceptual = [0x090a10, 0x2c1553, 0x39362a, 0xe0cc99];
+    for intent in 0..4 {
+        let mut proof = CmsXform::new();
+        proof.set_icc_intent(intent);
+        proof
+            .load_icc_bytes(include_bytes!("../tests/golden/rgb_mpe.icc"))
+            .unwrap();
+        let expected = if intent == 0 { perceptual } else { inputs };
+        for (input, expected) in inputs.into_iter().zip(expected) {
+            assert_eq!(proof.do_xform(input), expected);
+            assert!(proof.is_in_gamut(input));
         }
     }
 }

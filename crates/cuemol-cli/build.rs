@@ -73,7 +73,9 @@ fn collect_assets(root: &Path, directory: &Path, names: &mut BTreeSet<String>) {
         let kind = entry.file_type().unwrap();
         assert!(!kind.is_symlink(), "Browser assets must not be symlinks");
         if kind.is_dir() {
-            collect_assets(root, &entry.path(), names);
+            if entry.path() != root.join("pkg/kernels") {
+                collect_assets(root, &entry.path(), names);
+            }
         } else if kind.is_file() {
             names.insert(
                 entry
@@ -135,7 +137,8 @@ fn main() {
         assets.extend(
             [
                 "index.html",
-                "kernels.js",
+                "recent.js",
+                "image-export.js",
                 "oidn.js",
                 "movie.js",
                 "input.js",

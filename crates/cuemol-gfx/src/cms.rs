@@ -1,4 +1,4 @@
-use crate::rgba_code;
+use crate::{lcms::SoftProof, rgba_code};
 use cuemol_core::{CueMolError, Result, Vector4};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -7,17 +7,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "cms_golden.rs"]
 mod golden;
-#[path = "cms_platform.rs"]
-mod platform;
 
 struct CmsHandles {
-    raw: usize,
+    proof: SoftProof,
     colors: Mutex<BTreeMap<u32, u32>>,
-}
-impl Drop for CmsHandles {
-    fn drop(&mut self) {
-        platform::destroy(self.raw);
-    }
 }
 
 #[derive(Clone)]
@@ -25,7 +18,6 @@ pub struct CmsXform {
     handles: Option<Arc<CmsHandles>>,
     enabled: bool,
     intent: i32,
-    info: String,
 }
 impl fmt::Debug for CmsXform {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -33,7 +25,7 @@ impl fmt::Debug for CmsXform {
             .field("profile_loaded", &self.is_prof_ok())
             .field("enabled", &self.enabled)
             .field("intent", &self.intent)
-            .field("info", &self.info)
+            .field("info", &self.info())
             .finish()
     }
 }
@@ -48,7 +40,6 @@ impl CmsXform {
             handles: None,
             enabled: true,
             intent: 0,
-            info: String::new(),
         }
     }
     pub fn load_icc_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
@@ -71,17 +62,16 @@ impl CmsXform {
         if bytes.len() < 128 || bytes.len() > u32::MAX as usize {
             return Err(CueMolError::invalid_argument("invalid ICC profile size"));
         }
-        let (raw, info) = platform::create(bytes, self.intent as u32)?;
+        let proof = SoftProof::new(bytes, self.intent as u32)
+            .ok_or_else(|| CueMolError::invalid_argument("LittleCMS rejected the ICC profile"))?;
         self.handles = Some(Arc::new(CmsHandles {
-            raw,
+            proof,
             colors: Mutex::new(BTreeMap::new()),
         }));
-        self.info = info;
         Ok(())
     }
     pub fn reset(&mut self) {
         self.handles = None;
-        self.info.clear();
     }
     pub fn is_prof_ok(&self) -> bool {
         self.handles.is_some()
@@ -102,7 +92,7 @@ impl CmsXform {
         self.intent = intent.clamp(0, 3);
     }
     pub fn info(&self) -> &str {
-        &self.info
+        self.handles.as_ref().map_or("", |h| h.proof.info())
     }
     pub fn get_info(&self) -> &str {
         self.info()
@@ -116,7 +106,7 @@ impl CmsXform {
         let transformed = if let Some(value) = colors.get(&rgb) {
             *value
         } else {
-            let value = platform::color(handles.raw, rgb, false);
+            let value = handles.proof.color(rgb);
             if colors.len() >= 4096 {
                 colors.clear();
             }
@@ -129,8 +119,7 @@ impl CmsXform {
         let Some(handles) = self.handles.as_ref().filter(|_| self.enabled) else {
             return true;
         };
-        let _guard = handles.colors.lock().unwrap();
-        platform::color(handles.raw, code & 0x00ff_ffff, true) != 0
+        handles.proof.in_gamut(code & 0x00ff_ffff)
     }
 }
 
@@ -242,37 +231,10 @@ fn float_color_component(value: f64) -> u8 {
 mod tests {
     use super::*;
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn srgb_profile() -> Vec<u8> {
-        use std::ffi::c_void;
-        unsafe extern "C" {
-            fn cmsCreate_sRGBProfile() -> *mut c_void;
-            fn cmsSaveProfileToMem(
-                profile: *mut c_void,
-                memory: *mut c_void,
-                size: *mut u32,
-            ) -> i32;
-            fn cmsCloseProfile(profile: *mut c_void) -> i32;
-        }
-        unsafe {
-            let profile = cmsCreate_sRGBProfile();
-            assert!(!profile.is_null());
-            let mut size = 0;
-            assert_eq!(
-                cmsSaveProfileToMem(profile, std::ptr::null_mut(), &mut size),
-                1
-            );
-            let mut bytes = vec![0; size as usize];
-            assert_eq!(
-                cmsSaveProfileToMem(profile, bytes.as_mut_ptr().cast(), &mut size),
-                1
-            );
-            cmsCloseProfile(profile);
-            bytes
-        }
+        include_bytes!("../tests/golden/srgb_lcms.icc").to_vec()
     }
     #[test]
-    #[cfg(not(target_arch = "wasm32"))]
     fn embedded_icc_profile_roundtrips_colors_and_rejects_bad_data() {
         let bytes = srgb_profile();
         let mut transform = CmsXform::new();

@@ -21,15 +21,10 @@ jobs:
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
       - uses: actions/cache@v6
         with:
-          path: .cache/emsdk
-          key: emsdk-${{ runner.os }}-${{ hashFiles('scripts/build-web-kernels.py') }}
-      - uses: actions/cache@v6
-        with:
           path: |
             .cache/web-tools
-            .cache/web-kernels
             .cache/oidn-packages
-          key: web-tools-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/prepare-web-tools.py', 'scripts/build-web-kernels.py', 'scripts/bundle-oidn.py', 'crates/cuemol-molanl/vendor/**', 'crates/cuemol-gfx/vendor/**', 'crates/cuemol-surface/vendor/**') }}
+          key: web-tools-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/prepare-web-tools.py', 'scripts/bundle-oidn.py') }}
       - uses: actions/cache@v6
         with:
           path: .cache/ui-fonts

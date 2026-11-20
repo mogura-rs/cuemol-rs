@@ -6,6 +6,7 @@ mod console;
 mod history;
 mod image_export;
 mod input;
+mod kernels;
 mod loading;
 mod morph;
 mod movie;

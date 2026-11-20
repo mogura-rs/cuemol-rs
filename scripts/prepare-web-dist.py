@@ -12,17 +12,15 @@ import subprocess
 ROOT = Path(__file__).resolve().parent.parent
 REQUIRED = (
     'pkg/source-build.json',
-    'pkg/logo.png', 'index.html', 'kernels.js', 'oidn.js', 'movie.js', 'recent.js', 'image-export.js', 'input.js', 'loader.js', 'loader-worker.js', 'pkg/cuemol_web.js',
+    'pkg/logo.png', 'index.html', 'oidn.js', 'movie.js', 'recent.js', 'image-export.js', 'input.js', 'loader.js', 'loader-worker.js', 'pkg/cuemol_web.js',
     'pkg/cuemol_web_bg.wasm', 'pkg/cuemol_web_loader.js', 'pkg/cuemol_web_loader_bg.wasm',
-    'pkg/kernels/lcms.js', 'pkg/kernels/lcms.wasm',
-    'pkg/kernels/surface.js', 'pkg/kernels/surface.wasm',
     'pkg/oidn/oidn.js', 'pkg/oidn/rt_hdr_calb_cnrm.tza',
     'pkg/oidn/OIDN-WebGPU-LICENSE', 'pkg/oidn/OIDN-Weights-LICENSE',
-    'pkg/oidn/SOURCES.json', 'pkg/kernels/BALL-LICENSE',
-    'pkg/kernels/Boost-LICENSE', 'pkg/kernels/MeshMS-SOURCE.json',
-    'pkg/kernels/BALL-SOURCE.json', 'pkg/kernels/LittleCMS-LICENSE',
-    'pkg/kernels/USalign-LICENSE',
-    'pkg/kernels/EDTSurf-LICENSE', 'pkg/kernels/EDTSurf-SOURCE.json',
+    'pkg/oidn/SOURCES.json',
+    'pkg/licenses/USalign.txt', 'pkg/licenses/LittleCMS.txt', 'pkg/licenses/LittleCMS-SOURCE.json',
+    'pkg/licenses/CueMol-LICENSE', 'pkg/licenses/Boost-LICENSE', 'pkg/licenses/BALL-LICENSE',
+    'pkg/licenses/MeshMS-SOURCE.json', 'pkg/licenses/BALL-SOURCE.json',
+    'pkg/licenses/EDTSurf.txt', 'pkg/licenses/EDTSurf-SOURCE.json',
     'pkg/licenses/molstar.txt', 'pkg/licenses/smaa.txt', 'pkg/licenses/xegtao.txt',
     'pkg/licenses/phosphor.txt',
     'pkg/fonts/NotoSansJP-Regular.ttf', 'pkg/fonts/OFL.txt', 'pkg/fonts/SOURCE.json',
@@ -99,9 +97,9 @@ def main():
     if output.exists():
         shutil.rmtree(output)
     output.mkdir(parents=True)
-    for name in ('index.html', 'kernels.js', 'oidn.js', 'movie.js', 'recent.js', 'image-export.js', 'input.js', 'loader.js', 'loader-worker.js'):
+    for name in ('index.html', 'oidn.js', 'movie.js', 'recent.js', 'image-export.js', 'input.js', 'loader.js', 'loader-worker.js'):
         shutil.copy2(source / name, output / name)
-    shutil.copytree(source / 'pkg', output / 'pkg')
+    shutil.copytree(source / 'pkg', output / 'pkg', ignore=shutil.ignore_patterns('kernels'))
     manifest = {
         'commit': revision,
         'dirty': build['dirty'],

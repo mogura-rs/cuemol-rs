@@ -16,6 +16,8 @@ cuemol-desktop-core = { workspace = true, features = ["offscreen"] }
 cuemol-command = { workspace = true, features = ["scripting"] }
 boa_engine = { version = "0.20", features = ["js"] }
 cuemol-mdtools.workspace = true
+cuemol-molanl.workspace = true
+cuemol-surface.workspace = true
 cuemol-molstr.workspace = true
 cuemol-qsys.workspace = true
 cuemol-render.workspace = true

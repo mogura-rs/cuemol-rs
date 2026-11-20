@@ -4,8 +4,7 @@
 <body><canvas id="viewport" aria-label="CueMol3 molecular viewer"></canvas><div id="loading"><img src="./pkg/logo.png" width="128" height="128" alt=""><span>Loading CueMol3…</span></div><input id="files" type="file" multiple><input id="styles" type="file" accept=".xml,.xml.gz,.xml.bz2,.xml.xz" hidden>
 <input id="file-options" type="file" multiple hidden><input id="companion-file" type="file" hidden>
 <script type="module">
-import init, {start, open_file, open_files, open_files_with_options, choose_companion_file, add_morph_files, command, status, agent_turn, agent_cancel, view_input, recent_files_changed, file_picker_error} from './pkg/cuemol_web.js';
-import {initKernels} from './kernels.js';
+import init, {start, surface, usalign, ColorProof, open_file, open_files, open_files_with_options, choose_companion_file, add_morph_files, command, status, agent_turn, agent_cancel, view_input, recent_files_changed, file_picker_error} from './pkg/cuemol_web.js';
 import './oidn.js';
 import './movie.js';
 import './image-export.js';
@@ -23,15 +22,21 @@ globalThis.cuemolChooseMorphFiles=generation=>{
 };
 performance.mark('cuemol-startup');
 try {
-  const [,,, uiFont] = await Promise.all([
+  const [,, uiFont] = await Promise.all([
     init().then(()=>performance.mark('cuemol-runtime-ready')),
     initLoader(),
-    initKernels().then(()=>performance.mark('cuemol-kernels-ready')),
     fetch('./pkg/fonts/NotoSansJP-Regular.ttf').then(async response => {
       if(!response.ok) throw new Error(`Could not load UI font: HTTP ${response.status}`);
       return new Uint8Array(await response.arrayBuffer());
     }),
   ]);
+  globalThis.cuemolKernels = {
+    surface, usalign,
+    cmsCreate: (bytes, intent) => new ColorProof(bytes, intent),
+    cmsDestroy: proof => proof.free(),
+    cmsColor: (proof, rgb, gamut) => proof.color(rgb, gamut),
+    cmsInfo: proof => proof.info(),
+  };
   const recent = initRecentFiles({open: files => open_files(files, false), notify: recent_files_changed, error: file_picker_error, fallback: () => document.getElementById('files').click()});
   loading.querySelector('span').textContent='Starting graphics…';
   document.addEventListener('dragover',e=>{e.preventDefault();e.stopImmediatePropagation();},true);

@@ -1,3 +1,4 @@
+import {readFileSync} from 'node:fs';
 import {test, expect} from '@playwright/test';
 import {acceptFileOptions, load, call} from './support.js';
 import {gzipSync} from 'node:zlib';
@@ -258,19 +259,7 @@ test('cancel button discards queued files and scene changes reject late input', 
 
 test('scene changes cancel pending ICC input before it alters the new scene', async ({page}) => {
   await ready(page);
-  const profile = await page.evaluate(async () => {
-    const {default: create} = await import('./pkg/kernels/lcms.js');
-    const cms = await create();
-    const handle = cms._cmsCreate_sRGBProfile(), size = cms._malloc(4);
-    try {
-      cms._cmsSaveProfileToMem(handle, 0, size);
-      const length = cms.HEAPU32[size / 4], data = cms._malloc(length);
-      try {
-        cms._cmsSaveProfileToMem(handle, data, size);
-        return Array.from(cms.HEAPU8.subarray(data, data + length));
-      } finally { cms._free(data); }
-    } finally { cms._free(size); cms._cmsCloseProfile(handle); }
-  });
+  const profile = readFileSync(new URL('../../crates/cuemol-gfx/tests/golden/srgb_lcms.icc', import.meta.url));
   await page.evaluate(() => {
     const read = File.prototype.arrayBuffer;
     File.prototype.arrayBuffer = async function () {

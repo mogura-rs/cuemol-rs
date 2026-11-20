@@ -9,6 +9,7 @@ pub mod grow_mesh;
 pub mod hittest;
 pub mod jitter;
 pub mod label_cache;
+mod lcms;
 pub mod marching_cubes;
 pub mod material;
 pub mod mesh;

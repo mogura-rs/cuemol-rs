@@ -1575,6 +1575,16 @@ pub(crate) fn align(mov: &Chain, reference: &Chain, atom_name: &str) -> Result<A
     if mov.len() < 3 || reference.len() < 3 {
         return Err("US-align: sequence is too short (<3 residues)".into());
     }
+    // The score and DP matrices hold two doubles and a traceback flag per cell.
+    const MAX_CELLS: usize = 32 * 1024 * 1024;
+    let fits = |w: usize, h: usize| w.checked_mul(h).is_some_and(|n| n <= MAX_CELLS);
+    if !fits(mov.len() + 1, reference.len() + 1)
+        || [mov, reference]
+            .iter()
+            .any(|c| c.mol_score > 0 && !fits(c.len(), c.len()))
+    {
+        return Err("US-align matrix exceeds the memory budget".into());
+    }
     let secx = make_sec(mov, atom_name);
     let secy = make_sec(reference, atom_name);
     let mol_type = mov.mol_score + reference.mol_score;

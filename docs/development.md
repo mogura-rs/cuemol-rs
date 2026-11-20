@@ -2,7 +2,7 @@
 
 [Back to README](../README.md) · [User guide](usage.md) · [Validation](validation.md)
 
-Rust, a C++20 compiler for the vendored numerical kernels, and the platform's
+Rust, the platform build tools, and the platform's
 wgpu/winit system dependencies are required. The default workspace build is headless.
 The published winit crate is resolved through Cargo. A small native input filter
 uses raw X11 button states to discard duplicate wheel-release events.
@@ -33,9 +33,7 @@ cargo run --locked -p cuemol-cli -- tools bundle
 necessary. It builds both the application and a smaller parser-only WASM module;
 the parser worker uses the same readers and lossless transfer types as native
 byte loading. Both modules and the worker scripts belong in browser distributions.
-It also builds the vendored browser kernels with Emscripten, using
-`EMXX`, an installed `em++`, or a pinned SDK installed in the checkout cache.
-The kernel build requires `uv`; compiled kernels and the SDK are cached in CI.
+The main WASM module includes the shared alignment, surface and ICC code.
 `tools bundle` uses `uv` with hashed dependency pins; APBS builds on macOS and
 Linux ARM also need CMake, SuiteSparse, BLAS, and platform compiler libraries.
 The upstream Windows APBS executable is 32-bit and receives its matching
@@ -109,7 +107,7 @@ npm test
 
 The development/test profiles omit debug information. Native release builds
 avoid LTO, while the browser uses a separate size-oriented profile. CI caches
-Cargo, wasm-bindgen, Emscripten, scientific kernels and Chromium. Shared and
+Cargo, wasm-bindgen, browser assets and Chromium. Shared and
 native interface tests run once. Browser tests split across four jobs, each
 using one worker and the same web artifact. The build job also supplies the
 native test server, so browser jobs do not compile Rust. Local runs remain

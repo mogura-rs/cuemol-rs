@@ -10,13 +10,16 @@ use std::rc::{Rc, Weak};
 
 pub mod analytic_ses;
 pub mod backends;
+mod ball;
 pub mod boundary;
 mod direct_surface;
 pub mod dist_field;
+mod edtsurf;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod golden_tests;
 pub mod grid_surface;
 pub mod hole_surface;
+mod meshms;
 pub mod msms;
 pub mod obj;
 pub mod ply;

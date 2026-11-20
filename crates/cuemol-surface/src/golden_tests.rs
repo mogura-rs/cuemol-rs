@@ -80,26 +80,6 @@ fn run(xyzr: &[f64], backend: u32, density: f64) -> KernelOutput {
     kernel(xyzr, density, PROBE, backend).map_err(|e| e.to_string())
 }
 
-fn encode(output: &KernelOutput) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    match output {
-        Err(message) => {
-            bytes.extend(b"CMSE");
-            bytes.extend(message.as_bytes());
-        }
-        Ok((vertices, triangles, used, owners)) => {
-            bytes.extend(b"CMSG");
-            for n in [vertices.len() / 6, triangles.len() / 3, *used as usize] {
-                bytes.extend((n as u32).to_le_bytes());
-            }
-            vertices.iter().for_each(|v| bytes.extend(v.to_le_bytes()));
-            owners.iter().for_each(|v| bytes.extend(v.to_le_bytes()));
-            triangles.iter().for_each(|v| bytes.extend(v.to_le_bytes()));
-        }
-    }
-    bytes
-}
-
 fn decode(bytes: &[u8]) -> KernelOutput {
     let (magic, body) = bytes.split_at(4);
     if magic == b"CMSE" {
@@ -121,46 +101,6 @@ fn decode(bytes: &[u8]) -> KernelOutput {
 
 fn golden_path(case: &str, backend: u32) -> PathBuf {
     golden_dir().join(format!("{case}.b{backend}.bin"))
-}
-
-/// Records the fixtures; run with the native C++ kernels still linked.
-#[test]
-#[ignore]
-fn record_surface_golden() {
-    let dir = golden_dir();
-    std::fs::create_dir_all(&dir).unwrap();
-    let reference = std::env::var_os("CUEMOL2_REF_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
-    let molecule =
-        cuemol_molstr::read_pdb_file(reference.join("tests/test_data/1CRN.pdb")).unwrap();
-    let crn = molecule
-        .atoms()
-        .iter()
-        .filter(|atom| atom.alt_loc.is_none_or(|alt| alt == 'A' || alt == ' '))
-        .take(120)
-        .flat_map(|atom| {
-            [
-                atom.position.x,
-                atom.position.y,
-                atom.position.z,
-                cuemol_molstr::toppar::vdw_radius_for_atom(atom).max(0.1),
-            ]
-        })
-        .map(|v| format!("{:016x}", v.to_bits()))
-        .collect::<Vec<_>>();
-    let text = crn
-        .chunks(4)
-        .map(|c| c.join(" "))
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(dir.join("crn.xyzr"), text + "\n").unwrap();
-    for (name, xyzr) in cases() {
-        for (backend, density) in BACKENDS {
-            let output = run(&xyzr, backend, density);
-            std::fs::write(golden_path(name, backend), encode(&output)).unwrap();
-        }
-    }
 }
 
 /// BALL emits triangles in pointer-hash order, so compare oriented triangles as a set.
@@ -195,7 +135,11 @@ fn compare(label: &str, expected: &KernelOutput, actual: &KernelOutput) {
                 a.0[mismatch.unwrap()]
             );
             assert_eq!(e.3, a.3, "{label}: owners");
-            assert_eq!(canonical(&e.1), canonical(&a.1), "{label}: triangles");
+            if e.2 == 2 {
+                assert_eq!(canonical(&e.1), canonical(&a.1), "{label}: triangles");
+            } else {
+                assert_eq!(e.1, a.1, "{label}: triangles");
+            }
         }
         _ => panic!(
             "{label}: status differs: {:?} vs {:?}",

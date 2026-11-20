@@ -149,18 +149,6 @@ fn build(args: &[String]) -> Result<()> {
                 "run",
                 "--no-project",
                 "python",
-                "scripts/build-web-kernels.py",
-                "--out-dir",
-            ])
-            .arg(out.join("pkg/kernels")),
-    )?;
-    run_command(
-        Command::new("uv")
-            .current_dir(&root)
-            .args([
-                "run",
-                "--no-project",
-                "python",
                 "scripts/bundle-oidn.py",
                 "--web",
                 "--out",
@@ -193,7 +181,6 @@ fn build(args: &[String]) -> Result<()> {
     if out != root.join("web") {
         for name in [
             "index.html",
-            "kernels.js",
             "oidn.js",
             "movie.js",
             "recent.js",
@@ -210,9 +197,9 @@ fn build(args: &[String]) -> Result<()> {
         .map_err(|e| e.to_string())?;
     let licenses = out.join("pkg/licenses");
     std::fs::create_dir_all(&licenses).map_err(|e| e.to_string())?;
-    for name in ["smaa.txt", "molstar.txt", "xegtao.txt", "phosphor.txt"] {
-        std::fs::copy(root.join("licenses").join(name), licenses.join(name))
-            .map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(root.join("licenses")).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        std::fs::copy(entry.path(), licenses.join(entry.file_name())).map_err(|e| e.to_string())?;
     }
     if source != crate::build_support::source_info(&root) {
         return Err(

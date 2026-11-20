@@ -109,7 +109,7 @@ const MAX_COORDINATE: f64 = 1e6;
 /// Aligns packed pivot arrays; returns the 3x4 row-major transform of the
 /// moving structure and (TM-score by reference, TM-score by moving, RMSD,
 /// aligned residues, sequence identity, nucleic flag).
-pub(crate) fn align_arrays(
+pub fn align_arrays(
     mx: &[f64],
     mn: &[u8],
     rx: &[f64],
@@ -128,7 +128,12 @@ pub(crate) fn align_arrays(
             "US-align coordinates must be finite and within 1e6 Å",
         ));
     }
-    if mn.len() < mx.len() / 3 * 4 || rn.len() < rx.len() / 3 * 4 {
+    let valid = |xyz: &[f64], names: &[u8]| {
+        xyz.len().is_multiple_of(3)
+            && names.len().is_multiple_of(4)
+            && xyz.len() / 3 == names.len() / 4
+    };
+    if !valid(mx, mn) || !valid(rx, rn) {
         return Err(CueMolError::invalid_argument(
             "US-align residue records do not match the coordinates",
         ));

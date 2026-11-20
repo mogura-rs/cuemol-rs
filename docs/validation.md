@@ -4442,7 +4442,25 @@ builds plus browser checks had run; other native targets and public installation
 were waiting for authorization. Later public results are recorded separately.
 The README lists implementation boundaries that also limit parity claims.
 
-## Browser numerical kernels
+## Shared Rust numerical kernels
+
+The native and browser applications share the Rust US-align, MeshMS, BALL,
+EDTSurf and ICC proofing implementations. Commit `6e4e3de` records the C/C++
+fixtures. The regression tests compare US-align transforms and scores, surface
+geometry and atom ownership, and ICC proof colors and gamut decisions at all
+four intents. The CMYK comparison requires the CueMol2 GenericCMYK profile.
+The surface tests compare triangle order for MeshMS and EDTSurf. BALL triangles
+are cyclically normalized and sorted, preserving winding and multiplicity.
+
+The original BALL code visits pointer-keyed sets in address-dependent order.
+Across 60 inputs, ten runs of that code produced more than one result for 30
+inputs. The Rust output matched one recorded result for 46 inputs, including
+all 30 stable inputs. An independent C++ build using insertion order for its
+pointer-keyed sets matched the Rust hashes of the interleaved coordinates and
+normals and the oriented triangle lists, or returned the same error, for all
+60 inputs. The inputs included crambin, tRNA and synthetic chains.
+
+## Browser numerical kernels (historical C/C++ baseline)
 
 USalign also runs in the browser through the same vendored C++ kernel used by
 the native application. Five browser tests passed after adding this integration.
@@ -4456,7 +4474,7 @@ profile persistence, proofed image export, and four Generic CMYK colors. The
 CMYK values matched an independent call to the installed LittleCMS library.
 The optional reference profile was present for these checks.
 
-## Analytic molecular surfaces
+## Analytic molecular surfaces (historical C++ baseline)
 
 The bundled MeshMS and BALL calculations run on native and WebAssembly targets.
 A single-sphere regression checks radius, unit normals, and surface area against

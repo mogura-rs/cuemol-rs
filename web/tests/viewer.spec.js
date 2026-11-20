@@ -320,24 +320,14 @@ test('USalign fits rotated browser molecules with the native calculation kernel'
 
 test('ICC profiles load, proof colors, and persist in browser storage',async({page})=>{
   await ready(page);
-  const profile=await page.evaluate(async()=>{
-    const {default:create}=await import('./pkg/kernels/lcms.js');
-    const cms=await create();
-    const handle=cms._cmsCreate_sRGBProfile(), size=cms._malloc(4);
-    try {
-      cms._cmsSaveProfileToMem(handle,0,size);
-      const length=cms.HEAPU32[size/4],data=cms._malloc(length);
-      try {cms._cmsSaveProfileToMem(handle,data,size);return Array.from(cms.HEAPU8.subarray(data,data+length));}
-      finally {cms._free(data);}
-    } finally {cms._free(size);cms._cmsCloseProfile(handle);}
-  });
+  const profile = readFileSync(new URL('../../crates/cuemol-gfx/tests/golden/srgb_lcms.icc', import.meta.url));
   await load(page,'proof.icc',Buffer.from(profile));
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded ICC profile proof.icc');
   const result=await page.evaluate(profile=>{
     const handle=window.cuemolKernels.cmsCreate(new Uint8Array(profile),0);
     try {return {color:window.cuemolKernels.cmsColor(handle,0x4080c0,false),info:window.cuemolKernels.cmsInfo(handle)};}
     finally {window.cuemolKernels.cmsDestroy(handle);}
-  },profile);
+  },Array.from(profile));
   expect(result.info).toContain('sRGB');
   for(const shift of [0,8,16])expect(Math.abs(((result.color>>shift)&255)-((0x4080c0>>shift)&255))).toBeLessThanOrEqual(1);
   await ready(page);await load(page,'ligand.pdb',Buffer.from(structure));

@@ -35,16 +35,10 @@ shutil.copy2(binary, package / binary.name)
 (package / 'build-info.json').write_text(json.dumps(info, indent=2) + '\n')
 shutil.copytree(tools, package / 'cuemol-tools')
 licenses = package / 'cuemol-tools/licenses'
-shutil.copy2(root / 'licenses/USalign.txt', licenses / 'USalign.txt')
-shutil.copy2(root / 'crates/cuemol-gfx/vendor/lcms2/LICENSE', licenses / 'LittleCMS.txt')
-for name in ('winit.txt', 'smaa.txt', 'molstar.txt', 'xegtao.txt', 'phosphor.txt'):
-    shutil.copy2(root / 'licenses' / name, licenses / name)
+for notice in (root / 'licenses').iterdir():
+    shutil.copy2(notice, licenses / notice.name)
 for name in ('LICENSE-MIT', 'LICENSE-APACHE', 'SOURCE.json'):
     shutil.copy2(root / 'vendor/tiny-http' / name, licenses / ('tiny-http-' + name))
-for name in ('CueMol-LICENSE', 'Boost-LICENSE', 'BALL-SOURCE.json', 'meshms/SOURCE.json'):
-    shutil.copy2(root / 'crates/cuemol-surface/vendor' / name, licenses / ('MeshMS-SOURCE.json' if name.startswith('meshms/') else name))
-shutil.copy2(root / 'crates/cuemol-surface/vendor/edtsurf/LICENSE', licenses / 'EDTSurf.txt')
-shutil.copy2(root / 'crates/cuemol-surface/vendor/edtsurf/SOURCE.json', licenses / 'EDTSurf-SOURCE.json')
 if windows:
     output = dist / f'cuemol-{args.target}.zip'
     temporary = output.with_suffix('.tmp')

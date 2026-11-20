@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
-pub use usalign::{superpose_usalign, UsAlignResult};
+pub use usalign::{align_arrays, superpose_usalign, UsAlignResult};
 
 mod lm_minimizer;
 mod ssm;
