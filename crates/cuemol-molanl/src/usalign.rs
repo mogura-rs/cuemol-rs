@@ -103,6 +103,9 @@ pub(crate) fn pivot_arrays(
     Ok((xyz, names))
 }
 
+/// Larger coordinates can overflow the squared distances used by US-align.
+const MAX_COORDINATE: f64 = 1e6;
+
 /// Aligns packed pivot arrays; returns the 3x4 row-major transform of the
 /// moving structure and (TM-score by reference, TM-score by moving, RMSD,
 /// aligned residues, sequence identity, nucleic flag).
@@ -115,6 +118,15 @@ pub(crate) fn align_arrays(
 ) -> Result<([f64; 12], [f64; 6])> {
     if pivot.contains('\0') {
         return Err(CueMolError::invalid_argument("invalid pivot atom"));
+    }
+    if mx
+        .iter()
+        .chain(rx)
+        .any(|v| !v.is_finite() || v.abs() > MAX_COORDINATE)
+    {
+        return Err(CueMolError::invalid_argument(
+            "US-align coordinates must be finite and within 1e6 Å",
+        ));
     }
     if mn.len() < mx.len() / 3 * 4 || rn.len() < rx.len() / 3 * 4 {
         return Err(CueMolError::invalid_argument(
@@ -147,6 +159,36 @@ pub(crate) fn align_arrays(
 mod tests {
     use super::*;
     use cuemol_core::Vector4;
+
+    /// Helix-like pivot trace scaled by `scale`.
+    fn trace(len: usize, scale: f64) -> (Vec<f64>, Vec<u8>) {
+        let xyz = (0..len)
+            .flat_map(|i| {
+                let a = i as f64 * 1.75;
+                [
+                    2.3 * a.cos() * scale,
+                    2.3 * a.sin() * scale,
+                    1.5 * i as f64 * scale,
+                ]
+            })
+            .collect();
+        (xyz, (0..len).flat_map(|_| *b"ALA\0").collect())
+    }
+
+    #[test]
+    fn huge_or_non_finite_coordinates_are_rejected() {
+        let (rx, rn) = trace(30, 1.0);
+        assert!(align_arrays(&rx, &rn, &rx, &rn, "CA").is_ok());
+        for bad in [2e6, 1e200, f64::INFINITY, f64::NAN] {
+            let mut mx = rx.clone();
+            mx[7] = bad;
+            assert!(align_arrays(&mx, &rn, &rx, &rn, "CA").is_err());
+            assert!(align_arrays(&rx, &rn, &mx, &rn, "CA").is_err());
+            let (hx, hn) = trace(30, bad);
+            assert!(align_arrays(&hx, &hn, &rx, &rn, "CA").is_err());
+        }
+    }
+
     #[test]
     fn mixed_pivots_skip_altlocs_and_report_sequence_statistics() {
         let template = cuemol_molstr::read_pdb_str(

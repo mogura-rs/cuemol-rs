@@ -554,6 +554,41 @@ fn parameter_set4final(len: f64, mol_type: i32) -> (f64, f64, f64) {
     (lnorm, d0, d0.clamp(4.5, 8.0))
 }
 
+/// Cutoff that admits three pairs when `d * d` admits fewer.
+///
+/// US-align retries with `(d + 0.5 inc)^2` for inc = 1, 2, ... until three
+/// pairs pass, which never ends for NaN or overflowing distances. The first
+/// passing `inc` is found by bisection instead (the cutoff grows with `inc`
+/// for `d >= 0`); `None` means no `inc` in the original `int` range passes.
+fn relaxed_cutoff(xa: &[Coord], ya: &[Coord], n_ali: usize, d: f64) -> Option<f64> {
+    let mut dis: Vec<f64> = (0..n_ali)
+        .map(|i| dist(&xa[i], &ya[i]))
+        .filter(|v| !v.is_nan())
+        .collect();
+    if dis.len() < 3 {
+        return None;
+    }
+    let third = *dis.select_nth_unstable_by(2, f64::total_cmp).1;
+    let cutoff = |inc: i32| {
+        let dinc = d + inc as f64 * 0.5;
+        dinc * dinc
+    };
+    let passes = |inc: i32| third < cutoff(inc);
+    let (mut fail, mut pass) = (0, i32::MAX);
+    if passes(fail) || !passes(pass) {
+        return None;
+    }
+    while pass - fail > 1 {
+        let mid = fail + (pass - fail) / 2;
+        if passes(mid) {
+            pass = mid;
+        } else {
+            fail = mid;
+        }
+    }
+    Some(cutoff(pass))
+}
+
 /// Collects pairs closer than `d` into `i_ali` and returns their count;
 /// `standard` normalizes the score by `n_ali` instead of `lnorm`.
 fn score_fun8(
@@ -569,35 +604,34 @@ fn score_fun8(
     d0: f64,
     standard: bool,
 ) -> usize {
-    let mut score_sum;
-    let mut d_tmp = d * d;
+    let mut score_sum = 0.0;
+    let d_tmp = d * d;
     let d02 = d0 * d0;
     let score_d8_cut = score_d8 * score_d8;
-    let mut n_cut;
-    let mut inc = 0;
-    loop {
-        n_cut = 0;
-        score_sum = 0.0;
-        for i in 0..n_ali {
-            let di = dist(&xa[i], &ya[i]);
-            if di < d_tmp {
-                i_ali[n_cut] = i;
-                n_cut += 1;
-            }
-            if score_sum_method == 8 {
-                if di <= score_d8_cut {
-                    score_sum += 1.0 / (1.0 + di / d02);
-                }
-            } else {
+    let mut n_cut = 0;
+    for i in 0..n_ali {
+        let di = dist(&xa[i], &ya[i]);
+        if di < d_tmp {
+            i_ali[n_cut] = i;
+            n_cut += 1;
+        }
+        if score_sum_method == 8 {
+            if di <= score_d8_cut {
                 score_sum += 1.0 / (1.0 + di / d02);
             }
-        }
-        if n_cut < 3 && n_ali > 3 {
-            inc += 1;
-            let dinc = d + inc as f64 * 0.5;
-            d_tmp = dinc * dinc;
         } else {
-            break;
+            score_sum += 1.0 / (1.0 + di / d02);
+        }
+    }
+    if n_cut < 3 && n_ali > 3 {
+        if let Some(d_tmp) = relaxed_cutoff(xa, ya, n_ali, d) {
+            n_cut = 0;
+            for i in 0..n_ali {
+                if dist(&xa[i], &ya[i]) < d_tmp {
+                    i_ali[n_cut] = i;
+                    n_cut += 1;
+                }
+            }
         }
     }
     *score1 = if standard {
@@ -785,6 +819,35 @@ impl Work {
         }
     }
 
+    /// Copies the pairs within `max(d002t, third smallest distance)` to
+    /// `r1`/`r2` and returns their count.
+    ///
+    /// US-align retries with `d002t + 0.5` while fewer than three pairs pass.
+    /// The threshold already admits the three closest pairs, so that retry
+    /// could only trigger on NaN distances, where it would never end.
+    fn select_close_pairs(&mut self, dis: &[f64], mut d002t: f64) -> usize {
+        if dis.len() > 2 {
+            let mut sorted = dis.to_vec();
+            let third = *sorted.select_nth_unstable_by(2, f64::total_cmp).1;
+            if d002t < third {
+                d002t = third;
+            }
+        } else if let Some(last) = dis.iter().copied().max_by(f64::total_cmp) {
+            if d002t < last {
+                d002t = last;
+            }
+        }
+        let mut j = 0;
+        for k in 0..dis.len() {
+            if dis[k] <= d002t {
+                self.r1[j] = self.xtm[k];
+                self.r2[j] = self.ytm[k];
+                j += 1;
+            }
+        }
+        j
+    }
+
     /// Computes the score quickly in three iterations (`get_score_fast`).
     fn get_score_fast(
         &mut self,
@@ -825,37 +888,7 @@ impl Work {
             tmscore += 1.0 / (1.0 + di / d02);
         }
 
-        let threshold = |dis: &[f64], mut d002t: f64| {
-            let mut dis_vec = dis.to_vec();
-            dis_vec.sort_by(f64::total_cmp);
-            if dis_vec.len() > 2 {
-                if d002t < dis_vec[2] {
-                    d002t = dis_vec[2];
-                }
-            } else if let Some(&last) = dis_vec.last() {
-                if d002t < last {
-                    d002t = last;
-                }
-            }
-            d002t
-        };
-        let mut d002t = threshold(&dis, d002);
-        let mut j;
-        loop {
-            j = 0;
-            for k in 0..n_ali {
-                if dis[k] <= d002t {
-                    self.r1[j] = self.xtm[k];
-                    self.r2[j] = self.ytm[k];
-                    j += 1;
-                }
-            }
-            if j < 3 && n_ali > 3 {
-                d002t += 0.5;
-            } else {
-                break;
-            }
-        }
+        let j = self.select_close_pairs(&dis, d002);
 
         let tmscore1;
         let tmscore2;
@@ -870,23 +903,7 @@ impl Work {
             }
             tmscore1 = score;
 
-            d002t = threshold(&dis, d002 + 1.0);
-            loop {
-                j = 0;
-                for k in 0..n_ali {
-                    if dis[k] <= d002t {
-                        self.r1[j] = self.xtm[k];
-                        self.r2[j] = self.ytm[k];
-                        j += 1;
-                    }
-                }
-                if j < 3 && n_ali > 3 {
-                    d002t += 0.5;
-                } else {
-                    break;
-                }
-            }
-
+            let j = self.select_close_pairs(&dis, d002 + 1.0);
             kabsch(&self.r1, &self.r2, j, 1, &mut rms, t, u);
             let mut score = 0.0;
             for k in 0..n_ali {
@@ -1400,6 +1417,11 @@ fn find_max_frag(x: &[Coord], len: i32, dcu0: f64) -> (i32, i32) {
         }
 
         if lfr_max < r_min {
+            // Another pass cannot change anything once the cutoff is infinite
+            // (NaN or overflowing distances); US-align would loop forever.
+            if !dcu_cut.is_finite() {
+                break;
+            }
             inc += 1;
             let dinc = pow(1.1, inc as f64) * dcu0;
             dcu_cut = dinc * dinc;
@@ -1774,4 +1796,36 @@ pub(crate) fn align(mov: &Chain, reference: &Chain, atom_name: &str) -> Result<A
         },
         nucleic: mol_type > 0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn helix(len: usize, scale: impl Fn(usize) -> f64) -> Chain {
+        let xyz: Vec<f64> = (0..len)
+            .flat_map(|i| {
+                let a = i as f64 * 1.75;
+                let s = scale(i);
+                [2.3 * a.cos() * s, 2.3 * a.sin() * s, 1.5 * i as f64 * s]
+            })
+            .collect();
+        let names: Vec<u8> = (0..len).flat_map(|_| *b"ALA\0").collect();
+        Chain::from_records(&xyz, &names)
+    }
+
+    /// Overflowing or NaN distances must not hang the cutoff relaxation loops.
+    #[test]
+    fn overflowing_and_nan_coordinates_terminate() {
+        let reference = helix(40, |_| 1.0);
+        for bad in [1e150, 1e200, 1e300, f64::INFINITY, f64::NAN] {
+            for moving in [
+                helix(40, |_| bad),
+                helix(40, |i| if i < 9 { 1.0 } else { bad }),
+            ] {
+                let _ = align(&moving, &reference, " CA ");
+                let _ = align(&reference, &moving, " CA ");
+            }
+        }
+    }
 }
