@@ -186,6 +186,7 @@ test(`console averaging ${backend} preserves existing undo and stops pending rea
   try {
     await consoleInput(page, `set_frame ${object}, 1, averageRadius=1`);
     await expect.poll(() => page.evaluate(() => window.frameGate.held)).toBe(true);
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().ui.rects['Console Stop']?.length)).toBe(4);
     const [a,b,w,h] = await page.evaluate(() => window.cuemol.status().ui.rects['Console Stop']);
     await page.mouse.click(a + w / 2, b + h / 2);
     await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toContain('Console stopped');
